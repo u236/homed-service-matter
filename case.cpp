@@ -73,7 +73,12 @@ void CASESession::start(quint16 localSessionId, quint64 peerNodeId,
     m_sigma1Bytes = encoder.data();
     m_state = State::WaitingSigma2;
 
-    logInfo << "CASE: sending Sigma1, sessionId:" << m_localSessionId;
+    logInfo << "CASE: sending Sigma1, sessionId:" << m_localSessionId
+            << "peerNodeId:" << m_peerNodeId
+            << "fabricId:" << m_fabricId
+            << "ipk:" << m_ipk.toHex()
+            << "rootPubKey:" << m_fabricPublicKey.left(8).toHex() << "..."
+            << "destinationId:" << computeDestinationId().toHex();
     emit sendSigma1(m_sigma1Bytes, m_localSessionId);
 }
 

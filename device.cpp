@@ -21,7 +21,7 @@ void DeviceList::setFabricCredentials(const QByteArray &fabricKey, quint64 rootC
     m_ipk = ipk;
 }
 
-DeviceList::DeviceList(QSettings *config, QObject *parent) : QObject(parent), m_timer(new QTimer(this)), m_rootCAId(0), m_sync(false)
+DeviceList::DeviceList(QSettings *config, QObject *parent) : QObject(parent), m_timer(new QTimer(this)), m_sync(false), m_rootCAId(0)
 {
     QFile file(config->value("device/expose", "/usr/share/homed-common/expose.json").toString());
 

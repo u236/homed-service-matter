@@ -558,9 +558,20 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             break;
                         }
 
-                        logInfo << "AddNOC success";
-                        commission.state = CommissioningState::CommissioningComplete;
-                        continueCommissioning(commission);
+                        logInfo << "AddNOC success, establishing CASE session...";
+
+                        // save device info and start CASE (CommissioningComplete will be sent on CASE)
+                        commission.device->setNetworkAddress(commission.address);
+                        commission.device->setNetworkPort(commission.port);
+                        emit deviceCommissioned(commission.device);
+
+                        connectDevice(commission.device);
+
+                        m_pendingCommissions.remove(commission.localSessionId);
+
+                        if (commission.pase)
+                            commission.pase->deleteLater();
+
                         break;
                     }
 
@@ -791,19 +802,8 @@ void Matter::continueCommissioning(PendingCommission &commission)
 
         case CommissioningState::Done:
         {
-            logInfo << "Device" << commission.device->name() << "commissioned successfully";
-            session->peerNodeId = commission.device->nodeId();
-            session->active = false; // PASE is dead after commissioning
-            emit deviceCommissioned(commission.device);
-
-            // start CASE session for operational communication
-            connectDevice(commission.device);
-
-            m_pendingCommissions.remove(commission.localSessionId);
-
-            if (commission.pase)
-                commission.pase->deleteLater();
-
+            // This state is no longer used — CASE+CommissioningComplete
+            // is handled after AddNOC success via connectDevice/caseEstablished
             break;
         }
 
@@ -1139,9 +1139,25 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
         m_sessions->removeSession(existing->localSessionId);
 
     m_sessions->addSession(session);
-    m_caseDevice->setAvailability(Availability::Online);
 
     logInfo << "CASE session established with" << m_caseDevice->name();
+
+    // send CommissioningComplete on the CASE session (with Timed Invoke)
+    SessionInfo *caseSession = m_sessions->findByLocalId(localSessionId);
+
+    if (caseSession)
+    {
+        logInfo << "Sending CommissioningComplete on CASE session...";
+
+        MatterTLV::Encoder fields;
+        fields.openStructure();
+        fields.closeContainer();
+
+        QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::GeneralCommissioning::Id, Clusters::GeneralCommissioning::Commands::CommissioningComplete), fields);
+        sendEncrypted(caseSession, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+    }
+
+    m_caseDevice->setAvailability(Availability::Online);
 
     m_pendingCASE->deleteLater();
     m_pendingCASE = nullptr;

@@ -5,6 +5,7 @@
 #define STORE_DATABASE_DELAY    20
 
 #include <QMetaEnum>
+#include <QHostAddress>
 #include "endpoint.h"
 
 class EndpointObject : public AbstractEndpointObject
