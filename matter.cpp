@@ -24,6 +24,10 @@ Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), 
     m_caseDevice = nullptr;
     m_caseExchangeId = 0;
 
+    // start message counter from random value to avoid replay detection after restart
+    QByteArray counterBytes = Crypto::randomBytes(4);
+    memcpy(&m_messageCounter, counterBytes.constData(), 4);
+
     if (!m_udp->bind(QHostAddress::Any, m_port))
         logWarning << "Failed to bind UDP port" << m_port;
     else

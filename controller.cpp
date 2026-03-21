@@ -47,8 +47,10 @@ Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, confi
         connect(device.data(), &DeviceObject::endpointUpdated, this, &Controller::endpointUpdated);
 
         // reconnect to known devices via CASE
-        if (device->active())
-            m_matter->connectDevice(device.staticCast <DeviceObject> ().data());
+        DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
+
+        if (!obj->networkAddress().isNull())
+            m_matter->connectDevice(obj);
     }
 }
 
