@@ -739,6 +739,9 @@ QByteArray Matter::generateFabricCert(quint64 fabricId, quint64 nodeId, const QB
 
     QByteArray tlvCert = Crypto::x509DerToMatterTLV(derCert);
     logInfo << "Generated" << (isRCAC ? "RCAC" : "NOC") << derCert.length() << "DER bytes," << tlvCert.length() << "TLV bytes";
+
+    if (!isRCAC)
+        logInfo << "NOC DER hex:" << derCert.toHex();
     return tlvCert;
 }
 

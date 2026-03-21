@@ -382,9 +382,15 @@ QByteArray Crypto::generateX509Cert(quint64 rootCAId, quint64 fabricId, quint64 
     }
     else
     {
-        ext = X509V3_EXT_nconf_nid(nullptr, &ctx, NID_basic_constraints, const_cast <char*> ("critical,CA:FALSE"));
+        // BasicConstraints CA=false: must encode as empty SEQUENCE (0x30 0x00)
+        // to match connectedhomeip's TLV-to-X.509 converter (which omits the default BOOLEAN FALSE)
+        unsigned char bcValue[] = { 0x30, 0x00 };
+        ASN1_OCTET_STRING *bcDer = ASN1_OCTET_STRING_new();
+        ASN1_OCTET_STRING_set(bcDer, bcValue, 2);
+        ext = X509_EXTENSION_create_by_NID(nullptr, NID_basic_constraints, 1, bcDer);
         X509_add_ext(cert, ext, -1);
         X509_EXTENSION_free(ext);
+        ASN1_OCTET_STRING_free(bcDer);
 
         ext = X509V3_EXT_nconf_nid(nullptr, &ctx, NID_key_usage, const_cast <char*> ("critical,digitalSignature"));
     }
@@ -394,7 +400,7 @@ QByteArray Crypto::generateX509Cert(quint64 rootCAId, quint64 fabricId, quint64 
 
     if (!isRCAC)
     {
-        ext = X509V3_EXT_nconf_nid(nullptr, &ctx, NID_ext_key_usage, const_cast <char*> ("serverAuth,clientAuth"));
+        ext = X509V3_EXT_nconf_nid(nullptr, &ctx, NID_ext_key_usage, const_cast <char*> ("critical,serverAuth,clientAuth"));
         X509_add_ext(cert, ext, -1);
         X509_EXTENSION_free(ext);
     }
@@ -577,8 +583,8 @@ QByteArray Crypto::x509DerToMatterTLV(const QByteArray &derCert)
             ASN1_OBJECT *obj = sk_ASN1_OBJECT_value(eku, i);
             int nid = OBJ_obj2nid(obj);
 
-            if (nid == NID_server_auth) tlv.encodeUnsignedInt(-1, 2);
-            else if (nid == NID_client_auth) tlv.encodeUnsignedInt(-1, 1);
+            if (nid == NID_server_auth) tlv.encodeUnsignedInt(-1, 1);
+            else if (nid == NID_client_auth) tlv.encodeUnsignedInt(-1, 2);
         }
 
         tlv.closeContainer();
