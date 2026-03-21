@@ -1,0 +1,104 @@
+#ifndef CASE_H
+#define CASE_H
+
+#include <QObject>
+#include <QTimer>
+#include "crypto.h"
+#include "tlv.h"
+
+/*
+    CASE — Certificate Authenticated Session Establishment (Matter spec 4.13.2)
+
+    Commissioner (initiator) flow:
+    1. Send Sigma1 → destinationId, ephPubKey
+    2. Receive Sigma2 ← responderRandom, responderEphPubKey, encrypted2(NOC, signature)
+    3. Send Sigma3 → encrypted3(NOC, signature)
+    4. Receive StatusReport ← session established
+
+    Key derivation uses ECDH shared secret + transcript hash (running SHA-256 of Sigma messages).
+*/
+
+#define CASE_TIMEOUT 30000
+
+class CASESession : public QObject
+{
+    Q_OBJECT
+
+public:
+
+    enum class State
+    {
+        Idle,
+        WaitingSigma2,
+        WaitingStatusReport,
+        Established,
+        Failed
+    };
+
+    CASESession(QObject *parent);
+
+    void start(quint16 localSessionId, quint64 peerNodeId,
+               const QByteArray &fabricKey, const QByteArray &fabricPublicKey,
+               const QByteArray &operationalKey, const QByteArray &operationalPubKey,
+               quint64 fabricId, quint64 nodeId, quint64 rootCAId,
+               const QByteArray &ipk,
+               const QByteArray &nocTLV, const QByteArray &rcacTLV);
+
+    void handleSigma2(const QByteArray &payload);
+    void handleStatusReport(const QByteArray &payload);
+
+    inline void setLastPeerMessageCounter(quint32 value) { m_lastPeerMessageCounter = value; }
+    inline quint32 lastPeerMessageCounter(void) const { return m_lastPeerMessageCounter; }
+
+    inline State state(void) const { return m_state; }
+    inline quint16 localSessionId(void) const { return m_localSessionId; }
+    inline quint16 peerSessionId(void) const { return m_peerSessionId; }
+
+    inline QByteArray encryptKey(void) const { return m_encryptKey; }
+    inline QByteArray decryptKey(void) const { return m_decryptKey; }
+    inline QByteArray attestationChallenge(void) const { return m_attestationChallenge; }
+
+private:
+
+    State m_state;
+    QTimer *m_timer;
+
+    quint16 m_localSessionId;
+    quint16 m_peerSessionId;
+    quint64 m_peerNodeId;
+    quint64 m_fabricId, m_nodeId, m_rootCAId;
+    quint32 m_lastPeerMessageCounter;
+
+    QByteArray m_fabricKey, m_fabricPublicKey;
+    QByteArray m_operationalKey, m_operationalPubKey;
+    QByteArray m_ipk;
+    QByteArray m_nocTLV, m_rcacTLV;
+
+    QByteArray m_initiatorRandom;
+    QByteArray m_ephPrivKey, m_ephPubKey;
+    QByteArray m_responderEphPubKey;
+    QByteArray m_sharedSecret;
+
+    // transcript hash (running SHA-256 of all Sigma messages)
+    QByteArray m_sigma1Bytes;
+
+    // session keys
+    QByteArray m_encryptKey, m_decryptKey, m_attestationChallenge;
+
+    QByteArray computeDestinationId(void);
+    QByteArray transcriptHash(const QByteArray &data = QByteArray());
+
+private slots:
+
+    void timeout(void);
+
+signals:
+
+    void sendSigma1(const QByteArray &tlvPayload, quint16 localSessionId);
+    void sendSigma3(const QByteArray &tlvPayload);
+    void established(quint16 localSessionId, quint16 peerSessionId);
+    void failed(const QString &reason);
+
+};
+
+#endif

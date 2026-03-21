@@ -10,6 +10,7 @@
 #include "mrp.h"
 #include "mdns.h"
 #include "pase.h"
+#include "case.h"
 #include "session.h"
 #include "interaction.h"
 
@@ -27,6 +28,7 @@ public:
     inline QByteArray ipk(void) { return m_ipk; }
 
     void addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator = false);
+    void connectDevice(DeviceObject *device);
     void sendCommand(DeviceObject *device, quint8 endpointId, const QString &name, const QVariant &value);
     void readAttributes(DeviceObject *device, const QList <AttributePath> &paths);
 
@@ -94,6 +96,15 @@ private:
     QByteArray m_ipk;
     quint64 m_rootCAId;
 
+    QByteArray m_operationalKey;
+    QByteArray m_operationalPubKey;
+    QByteArray m_controllerNOC;
+    QByteArray m_controllerRCAC;
+
+    CASESession *m_pendingCASE;
+    quint16 m_caseExchangeId;
+    DeviceObject *m_caseDevice;
+
     QMap <quint16, PendingCommission> m_pendingCommissions;
 
     void sendRawDatagram(const QByteArray &data, const QHostAddress &address, quint16 port);
@@ -118,6 +129,11 @@ private slots:
     void mrpSendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port);
 
     void mdnsServiceFound(const MatterService &service);
+
+    void caseSendSigma1(const QByteArray &payload, quint16 localSessionId);
+    void caseSendSigma3(const QByteArray &payload);
+    void caseEstablished(quint16 localSessionId, quint16 peerSessionId);
+    void caseFailed(const QString &reason);
 
     void paseSendPBKDFParamRequest(const QByteArray &payload, quint16 localSessionId);
     void paseSendPake1(const QByteArray &payload);

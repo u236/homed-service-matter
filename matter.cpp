@@ -20,6 +20,9 @@ Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), 
     m_searchTimer->setSingleShot(true);
 
     // fabric credentials will be set by Controller after database init
+    m_pendingCASE = nullptr;
+    m_caseDevice = nullptr;
+    m_caseExchangeId = 0;
 
     if (!m_udp->bind(QHostAddress::Any, m_port))
         logWarning << "Failed to bind UDP port" << m_port;
@@ -36,7 +39,70 @@ void Matter::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId,
     ECPoint fabricPub = ECPoint::fromMultiply(ECPoint::generator(), BigNum(m_fabricKey).bn());
     m_fabricPublicKey = fabricPub.toUncompressed();
 
+    // generate controller operational keypair and certs
+    m_operationalKey = Crypto::randomBytes(32);
+    ECPoint opPub = ECPoint::fromMultiply(ECPoint::generator(), BigNum(m_operationalKey).bn());
+    m_operationalPubKey = opPub.toUncompressed();
+
+    m_controllerRCAC = generateFabricCert(m_fabricId, 0, m_fabricPublicKey, true);
+    m_controllerNOC = generateFabricCert(m_fabricId, m_nodeId, m_operationalPubKey, false);
+
     logInfo << "Fabric credentials loaded, rootCAId:" << QString::number(m_rootCAId, 16);
+}
+
+void Matter::connectDevice(DeviceObject *device)
+{
+    if (m_pendingCASE)
+    {
+        logWarning << "CASE session already in progress";
+        return;
+    }
+
+    SessionInfo *existing = m_sessions->findByPeerNodeId(device->nodeId());
+
+    if (existing && existing->active)
+    {
+        logInfo << "Already connected to" << device->name();
+        return;
+    }
+
+    // use the last known address from commissioning or mDNS
+    // for now, use the address from any existing (dead) session
+    QHostAddress address;
+    quint16 port = 5540;
+
+    if (existing)
+    {
+        address = existing->peerAddress;
+        port = existing->peerPort;
+    }
+
+    if (address.isNull())
+    {
+        logWarning << "No address known for" << device->name();
+        return;
+    }
+
+    CASESession *session = new CASESession(this);
+
+    connect(session, &CASESession::sendSigma1, this, &Matter::caseSendSigma1);
+    connect(session, &CASESession::sendSigma3, this, &Matter::caseSendSigma3);
+    connect(session, &CASESession::established, this, &Matter::caseEstablished);
+    connect(session, &CASESession::failed, this, &Matter::caseFailed);
+
+    m_pendingCASE = session;
+    m_caseDevice = device;
+    m_caseExchangeId = m_exchangeCounter++;
+
+    quint16 sessionId = m_sessionCounter++;
+
+    logInfo << "Starting CASE with" << device->name() << "at" << address.toString() << ":" << port;
+
+    session->start(sessionId, device->nodeId(),
+                   m_fabricKey, m_fabricPublicKey,
+                   m_operationalKey, m_operationalPubKey,
+                   m_fabricId, m_nodeId, m_rootCAId,
+                   m_ipk, m_controllerNOC, m_controllerRCAC);
 }
 
 void Matter::addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator)
@@ -241,6 +307,13 @@ void Matter::handleSecureChannel(const MessageHeader &msgHeader, const ProtocolH
                 }
             }
 
+            // check if this is for a CASE session
+            if (m_pendingCASE && protoHeader.exchangeId == m_caseExchangeId)
+            {
+                m_pendingCASE->handleStatusReport(payload);
+                return;
+            }
+
             logInfo << "StatusReport from session" << msgHeader.sessionId;
             break;
         }
@@ -248,6 +321,17 @@ void Matter::handleSecureChannel(const MessageHeader &msgHeader, const ProtocolH
         case SecureChannelOpcode::CASESigma1:
             logInfo << "CASE Sigma1 from" << msgHeader.sourceNodeId;
             break;
+
+        case SecureChannelOpcode::CASESigma2:
+        {
+            if (m_pendingCASE)
+            {
+                m_pendingCASE->setLastPeerMessageCounter(msgHeader.messageCounter);
+                m_pendingCASE->handleSigma2(payload);
+            }
+
+            break;
+        }
 
         case SecureChannelOpcode::MRPStandaloneAck:
             break;
@@ -714,10 +798,13 @@ void Matter::continueCommissioning(PendingCommission &commission)
         case CommissioningState::Done:
         {
             logInfo << "Device" << commission.device->name() << "commissioned successfully";
-            commission.device->setAvailability(Availability::Online);
             session->peerNodeId = commission.device->nodeId();
-            session->active = true;
+            session->active = false; // PASE session is dead after commissioning, CASE needed
             emit deviceCommissioned(commission.device);
+
+            // start CASE session for operational communication
+            connectDevice(commission.device);
+
             m_pendingCommissions.remove(commission.localSessionId);
 
             if (commission.pase)
@@ -1008,6 +1095,95 @@ void Matter::paseFailed(const QString &reason)
     quint16 sessionId = pase->localSessionId();
     m_pendingCommissions.remove(sessionId);
     pase->deleteLater();
+}
+
+// --- CASE signal handlers ---
+
+void Matter::caseSendSigma1(const QByteArray &payload, quint16 localSessionId)
+{
+    Q_UNUSED(localSessionId)
+
+    if (!m_pendingCASE || !m_caseDevice)
+        return;
+
+    SessionInfo *existing = m_sessions->findByPeerNodeId(m_caseDevice->nodeId());
+    QHostAddress address;
+    quint16 port = 5540;
+
+    if (existing)
+    {
+        address = existing->peerAddress;
+        port = existing->peerPort;
+    }
+
+    sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::CASESigma1), static_cast <quint16> (ProtocolId::SecureChannel), payload, m_caseExchangeId, address, port, true);
+}
+
+void Matter::caseSendSigma3(const QByteArray &payload)
+{
+    if (!m_pendingCASE || !m_caseDevice)
+        return;
+
+    SessionInfo *existing = m_sessions->findByPeerNodeId(m_caseDevice->nodeId());
+    QHostAddress address;
+    quint16 port = 5540;
+
+    if (existing)
+    {
+        address = existing->peerAddress;
+        port = existing->peerPort;
+    }
+
+    sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::CASESigma3), static_cast <quint16> (ProtocolId::SecureChannel), payload, m_caseExchangeId, address, port, true, m_pendingCASE->lastPeerMessageCounter());
+}
+
+void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
+{
+    if (!m_pendingCASE || !m_caseDevice)
+        return;
+
+    // register encrypted session
+    SessionInfo session;
+    session.localSessionId = localSessionId;
+    session.peerSessionId = peerSessionId;
+    session.i2rKey = m_pendingCASE->encryptKey();
+    session.r2iKey = m_pendingCASE->decryptKey();
+    session.attestationChallenge = m_pendingCASE->attestationChallenge();
+    session.peerNodeId = m_caseDevice->nodeId();
+    session.localMessageCounter = 0;
+    session.active = true;
+
+    // get address from existing (dead) session
+    SessionInfo *existing = m_sessions->findByPeerNodeId(m_caseDevice->nodeId());
+
+    if (existing)
+    {
+        session.peerAddress = existing->peerAddress;
+        session.peerPort = existing->peerPort;
+        m_sessions->removeSession(existing->localSessionId);
+    }
+
+    m_sessions->addSession(session);
+    m_caseDevice->setAvailability(Availability::Online);
+
+    logInfo << "CASE session established with" << m_caseDevice->name();
+
+    m_pendingCASE->deleteLater();
+    m_pendingCASE = nullptr;
+    m_caseDevice = nullptr;
+}
+
+void Matter::caseFailed(const QString &reason)
+{
+    logWarning << "CASE failed:" << reason;
+
+    if (m_pendingCASE)
+    {
+        m_pendingCASE->deleteLater();
+        m_pendingCASE = nullptr;
+    }
+
+    m_caseDevice = nullptr;
 }
 
 // --- Setup code parsing ---

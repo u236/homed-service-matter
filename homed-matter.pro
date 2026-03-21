@@ -3,6 +3,7 @@ include(../homed-common/homed-endpoint.pri)
 include(../homed-common/homed-parser.pri)
 
 HEADERS += \
+    case.h \
     clusters.h \
     controller.h \
     crypto.h \
@@ -14,10 +15,10 @@ HEADERS += \
     pase.h \
     session.h \
     matter.h \
-
     tlv.h
 
 SOURCES += \
+    case.cpp \
     controller.cpp \
     crypto.cpp \
     device.cpp \
