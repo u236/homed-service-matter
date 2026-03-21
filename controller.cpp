@@ -1,4 +1,5 @@
 #include "controller.h"
+#include "crypto.h"
 #include "pase.h"
 #include "logger.h"
 
@@ -17,6 +18,26 @@ Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, confi
 
     m_devices->setNames(getConfig()->value("mqtt/names", false).toBool());
     m_devices->init();
+
+    // load or generate fabric credentials
+    if (!m_devices->fabricKey().isEmpty())
+    {
+        m_matter->setFabricCredentials(m_devices->fabricKey(), m_devices->rootCAId(), m_devices->ipk());
+    }
+    else
+    {
+        QByteArray fabricKey = Crypto::randomBytes(32);
+        QByteArray ipk = Crypto::randomBytes(16);
+        QByteArray rcacIdBytes = Crypto::randomBytes(8);
+        quint64 rootCAId;
+        memcpy(&rootCAId, rcacIdBytes.constData(), 8);
+
+        m_matter->setFabricCredentials(fabricKey, rootCAId, ipk);
+        m_devices->setFabricCredentials(fabricKey, rootCAId, ipk);
+        m_devices->store(true);
+
+        logInfo << "Generated new fabric credentials";
+    }
 
     for (int i = 0; i < m_devices->count(); i++)
     {

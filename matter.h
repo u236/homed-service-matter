@@ -21,6 +21,11 @@ public:
 
     Matter(QObject *parent);
 
+    void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk);
+    inline QByteArray fabricKey(void) { return m_fabricKey; }
+    inline quint64 rootCAId(void) { return m_rootCAId; }
+    inline QByteArray ipk(void) { return m_ipk; }
+
     void addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator = false);
     void sendCommand(DeviceObject *device, quint8 endpointId, const QString &name, const QVariant &value);
     void readAttributes(DeviceObject *device, const QList <AttributePath> &paths);

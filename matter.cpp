@@ -19,18 +19,24 @@ Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), 
 
     m_searchTimer->setSingleShot(true);
 
-    m_fabricKey = Crypto::randomBytes(32);
-    ECPoint fabricPub = ECPoint::fromMultiply(ECPoint::generator(), BigNum(m_fabricKey).bn());
-    m_fabricPublicKey = fabricPub.toUncompressed();
-    m_ipk = Crypto::randomBytes(16);
-
-    QByteArray rcacIdBytes = Crypto::randomBytes(8);
-    memcpy(&m_rootCAId, rcacIdBytes.constData(), 8);
+    // fabric credentials will be set by Controller after database init
 
     if (!m_udp->bind(QHostAddress::Any, m_port))
         logWarning << "Failed to bind UDP port" << m_port;
     else
         logInfo << "Matter controller listening on port" << m_port;
+}
+
+void Matter::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk)
+{
+    m_fabricKey = fabricKey;
+    m_rootCAId = rootCAId;
+    m_ipk = ipk;
+
+    ECPoint fabricPub = ECPoint::fromMultiply(ECPoint::generator(), BigNum(m_fabricKey).bn());
+    m_fabricPublicKey = fabricPub.toUncompressed();
+
+    logInfo << "Fabric credentials loaded, rootCAId:" << QString::number(m_rootCAId, 16);
 }
 
 void Matter::addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator)

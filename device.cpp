@@ -14,7 +14,14 @@ void DeviceObject::updateEndpoint(quint8 endpointId, const QString &property, co
     emit endpointUpdated(this, endpointId);
 }
 
-DeviceList::DeviceList(QSettings *config, QObject *parent) : QObject(parent), m_timer(new QTimer(this)), m_sync(false)
+void DeviceList::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk)
+{
+    m_fabricKey = fabricKey;
+    m_rootCAId = rootCAId;
+    m_ipk = ipk;
+}
+
+DeviceList::DeviceList(QSettings *config, QObject *parent) : QObject(parent), m_timer(new QTimer(this)), m_rootCAId(0), m_sync(false)
 {
     QFile file(config->value("device/expose", "/usr/share/homed-common/expose.json").toString());
 
@@ -47,6 +54,12 @@ void DeviceList::init(void)
 
     json = QJsonDocument::fromJson(m_file.readAll()).object();
     unserialize(json.value("devices").toArray());
+
+    QJsonObject fabric = json.value("fabric").toObject();
+    m_fabricKey = QByteArray::fromHex(fabric.value("key").toString().toUtf8());
+    m_rootCAId = static_cast <quint64> (fabric.value("rootCAId").toDouble());
+    m_ipk = QByteArray::fromHex(fabric.value("ipk").toString().toUtf8());
+
     m_file.close();
 }
 
@@ -173,7 +186,16 @@ QJsonArray DeviceList::serialize(void)
 
 void DeviceList::writeDatabase(void)
 {
-    QJsonObject json = {{"devices", serialize()}, {"names", m_names}, {"timestamp", QDateTime::currentSecsSinceEpoch()}, {"version", SERVICE_VERSION}};
+    QJsonObject fabric;
+
+    if (!m_fabricKey.isEmpty())
+    {
+        fabric.insert("key", QString(m_fabricKey.toHex()));
+        fabric.insert("rootCAId", static_cast <double> (m_rootCAId));
+        fabric.insert("ipk", QString(m_ipk.toHex()));
+    }
+
+    QJsonObject json = {{"devices", serialize()}, {"fabric", fabric}, {"names", m_names}, {"timestamp", QDateTime::currentSecsSinceEpoch()}, {"version", SERVICE_VERSION}};
 
     emit statusUpdated(json);
 

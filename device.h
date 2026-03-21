@@ -75,6 +75,12 @@ public:
     void init(void);
     void store(bool sync = false);
 
+    inline QByteArray fabricKey(void) { return m_fabricKey; }
+    inline quint64 rootCAId(void) { return m_rootCAId; }
+    inline QByteArray ipk(void) { return m_ipk; }
+
+    void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk);
+
     Device byName(const QString &name, int *index = nullptr);
     Device byNodeId(quint64 nodeId);
     Device parse(const QJsonObject &json);
@@ -84,6 +90,10 @@ private:
     QTimer *m_timer;
     QFile m_file;
     bool m_names, m_sync;
+
+    QByteArray m_fabricKey;
+    quint64 m_rootCAId;
+    QByteArray m_ipk;
 
     QMap <QString, QVariant> m_exposeOptions;
 
