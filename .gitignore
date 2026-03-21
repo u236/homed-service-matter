@@ -1,0 +1,7 @@
+build/
+.qtcreator/
+*.o
+*.pcap
+test_pase*.py
+test_passcode.py
+test_ec_verify.py
