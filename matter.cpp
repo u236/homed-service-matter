@@ -561,11 +561,18 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             break;
                         }
 
-                        logInfo << "AddNOC success, sending CommissioningComplete on PASE...";
+                        logInfo << "AddNOC success, starting CASE for CommissioningComplete...";
                         commission.device->setNetworkAddress(commission.address);
                         commission.device->setNetworkPort(commission.port);
-                        commission.state = CommissioningState::CommissioningComplete;
-                        continueCommissioning(commission);
+                        emit deviceCommissioned(commission.device);
+
+                        connectDevice(commission.device);
+
+                        m_pendingCommissions.remove(commission.localSessionId);
+
+                        if (commission.pase)
+                            commission.pase->deleteLater();
+
                         break;
                     }
 
@@ -1145,6 +1152,22 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
     m_sessions->addSession(session);
 
     logInfo << "CASE session established with" << m_caseDevice->name();
+
+    // send CommissioningComplete on CASE session if device not yet fully commissioned
+    SessionInfo *caseSession = m_sessions->findByLocalId(localSessionId);
+
+    if (caseSession && m_caseDevice->availability() != Availability::Online)
+    {
+        logInfo << "Sending CommissioningComplete on CASE session...";
+
+        MatterTLV::Encoder fields;
+        fields.openStructure();
+        fields.closeContainer();
+
+        QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::GeneralCommissioning::Id, Clusters::GeneralCommissioning::Commands::CommissioningComplete), fields);
+        sendEncrypted(caseSession, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+    }
+
     m_caseDevice->setAvailability(Availability::Online);
 
     m_pendingCASE->deleteLater();
