@@ -183,7 +183,9 @@ void CASESession::handleSigma2(const QByteArray &payload)
     tbsEncoder.encodeByteString(4, m_responderEphPubKey);    // responder ephemeral public key
     tbsEncoder.closeContainer();
 
-    QByteArray signature = Crypto::ecdsaSign(m_operationalKey, tbsEncoder.data());
+    QByteArray tbsData = tbsEncoder.data();
+    QByteArray signature = Crypto::ecdsaSign(m_operationalKey, tbsData);
+    logInfo << "CASE: TBS3 signature verified:" << Crypto::ecdsaVerify(m_operationalPubKey, tbsData, signature);
 
     // build TBE3: { NOC, signature }
     MatterTLV::Encoder tbe3Encoder;
