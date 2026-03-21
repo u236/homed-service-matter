@@ -151,19 +151,35 @@ QByteArray Crypto::sha1(const QByteArray &data)
 
 QByteArray Crypto::ecdsaSign(const QByteArray &privateKey, const QByteArray &message)
 {
-    QByteArray hash = sha256(message);
-
     EC_KEY *eckey = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
     BIGNUM *privBN = BN_bin2bn(reinterpret_cast <const unsigned char*> (privateKey.constData()), privateKey.length(), nullptr);
     EC_KEY_set_private_key(eckey, privBN);
 
-    // derive public key from private key
     const EC_GROUP *group = EC_KEY_get0_group(eckey);
     EC_POINT *pubPoint = EC_POINT_new(group);
     EC_POINT_mul(group, pubPoint, privBN, nullptr, nullptr, nullptr);
     EC_KEY_set_public_key(eckey, pubPoint);
 
-    ECDSA_SIG *sig = ECDSA_do_sign(reinterpret_cast <const unsigned char*> (hash.constData()), hash.length(), eckey);
+    // use EVP high-level API for signing (handles SHA-256 internally)
+    EVP_PKEY *pkey = EVP_PKEY_new();
+    EVP_PKEY_assign_EC_KEY(pkey, eckey);
+
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    EVP_DigestSignInit(mdctx, nullptr, EVP_sha256(), nullptr, pkey);
+    EVP_DigestSignUpdate(mdctx, message.constData(), message.length());
+
+    size_t derSigLen = 0;
+    EVP_DigestSignFinal(mdctx, nullptr, &derSigLen);
+
+    QByteArray derSig(derSigLen, 0);
+    EVP_DigestSignFinal(mdctx, reinterpret_cast <unsigned char*> (derSig.data()), &derSigLen);
+    derSig.resize(derSigLen);
+
+    EVP_MD_CTX_free(mdctx);
+
+    // parse DER signature to extract raw r, s
+    const unsigned char *derPtr = reinterpret_cast <const unsigned char*> (derSig.constData());
+    ECDSA_SIG *sig = d2i_ECDSA_SIG(nullptr, &derPtr, derSig.length());
 
     QByteArray result;
 
@@ -172,7 +188,7 @@ QByteArray Crypto::ecdsaSign(const QByteArray &privateKey, const QByteArray &mes
         const BIGNUM *r, *s;
         ECDSA_SIG_get0(sig, &r, &s);
 
-        // low-S normalization: if s > n/2, replace with n - s
+        // low-S normalization
         BIGNUM *order = BN_new();
         BIGNUM *halfOrder = BN_new();
         EC_GROUP_get_order(group, order, nullptr);
@@ -196,7 +212,8 @@ QByteArray Crypto::ecdsaSign(const QByteArray &privateKey, const QByteArray &mes
 
     EC_POINT_free(pubPoint);
     BN_free(privBN);
-    EC_KEY_free(eckey);
+    // eckey is freed by EVP_PKEY_free (EVP_PKEY_assign takes ownership)
+    EVP_PKEY_free(pkey);
 
     return result;
 }

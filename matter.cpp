@@ -19,7 +19,6 @@ Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), 
 
     m_searchTimer->setSingleShot(true);
 
-    // generate fabric CA key pair
     m_fabricKey = Crypto::randomBytes(32);
     ECPoint fabricPub = ECPoint::fromMultiply(ECPoint::generator(), BigNum(m_fabricKey).bn());
     m_fabricPublicKey = fabricPub.toUncompressed();
@@ -748,16 +747,15 @@ void Matter::continueCommissioning(PendingCommission &commission)
 
 QByteArray Matter::generateFabricCert(quint64 fabricId, quint64 nodeId, const QByteArray &subjectPubKey, bool isRCAC)
 {
-    quint32 notBefore = 662688000;                                  // 2021-01-01 (> 0xFFFF → auto UInt32)
-    quint32 notAfter = 978048000;                                   // ~2031-01-01 (> 0xFFFF → auto UInt32)
+    const quint32 matterEpoch = 946684800;
+    quint32 notBefore = static_cast <quint32> (QDateTime::currentSecsSinceEpoch() - matterEpoch);
+    quint32 notAfter = notBefore + (3650 * 24 * 3600);
 
     // build TBS (to-be-signed): structure with tags 1-10
     MatterTLV::Encoder tbs;
     tbs.openStructure();
 
-    QByteArray serialNumber = Crypto::randomBytes(20);
-    serialNumber[0] = serialNumber[0] & 0x7F;               // ensure positive (X.509 compat)
-    tbs.encodeByteString(1, serialNumber);
+    tbs.encodeByteString(1, Crypto::randomBytes(8));
     tbs.encodeUnsignedInt(2, 1);                        // signatureAlgorithm: ECDSA_SHA256
 
     // issuer DN
@@ -793,22 +791,10 @@ QByteArray Matter::generateFabricCert(quint64 fabricId, quint64 nodeId, const QB
     // basicConstraints
     tbs.openStructure(1);
     tbs.encodeBool(1, isRCAC);
-
-    if (isRCAC)
-        tbs.encodeUnsignedInt(2, 0);                                    // pathLenConstraint = 0 (no ICAC)
-
     tbs.closeContainer();
 
-    // keyUsage (must be uint16 per Matter cert spec)
-    {
-        quint16 keyUsage = isRCAC ? 0x0060 : 0x0001;
-        QByteArray raw;
-        raw.append(static_cast <char> (0x25));                          // UnsignedInt 2-byte + context-specific
-        raw.append(static_cast <char> (0x02));                          // tag 2
-        raw.append(static_cast <char> (keyUsage & 0xFF));               // value LE low
-        raw.append(static_cast <char> ((keyUsage >> 8) & 0xFF));        // value LE high
-        tbs.encodeRaw(raw);
-    }
+    // keyUsage (UInt8, matching reference implementation)
+    tbs.encodeUnsignedInt(2, isRCAC ? 0x60 : 0x01);
 
     // extendedKeyUsage (NOC only)
     if (!isRCAC)
@@ -832,7 +818,10 @@ QByteArray Matter::generateFabricCert(quint64 fabricId, quint64 nodeId, const QB
     QByteArray tbsData = tbs.data();
 
     // sign TBS
+    logInfo << "TBS hex:" << tbsData.toHex();
+    logInfo << "TBS SHA256:" << Crypto::sha256(tbsData).toHex();
     QByteArray signature = Crypto::ecdsaSign(m_fabricKey, tbsData);
+    logInfo << "Signature:" << signature.toHex();
     logInfo << "Certificate signature" << (isRCAC ? "RCAC" : "NOC") << "verified:" << Crypto::ecdsaVerify(isRCAC ? subjectPubKey : m_fabricPublicKey, tbsData, signature);
 
     // build final cert: TBS without trailing EndOfContainer + signature tag + EndOfContainer
