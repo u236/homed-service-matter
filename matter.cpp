@@ -436,6 +436,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         commission.nocTLV = generateFabricCert(m_fabricId, commission.device->nodeId(), commission.devicePublicKey, false);
 
                         logInfo << "Generated RCAC" << commission.rcacTLV.length() << "bytes, NOC" << commission.nocTLV.length() << "bytes";
+        logInfo << "NOC hex:" << commission.nocTLV.toHex();
         logInfo << "RCAC hex:" << commission.rcacTLV.toHex();
 
                         commission.state = CommissioningState::AddTrustedRootCert;
@@ -728,7 +729,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
 
 QByteArray Matter::generateFabricCert(quint64 fabricId, quint64 nodeId, const QByteArray &subjectPubKey, bool isRCAC)
 {
-    QByteArray derCert = Crypto::generateX509Cert(m_rootCAId, fabricId, nodeId, subjectPubKey, m_fabricKey, isRCAC);
+    QByteArray derCert = Crypto::generateX509Cert(m_rootCAId, fabricId, nodeId, subjectPubKey, m_fabricKey, m_fabricPublicKey, isRCAC);
 
     if (derCert.isEmpty())
     {

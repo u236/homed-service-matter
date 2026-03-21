@@ -32,7 +32,7 @@ namespace Crypto
     bool ecdsaVerify(const QByteArray &publicKey, const QByteArray &message, const QByteArray &signature);
     QByteArray parseCSRPublicKey(const QByteArray &derCSR);
 
-    QByteArray generateX509Cert(quint64 rootCAId, quint64 fabricId, quint64 nodeId, const QByteArray &subjectPubKey, const QByteArray &signerPrivKey, bool isRCAC);
+    QByteArray generateX509Cert(quint64 rootCAId, quint64 fabricId, quint64 nodeId, const QByteArray &subjectPubKey, const QByteArray &signerPrivKey, const QByteArray &signerPubKey, bool isRCAC);
     QByteArray x509DerToMatterTLV(const QByteArray &derCert);
 
     QByteArray randomBytes(quint32 length);

@@ -327,7 +327,7 @@ static void addMatterDNEntry(X509_NAME *name, const char *oid, quint64 value)
     ASN1_OBJECT_free(obj);
 }
 
-QByteArray Crypto::generateX509Cert(quint64 rootCAId, quint64 fabricId, quint64 nodeId, const QByteArray &subjectPubKey, const QByteArray &signerPrivKey, bool isRCAC)
+QByteArray Crypto::generateX509Cert(quint64 rootCAId, quint64 fabricId, quint64 nodeId, const QByteArray &subjectPubKey, const QByteArray &signerPrivKey, const QByteArray &signerPubKey, bool isRCAC)
 {
     X509 *cert = X509_new();
     X509_set_version(cert, 2); // v3
@@ -356,8 +356,9 @@ QByteArray Crypto::generateX509Cert(quint64 rootCAId, quint64 fabricId, quint64 
     }
     else
     {
-        addMatterDNEntry(subject, "1.3.6.1.4.1.37244.1.5", fabricId);
+        // node-id (tag 0x11) must come before fabric-id (tag 0x15) for ascending tag order
         addMatterDNEntry(subject, "1.3.6.1.4.1.37244.1.1", nodeId);
+        addMatterDNEntry(subject, "1.3.6.1.4.1.37244.1.5", fabricId);
     }
 
     // subject public key
@@ -402,9 +403,25 @@ QByteArray Crypto::generateX509Cert(quint64 rootCAId, quint64 fabricId, quint64 
     X509_add_ext(cert, ext, -1);
     X509_EXTENSION_free(ext);
 
-    ext = X509V3_EXT_nconf_nid(nullptr, &ctx, NID_authority_key_identifier, const_cast <char*> ("keyid"));
-    X509_add_ext(cert, ext, -1);
-    X509_EXTENSION_free(ext);
+    if (isRCAC)
+    {
+        ext = X509V3_EXT_nconf_nid(nullptr, &ctx, NID_authority_key_identifier, const_cast <char*> ("keyid"));
+        X509_add_ext(cert, ext, -1);
+        X509_EXTENSION_free(ext);
+    }
+    else
+    {
+        // manually set AKID for NOC using signer's public key hash
+        QByteArray akidHash = sha1(signerPubKey);
+        ASN1_OCTET_STRING *akidOctet = ASN1_OCTET_STRING_new();
+        ASN1_OCTET_STRING_set(akidOctet, reinterpret_cast <const unsigned char*> (akidHash.constData()), akidHash.length());
+        AUTHORITY_KEYID *akid = AUTHORITY_KEYID_new();
+        akid->keyid = akidOctet;
+        ext = X509V3_EXT_i2d(NID_authority_key_identifier, 0, akid);
+        X509_add_ext(cert, ext, -1);
+        X509_EXTENSION_free(ext);
+        AUTHORITY_KEYID_free(akid);
+    }
 
     // sign
     EVP_PKEY *signerKey = createECKeyFromRaw(signerPrivKey);
@@ -416,6 +433,7 @@ QByteArray Crypto::generateX509Cert(quint64 rootCAId, quint64 fabricId, quint64 
     int derLen = i2d_X509(cert, &derBuf);
     QByteArray result(reinterpret_cast <char*> (derBuf), derLen);
     OPENSSL_free(derBuf);
+
     X509_free(cert);
 
     return result;
@@ -439,12 +457,22 @@ static void convertDNToMatterTLV(X509_NAME *name, MatterTLV::Encoder &enc)
         QString oid(oidBuf);
         QString value = QString::fromUtf8(reinterpret_cast <const char*> (ASN1_STRING_get0_data(val)), ASN1_STRING_length(val));
 
-        if (oid == "1.3.6.1.4.1.37244.1.1")
-            enc.encodeUnsignedInt(0x11, parseMatterIdFromHex(value));
-        else if (oid == "1.3.6.1.4.1.37244.1.4")
-            enc.encodeUnsignedInt(0x14, parseMatterIdFromHex(value));
-        else if (oid == "1.3.6.1.4.1.37244.1.5")
-            enc.encodeUnsignedInt(0x15, parseMatterIdFromHex(value));
+        int matterTag = -1;
+
+        if (oid == "1.3.6.1.4.1.37244.1.1") matterTag = 0x11;      // node-id
+        else if (oid == "1.3.6.1.4.1.37244.1.4") matterTag = 0x14;  // rcac-id
+        else if (oid == "1.3.6.1.4.1.37244.1.5") matterTag = 0x15;  // fabric-id
+
+        if (matterTag >= 0)
+        {
+            // force UInt64 encoding (8 bytes) as required by Matter cert spec
+            quint64 id = parseMatterIdFromHex(value);
+            QByteArray raw;
+            raw.append(static_cast <char> (0x27));                              // UnsignedInt 8-byte + context-specific
+            raw.append(static_cast <char> (matterTag));
+            raw.append(reinterpret_cast <const char*> (&id), 8);               // LE
+            enc.encodeRaw(raw);
+        }
     }
 }
 
