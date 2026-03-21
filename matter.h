@@ -104,6 +104,8 @@ private:
     CASESession *m_pendingCASE;
     quint16 m_caseExchangeId;
     DeviceObject *m_caseDevice;
+    QHostAddress m_caseAddress;
+    quint16 m_casePort;
 
     QMap <quint16, PendingCommission> m_pendingCommissions;
 

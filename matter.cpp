@@ -62,16 +62,25 @@ void Matter::connectDevice(DeviceObject *device)
 
     if (existing && existing->active)
     {
-        logInfo << "Already connected to" << device->name();
+        logInfo << "Already have active session for" << device->name();
         return;
     }
 
-    // use the last known address from commissioning or mDNS
-    // for now, use the address from any existing (dead) session
+    // find device address from existing session or commissioning
     QHostAddress address;
     quint16 port = 5540;
 
-    if (existing)
+    for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
+    {
+        if (it.value().device == device)
+        {
+            address = it.value().address;
+            port = it.value().port;
+            break;
+        }
+    }
+
+    if (address.isNull() && existing)
     {
         address = existing->peerAddress;
         port = existing->peerPort;
@@ -93,6 +102,8 @@ void Matter::connectDevice(DeviceObject *device)
     m_pendingCASE = session;
     m_caseDevice = device;
     m_caseExchangeId = m_exchangeCounter++;
+    m_caseAddress = address;
+    m_casePort = port;
 
     quint16 sessionId = m_sessionCounter++;
 
@@ -799,11 +810,12 @@ void Matter::continueCommissioning(PendingCommission &commission)
         {
             logInfo << "Device" << commission.device->name() << "commissioned successfully";
             session->peerNodeId = commission.device->nodeId();
-            session->active = false; // PASE session is dead after commissioning, CASE needed
+            session->active = true; // keep active temporarily so connectDevice can find the address
             emit deviceCommissioned(commission.device);
 
             // start CASE session for operational communication
             connectDevice(commission.device);
+            session->active = false; // now mark PASE as dead
 
             m_pendingCommissions.remove(commission.localSessionId);
 
@@ -1103,38 +1115,18 @@ void Matter::caseSendSigma1(const QByteArray &payload, quint16 localSessionId)
 {
     Q_UNUSED(localSessionId)
 
-    if (!m_pendingCASE || !m_caseDevice)
+    if (!m_pendingCASE)
         return;
 
-    SessionInfo *existing = m_sessions->findByPeerNodeId(m_caseDevice->nodeId());
-    QHostAddress address;
-    quint16 port = 5540;
-
-    if (existing)
-    {
-        address = existing->peerAddress;
-        port = existing->peerPort;
-    }
-
-    sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::CASESigma1), static_cast <quint16> (ProtocolId::SecureChannel), payload, m_caseExchangeId, address, port, true);
+    sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::CASESigma1), static_cast <quint16> (ProtocolId::SecureChannel), payload, m_caseExchangeId, m_caseAddress, m_casePort, true);
 }
 
 void Matter::caseSendSigma3(const QByteArray &payload)
 {
-    if (!m_pendingCASE || !m_caseDevice)
+    if (!m_pendingCASE)
         return;
 
-    SessionInfo *existing = m_sessions->findByPeerNodeId(m_caseDevice->nodeId());
-    QHostAddress address;
-    quint16 port = 5540;
-
-    if (existing)
-    {
-        address = existing->peerAddress;
-        port = existing->peerPort;
-    }
-
-    sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::CASESigma3), static_cast <quint16> (ProtocolId::SecureChannel), payload, m_caseExchangeId, address, port, true, m_pendingCASE->lastPeerMessageCounter());
+    sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::CASESigma3), static_cast <quint16> (ProtocolId::SecureChannel), payload, m_caseExchangeId, m_caseAddress, m_casePort, true, m_pendingCASE->lastPeerMessageCounter());
 }
 
 void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
@@ -1153,15 +1145,14 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
     session.localMessageCounter = 0;
     session.active = true;
 
-    // get address from existing (dead) session
+    session.peerAddress = m_caseAddress;
+    session.peerPort = m_casePort;
+
+    // remove old (dead) session
     SessionInfo *existing = m_sessions->findByPeerNodeId(m_caseDevice->nodeId());
 
     if (existing)
-    {
-        session.peerAddress = existing->peerAddress;
-        session.peerPort = existing->peerPort;
         m_sessions->removeSession(existing->localSessionId);
-    }
 
     m_sessions->addSession(session);
     m_caseDevice->setAvailability(Availability::Online);
