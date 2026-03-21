@@ -53,11 +53,16 @@ void CASESession::start(quint16 localSessionId, quint64 peerNodeId,
     m_nocTLV = nocTLV;
     m_rcacTLV = rcacTLV;
 
-    // derive operational IPK from raw epoch key
-    // compressedFabricId = HMAC-SHA256(rootPubKey, fabricId_BE)[0:8]
+    // derive compressed fabric ID: HKDF(rootPubKey[1:64], fabricId_BE, "CompressedFabric", 8)
     quint64 fabricIdBE = qToBigEndian(m_fabricId);
-    QByteArray compressedFabricId = Crypto::hmacSha256(m_fabricPublicKey, QByteArray(reinterpret_cast <const char*> (&fabricIdBE), 8)).left(8);
-    m_ipk = Crypto::hkdfSha256(m_ipk, compressedFabricId, QByteArray("GroupKey v1.0"), 16); // 13 bytes, no null terminator
+    QByteArray compressedFabricId = Crypto::hkdfSha256(
+        m_fabricPublicKey.mid(1),                                               // skip 0x04 uncompressed marker
+        QByteArray(reinterpret_cast <const char*> (&fabricIdBE), 8),            // salt = fabricId BE
+        QByteArray("CompressedFabric"),                                         // info
+        8);                                                                     // 8 bytes output
+
+    // derive operational IPK: HKDF(rawIPK, compressedFabricId, "GroupKey v1.0", 16)
+    m_ipk = Crypto::hkdfSha256(m_ipk, compressedFabricId, QByteArray("GroupKey v1.0"), 16);
 
     logInfo << "CASE: compressedFabricId:" << compressedFabricId.toHex() << "operationalIPK:" << m_ipk.toHex();
 
