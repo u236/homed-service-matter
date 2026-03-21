@@ -67,6 +67,8 @@ namespace MatterTLV
         void openList(int tag = -1);
         void closeContainer(void);
 
+        void encodeRaw(const QByteArray &raw);
+
         inline QByteArray data(void) const { return m_data; }
 
     private:

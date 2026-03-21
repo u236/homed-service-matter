@@ -27,6 +27,11 @@ namespace Crypto
     QByteArray aesCcmEncrypt(const QByteArray &key, const QByteArray &nonce, const QByteArray &aad, const QByteArray &plaintext, quint8 tagLength = 16);
     QByteArray aesCcmDecrypt(const QByteArray &key, const QByteArray &nonce, const QByteArray &aad, const QByteArray &ciphertext, quint8 tagLength = 16);
 
+    QByteArray sha1(const QByteArray &data);
+    QByteArray ecdsaSign(const QByteArray &privateKey, const QByteArray &message);
+    bool ecdsaVerify(const QByteArray &publicKey, const QByteArray &message, const QByteArray &signature);
+    QByteArray parseCSRPublicKey(const QByteArray &derCSR);
+
     QByteArray randomBytes(quint32 length);
 }
 

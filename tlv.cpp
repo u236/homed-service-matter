@@ -201,6 +201,11 @@ void Encoder::openList(int tag)
     encodeControl(Type::List, tag);
 }
 
+void Encoder::encodeRaw(const QByteArray &raw)
+{
+    m_data.append(raw);
+}
+
 void Encoder::closeContainer(void)
 {
     m_data.append(static_cast <char> (Type::EndOfContainer));

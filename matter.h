@@ -34,7 +34,12 @@ private:
         ArmFailSafe,
         SetRegulatoryConfig,
         ReadBasicInfo,
-        TimedCommissioningComplete,
+        RequestPAI,
+        RequestDAC,
+        RequestAttestation,
+        CSRRequest,
+        AddTrustedRootCert,
+        AddNOC,
         CommissioningComplete,
         Done
     };
@@ -52,8 +57,12 @@ private:
         DeviceObject *device;
 
         quint32 lastPeerCounter;
+        bool timedInvokePending;
+        QByteArray devicePublicKey;
+        QByteArray rcacTLV;
+        QByteArray nocTLV;
 
-        PendingCommission(void) : pase(nullptr), port(0), exchangeId(0), localSessionId(0), passcode(0), state(CommissioningState::Idle), device(nullptr), lastPeerCounter(0) {}
+        PendingCommission(void) : pase(nullptr), port(0), exchangeId(0), localSessionId(0), passcode(0), state(CommissioningState::Idle), device(nullptr), lastPeerCounter(0), timedInvokePending(false) {}
     };
 
     QUdpSocket *m_udp;
@@ -75,6 +84,11 @@ private:
     quint64 m_fabricId;
     quint64 m_nodeId;
 
+    QByteArray m_fabricKey;
+    QByteArray m_fabricPublicKey;
+    QByteArray m_ipk;
+    quint64 m_rootCAId;
+
     QMap <quint16, PendingCommission> m_pendingCommissions;
 
     void sendRawDatagram(const QByteArray &data, const QHostAddress &address, quint16 port);
@@ -87,6 +101,7 @@ private:
     void sendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port);
     void startCommissioning(const MatterService &service);
     void continueCommissioning(PendingCommission &commission);
+    QByteArray generateFabricCert(quint64 fabricId, quint64 nodeId, const QByteArray &subjectPubKey, bool isRCAC);
 
 private slots:
 

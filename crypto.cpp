@@ -3,6 +3,8 @@
 #include <openssl/rand.h>
 #include <openssl/kdf.h>
 #include <openssl/err.h>
+#include <openssl/x509.h>
+#include <openssl/ecdsa.h>
 #include <QtEndian>
 
 EC_GROUP *ECPoint::s_group = nullptr;
@@ -128,6 +130,138 @@ QByteArray Crypto::aesCcmDecrypt(const QByteArray &key, const QByteArray &nonce,
 
     if (ret <= 0)
         return QByteArray();
+
+    return result;
+}
+
+QByteArray Crypto::sha1(const QByteArray &data)
+{
+    QByteArray result(20, 0);
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+
+    EVP_DigestInit_ex(ctx, EVP_sha1(), nullptr);
+    EVP_DigestUpdate(ctx, data.constData(), data.length());
+
+    unsigned int length = 20;
+    EVP_DigestFinal_ex(ctx, reinterpret_cast <unsigned char*> (result.data()), &length);
+    EVP_MD_CTX_free(ctx);
+
+    return result;
+}
+
+QByteArray Crypto::ecdsaSign(const QByteArray &privateKey, const QByteArray &message)
+{
+    QByteArray hash = sha256(message);
+
+    EC_KEY *eckey = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+    BIGNUM *privBN = BN_bin2bn(reinterpret_cast <const unsigned char*> (privateKey.constData()), privateKey.length(), nullptr);
+    EC_KEY_set_private_key(eckey, privBN);
+
+    // derive public key from private key
+    const EC_GROUP *group = EC_KEY_get0_group(eckey);
+    EC_POINT *pubPoint = EC_POINT_new(group);
+    EC_POINT_mul(group, pubPoint, privBN, nullptr, nullptr, nullptr);
+    EC_KEY_set_public_key(eckey, pubPoint);
+
+    ECDSA_SIG *sig = ECDSA_do_sign(reinterpret_cast <const unsigned char*> (hash.constData()), hash.length(), eckey);
+
+    QByteArray result;
+
+    if (sig)
+    {
+        const BIGNUM *r, *s;
+        ECDSA_SIG_get0(sig, &r, &s);
+
+        // low-S normalization: if s > n/2, replace with n - s
+        BIGNUM *order = BN_new();
+        BIGNUM *halfOrder = BN_new();
+        EC_GROUP_get_order(group, order, nullptr);
+        BN_rshift1(halfOrder, order);
+
+        BIGNUM *normalizedS = BN_dup(s);
+
+        if (BN_cmp(s, halfOrder) > 0)
+            BN_sub(normalizedS, order, s);
+
+        result.resize(64);
+        memset(result.data(), 0, 64);
+        BN_bn2bin(r, reinterpret_cast <unsigned char*> (result.data()) + (32 - BN_num_bytes(r)));
+        BN_bn2bin(normalizedS, reinterpret_cast <unsigned char*> (result.data()) + 32 + (32 - BN_num_bytes(normalizedS)));
+
+        BN_free(normalizedS);
+        BN_free(halfOrder);
+        BN_free(order);
+        ECDSA_SIG_free(sig);
+    }
+
+    EC_POINT_free(pubPoint);
+    BN_free(privBN);
+    EC_KEY_free(eckey);
+
+    return result;
+}
+
+bool Crypto::ecdsaVerify(const QByteArray &publicKey, const QByteArray &message, const QByteArray &signature)
+{
+    if (publicKey.length() != 65 || signature.length() != 64)
+        return false;
+
+    QByteArray hash = sha256(message);
+
+    EC_KEY *eckey = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+    EC_POINT *point = EC_POINT_new(EC_KEY_get0_group(eckey));
+    EC_POINT_oct2point(EC_KEY_get0_group(eckey), point, reinterpret_cast <const unsigned char*> (publicKey.constData()), 65, nullptr);
+    EC_KEY_set_public_key(eckey, point);
+
+    ECDSA_SIG *sig = ECDSA_SIG_new();
+    BIGNUM *r = BN_bin2bn(reinterpret_cast <const unsigned char*> (signature.constData()), 32, nullptr);
+    BIGNUM *s = BN_bin2bn(reinterpret_cast <const unsigned char*> (signature.constData()) + 32, 32, nullptr);
+    ECDSA_SIG_set0(sig, r, s);
+
+    int result = ECDSA_do_verify(reinterpret_cast <const unsigned char*> (hash.constData()), hash.length(), sig, eckey);
+
+    ECDSA_SIG_free(sig);
+    EC_POINT_free(point);
+    EC_KEY_free(eckey);
+
+    return result == 1;
+}
+
+QByteArray Crypto::parseCSRPublicKey(const QByteArray &derCSR)
+{
+    const unsigned char *p = reinterpret_cast <const unsigned char*> (derCSR.constData());
+    X509_REQ *req = d2i_X509_REQ(nullptr, &p, derCSR.length());
+
+    if (!req)
+        return QByteArray();
+
+    EVP_PKEY *pkey = X509_REQ_get_pubkey(req);
+
+    if (!pkey)
+    {
+        X509_REQ_free(req);
+        return QByteArray();
+    }
+
+    EC_KEY *ec = EVP_PKEY_get1_EC_KEY(pkey);
+
+    if (!ec)
+    {
+        EVP_PKEY_free(pkey);
+        X509_REQ_free(req);
+        return QByteArray();
+    }
+
+    const EC_POINT *point = EC_KEY_get0_public_key(ec);
+    const EC_GROUP *group = EC_KEY_get0_group(ec);
+    size_t len = EC_POINT_point2oct(group, point, POINT_CONVERSION_UNCOMPRESSED, nullptr, 0, nullptr);
+
+    QByteArray result(static_cast <int> (len), 0);
+    EC_POINT_point2oct(group, point, POINT_CONVERSION_UNCOMPRESSED, reinterpret_cast <unsigned char*> (result.data()), len, nullptr);
+
+    EC_KEY_free(ec);
+    EVP_PKEY_free(pkey);
+    X509_REQ_free(req);
 
     return result;
 }

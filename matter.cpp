@@ -1,4 +1,5 @@
 #include <QtEndian>
+#include <QDateTime>
 #include <cstring>
 #include "matter.h"
 #include "logger.h"
@@ -17,6 +18,15 @@ Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), 
     connect(m_mdns, &MDNS::serviceFound, this, &Matter::mdnsServiceFound);
 
     m_searchTimer->setSingleShot(true);
+
+    // generate fabric CA key pair
+    m_fabricKey = Crypto::randomBytes(32);
+    ECPoint fabricPub = ECPoint::fromMultiply(ECPoint::generator(), BigNum(m_fabricKey).bn());
+    m_fabricPublicKey = fabricPub.toUncompressed();
+    m_ipk = Crypto::randomBytes(16);
+
+    QByteArray rcacIdBytes = Crypto::randomBytes(8);
+    memcpy(&m_rootCAId, rcacIdBytes.constData(), 8);
 
     if (!m_udp->bind(QHostAddress::Any, m_port))
         logWarning << "Failed to bind UDP port" << m_port;
@@ -310,7 +320,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
             {
                 if (it.value().state == CommissioningState::ReadBasicInfo)
                 {
-                    it.value().state = CommissioningState::TimedCommissioningComplete;
+                    it.value().state = CommissioningState::RequestPAI;
                     continueCommissioning(it.value());
                     break;
                 }
@@ -324,15 +334,14 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
             quint8 status = InteractionModel::decodeStatusResponse(payload);
             logInfo << "StatusResponse:" << status;
 
-            // TimedRequest was ACKed with StatusResponse(0) — now send the actual CommissioningComplete
+            // TimedRequest was ACKed with StatusResponse(0) — now send the actual command
             if (status == 0)
             {
                 for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
                 {
-                    if (it.value().state == CommissioningState::TimedCommissioningComplete)
+                    if (it.value().timedInvokePending)
                     {
                         it.value().lastPeerCounter = msgHeader.messageCounter;
-                        it.value().state = CommissioningState::CommissioningComplete;
                         continueCommissioning(it.value());
                         break;
                     }
@@ -369,6 +378,104 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                     {
                         logInfo << "SetRegulatoryConfig response, reading basic info...";
                         commission.state = CommissioningState::ReadBasicInfo;
+                        continueCommissioning(commission);
+                        break;
+                    }
+
+                    if (commission.state == CommissioningState::RequestPAI && response.path.clusterId == Clusters::OperationalCredentials::Id && response.path.commandId == Clusters::OperationalCredentials::Commands::CertificateChainResponse)
+                    {
+                        logInfo << "PAI certificate received, requesting DAC...";
+                        commission.state = CommissioningState::RequestDAC;
+                        continueCommissioning(commission);
+                        break;
+                    }
+
+                    if (commission.state == CommissioningState::RequestDAC && response.path.clusterId == Clusters::OperationalCredentials::Id && response.path.commandId == Clusters::OperationalCredentials::Commands::CertificateChainResponse)
+                    {
+                        logInfo << "DAC certificate received, requesting attestation...";
+                        commission.state = CommissioningState::RequestAttestation;
+                        continueCommissioning(commission);
+                        break;
+                    }
+
+                    if (commission.state == CommissioningState::RequestAttestation && response.path.clusterId == Clusters::OperationalCredentials::Id && response.path.commandId == Clusters::OperationalCredentials::Commands::AttestationResponse)
+                    {
+                        logInfo << "Attestation received, sending CSR request...";
+                        commission.state = CommissioningState::CSRRequest;
+                        continueCommissioning(commission);
+                        break;
+                    }
+
+                    if (commission.state == CommissioningState::CSRRequest && response.path.clusterId == Clusters::OperationalCredentials::Id && response.path.commandId == Clusters::OperationalCredentials::Commands::CSRResponse)
+                    {
+                        logInfo << "CSRResponse received";
+
+                        for (const MatterTLV::Element &field : response.data.children)
+                        {
+                            if (field.tag == 0 && field.type == MatterTLV::Type::ByteString)
+                            {
+                                MatterTLV::Decoder nocsrDecoder(field.value.toByteArray());
+                                MatterTLV::Element nocsrRoot = nocsrDecoder.decode();
+
+                                for (const MatterTLV::Element &el : nocsrRoot.children)
+                                {
+                                    if (el.tag == 1 && el.type == MatterTLV::Type::ByteString)
+                                        commission.devicePublicKey = Crypto::parseCSRPublicKey(el.value.toByteArray());
+                                }
+                            }
+                        }
+
+                        if (commission.devicePublicKey.isEmpty())
+                        {
+                            logWarning << "Failed to parse device public key from CSR";
+                            break;
+                        }
+
+                        logInfo << "Device public key extracted," << commission.devicePublicKey.length() << "bytes";
+
+                        commission.rcacTLV = generateFabricCert(m_fabricId, 0, m_fabricPublicKey, true);
+                        commission.nocTLV = generateFabricCert(m_fabricId, commission.device->nodeId(), commission.devicePublicKey, false);
+
+                        logInfo << "Generated RCAC" << commission.rcacTLV.length() << "bytes, NOC" << commission.nocTLV.length() << "bytes";
+        logInfo << "RCAC hex:" << commission.rcacTLV.toHex();
+
+                        commission.state = CommissioningState::AddTrustedRootCert;
+                        continueCommissioning(commission);
+                        break;
+                    }
+
+                    if (commission.state == CommissioningState::AddTrustedRootCert && response.path.clusterId == Clusters::OperationalCredentials::Id && response.path.commandId == Clusters::OperationalCredentials::Commands::AddTrustedRootCertificate)
+                    {
+                        if (response.status != 0)
+                        {
+                            logWarning << "AddTrustedRootCertificate failed, status:" << response.status;
+                            break;
+                        }
+
+                        logInfo << "AddTrustedRootCertificate accepted, sending AddNOC...";
+                        commission.state = CommissioningState::AddNOC;
+                        continueCommissioning(commission);
+                        break;
+                    }
+
+                    if (commission.state == CommissioningState::AddNOC && response.path.clusterId == Clusters::OperationalCredentials::Id && response.path.commandId == Clusters::OperationalCredentials::Commands::NOCResponse)
+                    {
+                        quint8 nocStatus = 0xFF;
+
+                        for (const MatterTLV::Element &field : response.data.children)
+                        {
+                            if (field.tag == 0) nocStatus = field.value.toUInt();
+                            if (field.tag == 1) commission.device->setFabricIndex(field.value.toUInt());
+                        }
+
+                        if (nocStatus != 0)
+                        {
+                            logWarning << "AddNOC failed, status:" << nocStatus;
+                            break;
+                        }
+
+                        logInfo << "AddNOC success";
+                        commission.state = CommissioningState::CommissioningComplete;
                         continueCommissioning(commission);
                         break;
                     }
@@ -486,21 +593,126 @@ void Matter::continueCommissioning(PendingCommission &commission)
             break;
         }
 
-        case CommissioningState::TimedCommissioningComplete:
+        case CommissioningState::RequestPAI:
         {
-            logInfo << "Sending TimedRequest for CommissioningComplete...";
+            logInfo << "Requesting PAI certificate...";
 
-            quint16 exchangeId = m_exchangeCounter++;
-            QByteArray payload = InteractionModel::encodeTimedRequest(5000);
-            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::TimedRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, exchangeId, true);
+            MatterTLV::Encoder fields;
+            fields.openStructure();
+            fields.encodeUnsignedInt(0, 1);  // CertificateType = PAI
+            fields.closeContainer();
 
-            // store exchangeId for the follow-up InvokeRequest on the same exchange
-            commission.exchangeId = exchangeId;
+            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::CertificateChainRequest), fields);
+            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            break;
+        }
+
+        case CommissioningState::RequestDAC:
+        {
+            logInfo << "Requesting DAC certificate...";
+
+            MatterTLV::Encoder fields;
+            fields.openStructure();
+            fields.encodeUnsignedInt(0, 2);  // CertificateType = DAC
+            fields.closeContainer();
+
+            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::CertificateChainRequest), fields);
+            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            break;
+        }
+
+        case CommissioningState::RequestAttestation:
+        {
+            logInfo << "Requesting attestation...";
+
+            MatterTLV::Encoder fields;
+            fields.openStructure();
+            fields.encodeByteString(0, Crypto::randomBytes(32));  // AttestationNonce
+            fields.closeContainer();
+
+            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::AttestationRequest), fields);
+            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            break;
+        }
+
+        case CommissioningState::CSRRequest:
+        {
+            logInfo << "Sending CSRRequest...";
+
+            MatterTLV::Encoder fields;
+            fields.openStructure();
+            fields.encodeByteString(0, Crypto::randomBytes(32)); // CSRNonce
+            fields.closeContainer();
+
+            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::CSRRequest), fields);
+            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            break;
+        }
+
+        case CommissioningState::AddTrustedRootCert:
+        {
+            logInfo << "Sending AddTrustedRootCertificate...";
+
+            // manually build InvokeRequest to avoid encode-decode-reencode cycle
+            MatterTLV::Encoder invoke;
+            invoke.openStructure();
+            invoke.encodeBool(0, false);                    // suppressResponse
+            invoke.encodeBool(1, false);                    // timedRequest
+            invoke.openArray(2);                            // InvokeRequests
+            invoke.openStructure();                         // CommandDataIB (anonymous)
+
+            invoke.openList(0);                             // CommandPathIB
+            invoke.encodeUnsignedInt(0, 0);                 // endpointId
+            invoke.encodeUnsignedInt(1, Clusters::OperationalCredentials::Id);
+            invoke.encodeUnsignedInt(2, Clusters::OperationalCredentials::Commands::AddTrustedRootCertificate);
+            invoke.closeContainer();                        // CommandPathIB
+
+            invoke.openStructure(1);                        // CommandFields
+            invoke.encodeByteString(0, commission.rcacTLV); // RootCACertificate
+            invoke.closeContainer();                        // CommandFields
+
+            invoke.closeContainer();                        // CommandDataIB
+            invoke.closeContainer();                        // InvokeRequests
+            invoke.encodeUnsignedInt(0xFF, 11);             // InteractionModelRevision
+            invoke.closeContainer();                        // InvokeRequestMessage
+
+            QByteArray payload = invoke.data();
+            logInfo << "AddTrustedRootCert InvokeRequest TLV:" << payload.toHex();
+            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            break;
+        }
+
+        case CommissioningState::AddNOC:
+        {
+            logInfo << "Sending AddNOC...";
+
+            MatterTLV::Encoder fields;
+            fields.openStructure();
+            fields.encodeByteString(0, commission.nocTLV);   // NOCValue
+            // tag 1: ICACValue (skip, no intermediate CA)
+            fields.encodeByteString(2, m_ipk);               // IPKValue (16 bytes)
+            fields.encodeUnsignedInt(3, m_nodeId);            // CaseAdminSubject
+            fields.encodeUnsignedInt(4, 0xFFF1);              // AdminVendorId (test)
+            fields.closeContainer();
+
+            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::AddNOC), fields);
+            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
             break;
         }
 
         case CommissioningState::CommissioningComplete:
         {
+            if (!commission.timedInvokePending)
+            {
+                logInfo << "Sending TimedRequest for CommissioningComplete...";
+                commission.exchangeId = m_exchangeCounter++;
+                QByteArray payload = InteractionModel::encodeTimedRequest(5000);
+                sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::TimedRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, commission.exchangeId, true);
+                commission.timedInvokePending = true;
+                break;
+            }
+
+            commission.timedInvokePending = false;
             logInfo << "Sending CommissioningComplete...";
 
             MatterTLV::Encoder fields;
@@ -530,6 +742,110 @@ void Matter::continueCommissioning(PendingCommission &commission)
         default:
             break;
     }
+}
+
+// --- Certificate generation ---
+
+QByteArray Matter::generateFabricCert(quint64 fabricId, quint64 nodeId, const QByteArray &subjectPubKey, bool isRCAC)
+{
+    quint32 notBefore = 662688000;                                  // 2021-01-01 (> 0xFFFF → auto UInt32)
+    quint32 notAfter = 978048000;                                   // ~2031-01-01 (> 0xFFFF → auto UInt32)
+
+    // build TBS (to-be-signed): structure with tags 1-10
+    MatterTLV::Encoder tbs;
+    tbs.openStructure();
+
+    QByteArray serialNumber = Crypto::randomBytes(20);
+    serialNumber[0] = serialNumber[0] & 0x7F;               // ensure positive (X.509 compat)
+    tbs.encodeByteString(1, serialNumber);
+    tbs.encodeUnsignedInt(2, 1);                        // signatureAlgorithm: ECDSA_SHA256
+
+    // issuer DN
+    tbs.openList(3);
+    tbs.encodeUnsignedInt(0x14, m_rootCAId);              // matter-rcac-id (tag 20)
+    tbs.closeContainer();
+
+    tbs.encodeUnsignedInt(4, notBefore);
+    tbs.encodeUnsignedInt(5, notAfter);
+
+    // subject DN
+    tbs.openList(6);
+
+    if (isRCAC)
+    {
+        tbs.encodeUnsignedInt(0x14, m_rootCAId);          // matter-rcac-id (tag 20)
+    }
+    else
+    {
+        tbs.encodeUnsignedInt(0x15, fabricId);            // matter-fabric-id (tag 21)
+        tbs.encodeUnsignedInt(0x11, nodeId);              // matter-node-id (tag 17)
+    }
+
+    tbs.closeContainer();
+
+    tbs.encodeUnsignedInt(7, 1);                         // publicKeyAlgorithm: EC
+    tbs.encodeUnsignedInt(8, 1);                         // ellipticCurveId: P-256
+    tbs.encodeByteString(9, subjectPubKey);              // publicKey (65 bytes)
+
+    // extensions
+    tbs.openList(10);
+
+    // basicConstraints
+    tbs.openStructure(1);
+    tbs.encodeBool(1, isRCAC);
+
+    if (isRCAC)
+        tbs.encodeUnsignedInt(2, 0);                                    // pathLenConstraint = 0 (no ICAC)
+
+    tbs.closeContainer();
+
+    // keyUsage (must be uint16 per Matter cert spec)
+    {
+        quint16 keyUsage = isRCAC ? 0x0060 : 0x0001;
+        QByteArray raw;
+        raw.append(static_cast <char> (0x25));                          // UnsignedInt 2-byte + context-specific
+        raw.append(static_cast <char> (0x02));                          // tag 2
+        raw.append(static_cast <char> (keyUsage & 0xFF));               // value LE low
+        raw.append(static_cast <char> ((keyUsage >> 8) & 0xFF));        // value LE high
+        tbs.encodeRaw(raw);
+    }
+
+    // extendedKeyUsage (NOC only)
+    if (!isRCAC)
+    {
+        tbs.openArray(3);
+        tbs.encodeUnsignedInt(-1, 2);  // serverAuth
+        tbs.encodeUnsignedInt(-1, 1);  // clientAuth
+        tbs.closeContainer();
+    }
+
+    // subjectKeyId
+    tbs.encodeByteString(4, Crypto::sha1(subjectPubKey));
+
+    // authorityKeyId (RCAC: = SKID, NOC: issuer's SKID)
+    tbs.encodeByteString(5, isRCAC ? Crypto::sha1(subjectPubKey) : Crypto::sha1(m_fabricPublicKey));
+
+    tbs.closeContainer(); // extensions
+
+    tbs.closeContainer(); // structure (TBS complete)
+
+    QByteArray tbsData = tbs.data();
+
+    // sign TBS
+    QByteArray signature = Crypto::ecdsaSign(m_fabricKey, tbsData);
+    logInfo << "Certificate signature" << (isRCAC ? "RCAC" : "NOC") << "verified:" << Crypto::ecdsaVerify(isRCAC ? subjectPubKey : m_fabricPublicKey, tbsData, signature);
+
+    // build final cert: TBS without trailing EndOfContainer + signature tag + EndOfContainer
+    QByteArray cert = tbsData;
+    cert.chop(1); // remove EndOfContainer
+
+    MatterTLV::Encoder sigEnc;
+    sigEnc.encodeByteString(11, signature);
+    cert.append(sigEnc.data());
+
+    cert.append(static_cast <char> (MatterTLV::Type::EndOfContainer));
+
+    return cert;
 }
 
 // --- Standalone ACK ---
