@@ -29,7 +29,7 @@ class DeviceObject : public AbstractDeviceObject
 public:
 
     DeviceObject(quint64 nodeId, const QString &name) :
-        AbstractDeviceObject(name), m_nodeId(nodeId), m_fabricIndex(0), m_vendorId(0), m_productId(0) {}
+        AbstractDeviceObject(name), m_nodeId(nodeId), m_fabricIndex(0), m_vendorId(0), m_productId(0), m_networkPort(5540) {}
 
     inline quint64 nodeId(void) { return m_nodeId; }
     inline void setNodeId(quint64 value) { m_nodeId = value; }
@@ -42,6 +42,12 @@ public:
 
     inline quint16 productId(void) { return m_productId; }
     inline void setProductId(quint16 value) { m_productId = value; }
+
+    inline QHostAddress networkAddress(void) { return m_networkAddress; }
+    inline void setNetworkAddress(const QHostAddress &value) { m_networkAddress = value; }
+
+    inline quint16 networkPort(void) { return m_networkPort; }
+    inline void setNetworkPort(quint16 value) { m_networkPort = value; }
 
     inline QString address(void) { return QString("0x%1").arg(m_nodeId, 16, 16, QLatin1Char('0')); }
 
@@ -57,6 +63,8 @@ private:
     quint64 m_nodeId;
     quint8 m_fabricIndex;
     quint16 m_vendorId, m_productId;
+    QHostAddress m_networkAddress;
+    quint16 m_networkPort;
 
 };
 

@@ -66,25 +66,8 @@ void Matter::connectDevice(DeviceObject *device)
         return;
     }
 
-    // find device address from existing session or commissioning
-    QHostAddress address;
-    quint16 port = 5540;
-
-    for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
-    {
-        if (it.value().device == device)
-        {
-            address = it.value().address;
-            port = it.value().port;
-            break;
-        }
-    }
-
-    if (address.isNull() && existing)
-    {
-        address = existing->peerAddress;
-        port = existing->peerPort;
-    }
+    QHostAddress address = device->networkAddress();
+    quint16 port = device->networkPort();
 
     if (address.isNull())
     {
@@ -810,12 +793,11 @@ void Matter::continueCommissioning(PendingCommission &commission)
         {
             logInfo << "Device" << commission.device->name() << "commissioned successfully";
             session->peerNodeId = commission.device->nodeId();
-            session->active = true; // keep active temporarily so connectDevice can find the address
+            session->active = false; // PASE is dead after commissioning
             emit deviceCommissioned(commission.device);
 
             // start CASE session for operational communication
             connectDevice(commission.device);
-            session->active = false; // now mark PASE as dead
 
             m_pendingCommissions.remove(commission.localSessionId);
 
@@ -1089,6 +1071,8 @@ void Matter::paseEstablished(quint16 localSessionId, quint16 peerSessionId)
     commission.device = new DeviceObject(nodeId, commission.service.deviceName.isEmpty() ? QString("matter_%1").arg(commission.service.discriminator) : commission.service.deviceName);
     commission.device->setVendorId(commission.service.vendorId);
     commission.device->setProductId(commission.service.productId);
+    commission.device->setNetworkAddress(commission.address);
+    commission.device->setNetworkPort(commission.port);
 
     // start commissioning: ArmFailSafe → ReadBasicInfo → CommissioningComplete
     commission.state = CommissioningState::ArmFailSafe;
@@ -1145,8 +1129,8 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
     session.localMessageCounter = 0;
     session.active = true;
 
-    session.peerAddress = m_caseAddress;
-    session.peerPort = m_casePort;
+    session.peerAddress = m_caseDevice->networkAddress();
+    session.peerPort = m_caseDevice->networkPort();
 
     // remove old (dead) session
     SessionInfo *existing = m_sessions->findByPeerNodeId(m_caseDevice->nodeId());
