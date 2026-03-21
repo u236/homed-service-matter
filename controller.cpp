@@ -22,18 +22,19 @@ Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, confi
     // load or generate fabric credentials
     if (!m_devices->fabricKey().isEmpty())
     {
-        m_matter->setFabricCredentials(m_devices->fabricKey(), m_devices->rootCAId(), m_devices->ipk());
+        m_matter->setFabricCredentials(m_devices->fabricKey(), m_devices->rootCAId(), m_devices->ipk(), m_devices->operationalKey());
     }
     else
     {
         QByteArray fabricKey = Crypto::randomBytes(32);
         QByteArray ipk = Crypto::randomBytes(16);
+        QByteArray operationalKey = Crypto::randomBytes(32);
         QByteArray rcacIdBytes = Crypto::randomBytes(8);
         quint64 rootCAId;
         memcpy(&rootCAId, rcacIdBytes.constData(), 8);
 
-        m_matter->setFabricCredentials(fabricKey, rootCAId, ipk);
-        m_devices->setFabricCredentials(fabricKey, rootCAId, ipk);
+        m_matter->setFabricCredentials(fabricKey, rootCAId, ipk, operationalKey);
+        m_devices->setFabricCredentials(fabricKey, rootCAId, ipk, operationalKey);
         m_devices->store(true);
 
         logInfo << "Generated new fabric credentials";
@@ -44,6 +45,10 @@ Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, confi
         const Device &device = m_devices->at(i);
         connect(device.data(), &DeviceObject::deviceUpdated, this, &Controller::deviceUpdated);
         connect(device.data(), &DeviceObject::endpointUpdated, this, &Controller::endpointUpdated);
+
+        // reconnect to known devices via CASE
+        if (device->active())
+            m_matter->connectDevice(device.staticCast <DeviceObject> ().data());
     }
 }
 

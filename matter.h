@@ -22,7 +22,7 @@ public:
 
     Matter(QObject *parent);
 
-    void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk);
+    void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey);
     inline QByteArray fabricKey(void) { return m_fabricKey; }
     inline quint64 rootCAId(void) { return m_rootCAId; }
     inline QByteArray ipk(void) { return m_ipk; }

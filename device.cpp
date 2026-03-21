@@ -14,11 +14,12 @@ void DeviceObject::updateEndpoint(quint8 endpointId, const QString &property, co
     emit endpointUpdated(this, endpointId);
 }
 
-void DeviceList::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk)
+void DeviceList::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey)
 {
     m_fabricKey = fabricKey;
     m_rootCAId = rootCAId;
     m_ipk = ipk;
+    m_operationalKey = operationalKey;
 }
 
 DeviceList::DeviceList(QSettings *config, QObject *parent) : QObject(parent), m_timer(new QTimer(this)), m_sync(false), m_rootCAId(0)
@@ -59,6 +60,7 @@ void DeviceList::init(void)
     m_fabricKey = QByteArray::fromHex(fabric.value("key").toString().toUtf8());
     m_rootCAId = static_cast <quint64> (fabric.value("rootCAId").toDouble());
     m_ipk = QByteArray::fromHex(fabric.value("ipk").toString().toUtf8());
+    m_operationalKey = QByteArray::fromHex(fabric.value("operationalKey").toString().toUtf8());
 
     m_file.close();
 }
@@ -125,6 +127,12 @@ Device DeviceList::parse(const QJsonObject &json)
     obj->setManufacturerName(json.value("manufacturerName").toString());
     obj->setModelName(json.value("modelName").toString());
 
+    if (json.contains("networkAddress"))
+        obj->setNetworkAddress(QHostAddress(json.value("networkAddress").toString()));
+
+    if (json.contains("networkPort"))
+        obj->setNetworkPort(static_cast <quint16> (json.value("networkPort").toInt()));
+
     return device;
 }
 
@@ -178,6 +186,12 @@ QJsonArray DeviceList::serialize(void)
         if (!device->note().isEmpty())
             json.insert("note", device->note());
 
+        if (!obj->networkAddress().isNull())
+            json.insert("networkAddress", obj->networkAddress().toString());
+
+        if (obj->networkPort() != 5540)
+            json.insert("networkPort", obj->networkPort());
+
         array.append(json);
     }
 
@@ -193,6 +207,7 @@ void DeviceList::writeDatabase(void)
         fabric.insert("key", QString(m_fabricKey.toHex()));
         fabric.insert("rootCAId", static_cast <double> (m_rootCAId));
         fabric.insert("ipk", QString(m_ipk.toHex()));
+        fabric.insert("operationalKey", QString(m_operationalKey.toHex()));
     }
 
     QJsonObject json = {{"devices", serialize()}, {"fabric", fabric}, {"names", m_names}, {"timestamp", QDateTime::currentSecsSinceEpoch()}, {"version", SERVICE_VERSION}};

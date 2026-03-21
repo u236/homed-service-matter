@@ -30,17 +30,16 @@ Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), 
         logInfo << "Matter controller listening on port" << m_port;
 }
 
-void Matter::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk)
+void Matter::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey)
 {
     m_fabricKey = fabricKey;
     m_rootCAId = rootCAId;
     m_ipk = ipk;
+    m_operationalKey = operationalKey;
 
     ECPoint fabricPub = ECPoint::fromMultiply(ECPoint::generator(), BigNum(m_fabricKey).bn());
     m_fabricPublicKey = fabricPub.toUncompressed();
 
-    // generate controller operational keypair and certs
-    m_operationalKey = Crypto::randomBytes(32);
     ECPoint opPub = ECPoint::fromMultiply(ECPoint::generator(), BigNum(m_operationalKey).bn());
     m_operationalPubKey = opPub.toUncompressed();
 
