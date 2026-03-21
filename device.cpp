@@ -14,12 +14,14 @@ void DeviceObject::updateEndpoint(quint8 endpointId, const QString &property, co
     emit endpointUpdated(this, endpointId);
 }
 
-void DeviceList::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey)
+void DeviceList::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC, const QByteArray &controllerRCAC)
 {
     m_fabricKey = fabricKey;
     m_rootCAId = rootCAId;
     m_ipk = ipk;
     m_operationalKey = operationalKey;
+    m_controllerNOC = controllerNOC;
+    m_controllerRCAC = controllerRCAC;
 }
 
 DeviceList::DeviceList(QSettings *config, QObject *parent) : QObject(parent), m_timer(new QTimer(this)), m_sync(false), m_rootCAId(0)
@@ -61,6 +63,8 @@ void DeviceList::init(void)
     m_rootCAId = static_cast <quint64> (fabric.value("rootCAId").toDouble());
     m_ipk = QByteArray::fromHex(fabric.value("ipk").toString().toUtf8());
     m_operationalKey = QByteArray::fromHex(fabric.value("operationalKey").toString().toUtf8());
+    m_controllerNOC = QByteArray::fromHex(fabric.value("controllerNOC").toString().toUtf8());
+    m_controllerRCAC = QByteArray::fromHex(fabric.value("controllerRCAC").toString().toUtf8());
 
     m_file.close();
 }
@@ -208,6 +212,8 @@ void DeviceList::writeDatabase(void)
         fabric.insert("rootCAId", static_cast <double> (m_rootCAId));
         fabric.insert("ipk", QString(m_ipk.toHex()));
         fabric.insert("operationalKey", QString(m_operationalKey.toHex()));
+        fabric.insert("controllerNOC", QString(m_controllerNOC.toHex()));
+        fabric.insert("controllerRCAC", QString(m_controllerRCAC.toHex()));
     }
 
     QJsonObject json = {{"devices", serialize()}, {"fabric", fabric}, {"names", m_names}, {"timestamp", QDateTime::currentSecsSinceEpoch()}, {"version", SERVICE_VERSION}};

@@ -88,8 +88,10 @@ public:
     inline quint64 rootCAId(void) { return m_rootCAId; }
     inline QByteArray ipk(void) { return m_ipk; }
     inline QByteArray operationalKey(void) { return m_operationalKey; }
+    inline QByteArray controllerNOC(void) { return m_controllerNOC; }
+    inline QByteArray controllerRCAC(void) { return m_controllerRCAC; }
 
-    void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey);
+    void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC, const QByteArray &controllerRCAC);
 
     Device byName(const QString &name, int *index = nullptr);
     Device byNodeId(quint64 nodeId);
@@ -105,6 +107,8 @@ private:
     quint64 m_rootCAId;
     QByteArray m_ipk;
     QByteArray m_operationalKey;
+    QByteArray m_controllerNOC;
+    QByteArray m_controllerRCAC;
 
     QMap <QString, QVariant> m_exposeOptions;
 

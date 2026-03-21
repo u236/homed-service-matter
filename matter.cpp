@@ -34,7 +34,7 @@ Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), 
         logInfo << "Matter controller listening on port" << m_port;
 }
 
-void Matter::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey)
+void Matter::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC, const QByteArray &controllerRCAC)
 {
     m_fabricKey = fabricKey;
     m_rootCAId = rootCAId;
@@ -47,8 +47,16 @@ void Matter::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId,
     ECPoint opPub = ECPoint::fromMultiply(ECPoint::generator(), BigNum(m_operationalKey).bn());
     m_operationalPubKey = opPub.toUncompressed();
 
-    m_controllerRCAC = generateFabricCert(m_fabricId, 0, m_fabricPublicKey, true);
-    m_controllerNOC = generateFabricCert(m_fabricId, m_nodeId, m_operationalPubKey, false);
+    if (!controllerNOC.isEmpty() && !controllerRCAC.isEmpty())
+    {
+        m_controllerNOC = controllerNOC;
+        m_controllerRCAC = controllerRCAC;
+    }
+    else
+    {
+        m_controllerRCAC = generateFabricCert(m_fabricId, 0, m_fabricPublicKey, true);
+        m_controllerNOC = generateFabricCert(m_fabricId, m_nodeId, m_operationalPubKey, false);
+    }
 
     logInfo << "Fabric credentials loaded, rootCAId:" << QString::number(m_rootCAId, 16);
 }

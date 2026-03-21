@@ -217,6 +217,10 @@ void CASESession::handleSigma2(const QByteArray &payload)
     m_decryptKey = sessionKeys.mid(16, 16);
     m_attestationChallenge = sessionKeys.mid(32, 16);
 
+    // self-test: decrypt our own TBE3 to verify
+    QByteArray selfTest = Crypto::aesCcmDecrypt(s3k, sigma3Nonce, QByteArray(), encrypted3, 16);
+    logInfo << "CASE: S3K:" << s3k.toHex() << "TBE3 self-test:" << (selfTest.isEmpty() ? "FAIL" : "OK") << "TBE3 size:" << tbe3Encoder.data().length();
+
     m_state = State::WaitingStatusReport;
 
     logInfo << "CASE: sending Sigma3";
