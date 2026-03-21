@@ -576,6 +576,8 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                         connectDevice(commission.device);
 
+                        // clean up PASE session
+                        m_sessions->removeSession(commission.localSessionId);
                         m_pendingCommissions.remove(commission.localSessionId);
 
                         if (commission.pase)
