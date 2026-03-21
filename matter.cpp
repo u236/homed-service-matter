@@ -652,31 +652,12 @@ void Matter::continueCommissioning(PendingCommission &commission)
         {
             logInfo << "Sending AddTrustedRootCertificate...";
 
-            // manually build InvokeRequest to avoid encode-decode-reencode cycle
-            MatterTLV::Encoder invoke;
-            invoke.openStructure();
-            invoke.encodeBool(0, false);                    // suppressResponse
-            invoke.encodeBool(1, false);                    // timedRequest
-            invoke.openArray(2);                            // InvokeRequests
-            invoke.openStructure();                         // CommandDataIB (anonymous)
+            MatterTLV::Encoder fields;
+            fields.openStructure();
+            fields.encodeByteString(0, commission.rcacTLV);
+            fields.closeContainer();
 
-            invoke.openList(0);                             // CommandPathIB
-            invoke.encodeUnsignedInt(0, 0);                 // endpointId
-            invoke.encodeUnsignedInt(1, Clusters::OperationalCredentials::Id);
-            invoke.encodeUnsignedInt(2, Clusters::OperationalCredentials::Commands::AddTrustedRootCertificate);
-            invoke.closeContainer();                        // CommandPathIB
-
-            invoke.openStructure(1);                        // CommandFields
-            invoke.encodeByteString(0, commission.rcacTLV); // RootCACertificate
-            invoke.closeContainer();                        // CommandFields
-
-            invoke.closeContainer();                        // CommandDataIB
-            invoke.closeContainer();                        // InvokeRequests
-            invoke.encodeUnsignedInt(0xFF, 11);             // InteractionModelRevision
-            invoke.closeContainer();                        // InvokeRequestMessage
-
-            QByteArray payload = invoke.data();
-            logInfo << "AddTrustedRootCert InvokeRequest TLV:" << payload.toHex();
+            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::AddTrustedRootCertificate), fields);
             sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
             break;
         }
@@ -747,94 +728,17 @@ void Matter::continueCommissioning(PendingCommission &commission)
 
 QByteArray Matter::generateFabricCert(quint64 fabricId, quint64 nodeId, const QByteArray &subjectPubKey, bool isRCAC)
 {
-    const quint32 matterEpoch = 946684800;
-    quint32 notBefore = static_cast <quint32> (QDateTime::currentSecsSinceEpoch() - matterEpoch);
-    quint32 notAfter = notBefore + (3650 * 24 * 3600);
+    QByteArray derCert = Crypto::generateX509Cert(m_rootCAId, fabricId, nodeId, subjectPubKey, m_fabricKey, isRCAC);
 
-    // build TBS (to-be-signed): structure with tags 1-10
-    MatterTLV::Encoder tbs;
-    tbs.openStructure();
-
-    tbs.encodeByteString(1, Crypto::randomBytes(8));
-    tbs.encodeUnsignedInt(2, 1);                        // signatureAlgorithm: ECDSA_SHA256
-
-    // issuer DN
-    tbs.openList(3);
-    tbs.encodeUnsignedInt(0x14, m_rootCAId);              // matter-rcac-id (tag 20)
-    tbs.closeContainer();
-
-    tbs.encodeUnsignedInt(4, notBefore);
-    tbs.encodeUnsignedInt(5, notAfter);
-
-    // subject DN
-    tbs.openList(6);
-
-    if (isRCAC)
+    if (derCert.isEmpty())
     {
-        tbs.encodeUnsignedInt(0x14, m_rootCAId);          // matter-rcac-id (tag 20)
-    }
-    else
-    {
-        tbs.encodeUnsignedInt(0x15, fabricId);            // matter-fabric-id (tag 21)
-        tbs.encodeUnsignedInt(0x11, nodeId);              // matter-node-id (tag 17)
+        logWarning << "Failed to generate X.509 certificate";
+        return QByteArray();
     }
 
-    tbs.closeContainer();
-
-    tbs.encodeUnsignedInt(7, 1);                         // publicKeyAlgorithm: EC
-    tbs.encodeUnsignedInt(8, 1);                         // ellipticCurveId: P-256
-    tbs.encodeByteString(9, subjectPubKey);              // publicKey (65 bytes)
-
-    // extensions
-    tbs.openList(10);
-
-    // basicConstraints
-    tbs.openStructure(1);
-    tbs.encodeBool(1, isRCAC);
-    tbs.closeContainer();
-
-    // keyUsage (UInt8, matching reference implementation)
-    tbs.encodeUnsignedInt(2, isRCAC ? 0x60 : 0x01);
-
-    // extendedKeyUsage (NOC only)
-    if (!isRCAC)
-    {
-        tbs.openArray(3);
-        tbs.encodeUnsignedInt(-1, 2);  // serverAuth
-        tbs.encodeUnsignedInt(-1, 1);  // clientAuth
-        tbs.closeContainer();
-    }
-
-    // subjectKeyId
-    tbs.encodeByteString(4, Crypto::sha1(subjectPubKey));
-
-    // authorityKeyId (RCAC: = SKID, NOC: issuer's SKID)
-    tbs.encodeByteString(5, isRCAC ? Crypto::sha1(subjectPubKey) : Crypto::sha1(m_fabricPublicKey));
-
-    tbs.closeContainer(); // extensions
-
-    tbs.closeContainer(); // structure (TBS complete)
-
-    QByteArray tbsData = tbs.data();
-
-    // sign TBS
-    logInfo << "TBS hex:" << tbsData.toHex();
-    logInfo << "TBS SHA256:" << Crypto::sha256(tbsData).toHex();
-    QByteArray signature = Crypto::ecdsaSign(m_fabricKey, tbsData);
-    logInfo << "Signature:" << signature.toHex();
-    logInfo << "Certificate signature" << (isRCAC ? "RCAC" : "NOC") << "verified:" << Crypto::ecdsaVerify(isRCAC ? subjectPubKey : m_fabricPublicKey, tbsData, signature);
-
-    // build final cert: TBS without trailing EndOfContainer + signature tag + EndOfContainer
-    QByteArray cert = tbsData;
-    cert.chop(1); // remove EndOfContainer
-
-    MatterTLV::Encoder sigEnc;
-    sigEnc.encodeByteString(11, signature);
-    cert.append(sigEnc.data());
-
-    cert.append(static_cast <char> (MatterTLV::Type::EndOfContainer));
-
-    return cert;
+    QByteArray tlvCert = Crypto::x509DerToMatterTLV(derCert);
+    logInfo << "Generated" << (isRCAC ? "RCAC" : "NOC") << derCert.length() << "DER bytes," << tlvCert.length() << "TLV bytes";
+    return tlvCert;
 }
 
 // --- Standalone ACK ---
