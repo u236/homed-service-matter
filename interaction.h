@@ -92,9 +92,10 @@ public:
 
     static QByteArray encodeReadRequest(const QList <AttributePath> &paths);
     static QByteArray encodeWriteRequest(quint16 endpointId, quint32 clusterId, quint32 attributeId, const MatterTLV::Encoder &valueEncoder);
-    static QByteArray encodeInvokeRequest(const CommandPath &path, const MatterTLV::Encoder &fieldsEncoder);
+    static QByteArray encodeInvokeRequest(const CommandPath &path, const MatterTLV::Encoder &fieldsEncoder, bool timedRequest = false);
     static QByteArray encodeSubscribeRequest(const QList <AttributePath> &paths, quint16 minInterval, quint16 maxInterval);
 
+    static QByteArray encodeTimedRequest(quint16 timeoutMs);
     static QByteArray encodeStatusResponse(quint8 status);
 
     // --- Decoding ---

@@ -53,18 +53,18 @@ namespace MatterTLV
 
         Encoder(void) {}
 
-        void encodeSignedInt(quint8 tag, qint64 value);
-        void encodeUnsignedInt(quint8 tag, quint64 value);
-        void encodeBool(quint8 tag, bool value);
-        void encodeFloat(quint8 tag, float value);
-        void encodeDouble(quint8 tag, double value);
-        void encodeUTF8String(quint8 tag, const QString &value);
-        void encodeByteString(quint8 tag, const QByteArray &value);
-        void encodeNull(quint8 tag);
+        void encodeSignedInt(int tag, qint64 value);
+        void encodeUnsignedInt(int tag, quint64 value);
+        void encodeBool(int tag, bool value);
+        void encodeFloat(int tag, float value);
+        void encodeDouble(int tag, double value);
+        void encodeUTF8String(int tag, const QString &value);
+        void encodeByteString(int tag, const QByteArray &value);
+        void encodeNull(int tag);
 
-        void openStructure(quint8 tag = 0);
-        void openArray(quint8 tag = 0);
-        void openList(quint8 tag = 0);
+        void openStructure(int tag = -1);
+        void openArray(int tag = -1);
+        void openList(int tag = -1);
         void closeContainer(void);
 
         inline QByteArray data(void) const { return m_data; }
@@ -73,7 +73,7 @@ namespace MatterTLV
 
         QByteArray m_data;
 
-        void encodeControl(Type type, quint8 tag);
+        void encodeControl(Type type, int tag);
         void encodeLength(quint32 length);
 
     };

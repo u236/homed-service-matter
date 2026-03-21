@@ -15,8 +15,6 @@ Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, confi
 
     m_timer->setSingleShot(true);
 
-    m_matter->setPasscode(getConfig()->value("matter/passcode", PASE_DEFAULT_PASSCODE).toUInt());
-
     m_devices->setNames(getConfig()->value("mqtt/names", false).toBool());
     m_devices->init();
 
@@ -193,9 +191,28 @@ void Controller::mqttReceived(const QByteArray &message, const QMqttTopicName &t
                 break;
             }
 
-            case Command::permitJoin:
+            case Command::addDevice:
             {
-                m_matter->setPermitJoin(static_cast <quint32> (json.value("duration").toInt(60)));
+                quint32 passcode;
+                quint16 discriminator;
+                bool shortDiscriminator;
+
+                if (json.contains("payload") && Matter::parseQRCode(json.value("payload").toString(), passcode, discriminator))
+                {
+                    shortDiscriminator = false;
+                }
+                else if (json.contains("code") && Matter::parseManualCode(json.value("code").toString(), passcode, discriminator))
+                {
+                    shortDiscriminator = true;
+                }
+                else
+                {
+                    logWarning << "Invalid or missing setup code";
+                    break;
+                }
+
+                logInfo << "Adding device, passcode:" << passcode << "discriminator:" << discriminator << (shortDiscriminator ? "(short)" : "(full)");
+                m_matter->addDevice(passcode, discriminator, shortDiscriminator);
                 break;
             }
         }

@@ -1,3 +1,5 @@
+#include <QtEndian>
+#include <cstring>
 #include "matter.h"
 #include "logger.h"
 #include "tlv.h"
@@ -5,16 +7,16 @@
 
 using namespace MatterProtocol;
 
-Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), m_mrp(new MRP(this)), m_mdns(new MDNS(this)), m_sessions(new SessionManager(this)), m_permitJoinTimer(new QTimer(this)), m_port(5540), m_permitJoin(false), m_passcode(PASE_DEFAULT_PASSCODE), m_messageCounter(0), m_exchangeCounter(0), m_sessionCounter(1), m_fabricId(1), m_nodeId(1)
+Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), m_mrp(new MRP(this)), m_mdns(new MDNS(this)), m_sessions(new SessionManager(this)), m_searchTimer(new QTimer(this)), m_port(5540), m_searching(false), m_searchShortDiscriminator(false), m_searchPasscode(0), m_searchDiscriminator(0), m_messageCounter(0), m_exchangeCounter(0), m_sessionCounter(1), m_fabricId(1), m_nodeId(1)
 {
     connect(m_udp, &QUdpSocket::readyRead, this, &Matter::readyRead);
-    connect(m_permitJoinTimer, &QTimer::timeout, this, &Matter::permitJoinTimeout);
+    connect(m_searchTimer, &QTimer::timeout, this, &Matter::searchTimeout);
     connect(m_mrp, &MRP::retransmit, this, &Matter::mrpRetransmit);
     connect(m_mrp, &MRP::retransmitFailed, this, &Matter::mrpRetransmitFailed);
     connect(m_mrp, &MRP::sendStandaloneAck, this, &Matter::mrpSendStandaloneAck);
     connect(m_mdns, &MDNS::serviceFound, this, &Matter::mdnsServiceFound);
 
-    m_permitJoinTimer->setSingleShot(true);
+    m_searchTimer->setSingleShot(true);
 
     if (!m_udp->bind(QHostAddress::Any, m_port))
         logWarning << "Failed to bind UDP port" << m_port;
@@ -22,28 +24,16 @@ Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), 
         logInfo << "Matter controller listening on port" << m_port;
 }
 
-void Matter::setPermitJoin(quint32 duration)
+void Matter::addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator)
 {
-    m_permitJoin = duration > 0;
+    m_searching = true;
+    m_searchPasscode = passcode;
+    m_searchDiscriminator = discriminator;
+    m_searchShortDiscriminator = shortDiscriminator;
 
-    if (m_permitJoin)
-    {
-        m_permitJoinTimer->start(duration * 1000);
-        m_sessionCounter = 1;
-        logInfo << "Permit join enabled for" << duration << "seconds";
-        m_mdns->browse();
-    }
-    else
-    {
-        m_permitJoinTimer->stop();
-        m_mdns->stop();
-        logInfo << "Permit join disabled";
-    }
-}
-
-void Matter::setPasscode(quint32 passcode)
-{
-    m_passcode = passcode;
+    m_searchTimer->start(60000);
+    logInfo << "Searching for commissionable device, discriminator:" << discriminator << (shortDiscriminator ? "(short)" : "(full)");
+    m_mdns->browse();
 }
 
 // --- Send command to a commissioned device ---
@@ -142,7 +132,7 @@ void Matter::sendUnencrypted(quint8 opcode, quint16 protocolId, const QByteArray
     m_mrp->messageSent(data, address, port, msgHeader.messageCounter, protoHeader.exchangeId, true);
 }
 
-void Matter::sendEncrypted(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator)
+void Matter::sendEncrypted(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator, quint32 ackCounter)
 {
     session->localMessageCounter++;
 
@@ -161,6 +151,13 @@ void Matter::sendEncrypted(SessionInfo *session, quint8 opcode, quint16 protocol
     if (initiator)
         protoHeader.exchangeFlags |= static_cast <quint8> (ExchangeFlag::Initiator);
 
+    if (ackCounter)
+    {
+        protoHeader.exchangeFlags |= static_cast <quint8> (ExchangeFlag::Acknowledgement);
+        protoHeader.ackCounter = ackCounter;
+        m_mrp->cancelPendingAck(ackCounter);
+    }
+
     protoHeader.opcode = opcode;
     protoHeader.exchangeId = exchangeId;
     protoHeader.protocolId = protocolId;
@@ -168,7 +165,7 @@ void Matter::sendEncrypted(SessionInfo *session, quint8 opcode, quint16 protocol
     QByteArray plaintext = MessageCodec::encodeProtocolHeader(protoHeader);
     plaintext.append(payload);
 
-    QByteArray nonce = SessionManager::buildNonce(msgHeader.securityFlags, msgHeader.messageCounter, m_nodeId);
+    QByteArray nonce = SessionManager::buildNonce(msgHeader.securityFlags, msgHeader.messageCounter, session->active ? m_nodeId : 0);
     QByteArray encrypted = Crypto::aesCcmEncrypt(session->i2rKey, nonce, header, plaintext, SESSION_TAG_LENGTH);
 
     QByteArray data = header;
@@ -313,7 +310,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
             {
                 if (it.value().state == CommissioningState::ReadBasicInfo)
                 {
-                    it.value().state = CommissioningState::CommissioningComplete;
+                    it.value().state = CommissioningState::TimedCommissioningComplete;
                     continueCommissioning(it.value());
                     break;
                 }
@@ -326,12 +323,30 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
         {
             quint8 status = InteractionModel::decodeStatusResponse(payload);
             logInfo << "StatusResponse:" << status;
+
+            // TimedRequest was ACKed with StatusResponse(0) — now send the actual CommissioningComplete
+            if (status == 0)
+            {
+                for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
+                {
+                    if (it.value().state == CommissioningState::TimedCommissioningComplete)
+                    {
+                        it.value().lastPeerCounter = msgHeader.messageCounter;
+                        it.value().state = CommissioningState::CommissioningComplete;
+                        continueCommissioning(it.value());
+                        break;
+                    }
+                }
+            }
+
             break;
         }
 
         case InteractionModelOpcode::InvokeResponse:
         {
             QList <CommandResponse> responses = InteractionModel::decodeInvokeResponse(payload);
+
+            logInfo << "InvokeResponse received, entries:" << responses.count() << "payload size:" << payload.size();
 
             for (const CommandResponse &response : responses)
             {
@@ -344,7 +359,15 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                     if (commission.state == CommissioningState::ArmFailSafe && response.path.clusterId == Clusters::GeneralCommissioning::Id && response.path.commandId == Clusters::GeneralCommissioning::Commands::ArmFailSafeResponse)
                     {
-                        logInfo << "ArmFailSafe response, reading basic info...";
+                        logInfo << "ArmFailSafe response, setting regulatory config...";
+                        commission.state = CommissioningState::SetRegulatoryConfig;
+                        continueCommissioning(commission);
+                        break;
+                    }
+
+                    if (commission.state == CommissioningState::SetRegulatoryConfig && response.path.clusterId == Clusters::GeneralCommissioning::Id && response.path.commandId == Clusters::GeneralCommissioning::Commands::SetRegulatoryConfigResponse)
+                    {
+                        logInfo << "SetRegulatoryConfig response, reading basic info...";
                         commission.state = CommissioningState::ReadBasicInfo;
                         continueCommissioning(commission);
                         break;
@@ -394,13 +417,14 @@ void Matter::startCommissioning(const MatterService &service)
     commission.port = service.port;
     commission.exchangeId = exchangeId;
     commission.localSessionId = sessionId;
+    commission.passcode = m_searchPasscode;
     commission.service = service;
     commission.state = CommissioningState::PASE;
 
     m_pendingCommissions.insert(sessionId, commission);
 
     logInfo << "Starting commissioning with" << service.address.toString() << ":" << service.port;
-    pase->start(m_passcode, sessionId);
+    pase->start(commission.passcode, sessionId);
 }
 
 void Matter::continueCommissioning(PendingCommission &commission)
@@ -430,6 +454,22 @@ void Matter::continueCommissioning(PendingCommission &commission)
             break;
         }
 
+        case CommissioningState::SetRegulatoryConfig:
+        {
+            logInfo << "Sending SetRegulatoryConfig...";
+
+            MatterTLV::Encoder fields;
+            fields.openStructure();
+            fields.encodeUnsignedInt(0, 0);                  // newRegulatoryConfig: Indoor (0)
+            fields.encodeUTF8String(1, QString("XX"));       // countryCode
+            fields.encodeUnsignedInt(2, 0);                  // breadcrumb
+            fields.closeContainer();
+
+            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::GeneralCommissioning::Id, Clusters::GeneralCommissioning::Commands::SetRegulatoryConfig), fields);
+            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            break;
+        }
+
         case CommissioningState::ReadBasicInfo:
         {
             logInfo << "Reading BasicInformation cluster...";
@@ -446,6 +486,19 @@ void Matter::continueCommissioning(PendingCommission &commission)
             break;
         }
 
+        case CommissioningState::TimedCommissioningComplete:
+        {
+            logInfo << "Sending TimedRequest for CommissioningComplete...";
+
+            quint16 exchangeId = m_exchangeCounter++;
+            QByteArray payload = InteractionModel::encodeTimedRequest(5000);
+            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::TimedRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, exchangeId, true);
+
+            // store exchangeId for the follow-up InvokeRequest on the same exchange
+            commission.exchangeId = exchangeId;
+            break;
+        }
+
         case CommissioningState::CommissioningComplete:
         {
             logInfo << "Sending CommissioningComplete...";
@@ -454,8 +507,8 @@ void Matter::continueCommissioning(PendingCommission &commission)
             fields.openStructure();
             fields.closeContainer();
 
-            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::GeneralCommissioning::Id, Clusters::GeneralCommissioning::Commands::CommissioningComplete), fields);
-            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::GeneralCommissioning::Id, Clusters::GeneralCommissioning::Commands::CommissioningComplete), fields, true);
+            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, commission.exchangeId, true, commission.lastPeerCounter);
             break;
         }
 
@@ -553,9 +606,11 @@ void Matter::readyRead(void)
 
             if (payload.isEmpty())
             {
-                logWarning << "Decryption failed for session" << msgHeader.sessionId;
+                logWarning << "Decryption failed for session" << msgHeader.sessionId << "from" << sender.toString() << "size:" << ciphertext.size();
                 continue;
             }
+
+            logInfo << "Decrypted message from session" << msgHeader.sessionId << "counter:" << msgHeader.messageCounter << "size:" << payload.size();
         }
         else
         {
@@ -591,11 +646,11 @@ void Matter::readyRead(void)
 
 // --- Timer callbacks ---
 
-void Matter::permitJoinTimeout(void)
+void Matter::searchTimeout(void)
 {
-    m_permitJoin = false;
+    m_searching = false;
     m_mdns->stop();
-    logInfo << "Permit join timeout";
+    logWarning << "Device search timeout, device not found";
 }
 
 void Matter::mrpRetransmit(const QByteArray &data, const QHostAddress &address, quint16 port)
@@ -615,8 +670,20 @@ void Matter::mrpSendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint1
 
 void Matter::mdnsServiceFound(const MatterService &service)
 {
-    if (!m_permitJoin)
+    if (!m_searching)
         return;
+
+    // match discriminator
+    if (m_searchShortDiscriminator)
+    {
+        if ((service.discriminator >> 8) != m_searchDiscriminator)
+            return;
+    }
+    else
+    {
+        if (service.discriminator != m_searchDiscriminator)
+            return;
+    }
 
     // check if already commissioning this device
     for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
@@ -625,14 +692,11 @@ void Matter::mdnsServiceFound(const MatterService &service)
             return;
     }
 
-    // limit retries
-    if (m_sessionCounter > 3)
-    {
-        logWarning << "Max commissioning retries reached";
-        return;
-    }
-
     logInfo << "Commissionable device found:" << service.deviceName << "discriminator:" << service.discriminator << "at" << service.address.toString() << ":" << service.port;
+
+    m_searching = false;
+    m_searchTimer->stop();
+    m_mdns->stop();
 
     startCommissioning(service);
 }
@@ -725,4 +789,108 @@ void Matter::paseFailed(const QString &reason)
     quint16 sessionId = pase->localSessionId();
     m_pendingCommissions.remove(sessionId);
     pase->deleteLater();
+}
+
+// --- Setup code parsing ---
+
+static const char base38Alphabet[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-.";
+
+static QByteArray base38Decode(const QString &encoded)
+{
+    QByteArray result;
+    int i = 0;
+
+    while (i < encoded.length())
+    {
+        int charsInChunk = qMin(encoded.length() - i, 5);
+        int bytesInChunk = charsInChunk == 5 ? 3 : (charsInChunk == 4 ? 2 : 1);
+
+        quint32 value = 0;
+        quint32 base = 1;
+
+        for (int j = 0; j < charsInChunk; j++)
+        {
+            const char *p = strchr(base38Alphabet, encoded.at(i + j).toLatin1());
+
+            if (!p)
+                return QByteArray();
+
+            value += static_cast <quint32> (p - base38Alphabet) * base;
+            base *= 38;
+        }
+
+        for (int j = 0; j < bytesInChunk; j++)
+        {
+            result.append(static_cast <char> (value & 0xFF));
+            value >>= 8;
+        }
+
+        i += charsInChunk;
+    }
+
+    return result;
+}
+
+bool Matter::parseQRCode(const QString &payload, quint32 &passcode, quint16 &discriminator)
+{
+    if (!payload.startsWith("MT:"))
+        return false;
+
+    QByteArray data = base38Decode(payload.mid(3));
+
+    if (data.length() < 11)
+        return false;
+
+    // 88-bit payload, little-endian bitfield:
+    // bits  0-2:  version (3)
+    // bits  3-18: vendorId (16)
+    // bits 19-34: productId (16)
+    // bits 35-36: commissioningFlow (2)
+    // bits 37-44: rendezvousFlags (8)
+    // bits 45-56: discriminator (12)
+    // bits 57-83: passcode (27)
+    // bits 84-87: padding (4)
+
+    quint64 low;
+    memcpy(&low, data.constData(), 8);
+    low = qFromLittleEndian(low);
+
+    quint32 high = 0;
+    memcpy(&high, data.constData() + 8, 3);
+    high = qFromLittleEndian(high);
+
+    discriminator = static_cast <quint16> ((low >> 45) & 0xFFF);
+    passcode = static_cast <quint32> (((low >> 57) | (static_cast <quint64> (high) << 7)) & 0x7FFFFFF);
+
+    if (passcode == 0 || passcode > 99999998)
+        return false;
+
+    return true;
+}
+
+bool Matter::parseManualCode(const QString &code, quint32 &passcode, quint16 &discriminator)
+{
+    if (code.length() != 11 && code.length() != 21)
+        return false;
+
+    for (int i = 0; i < code.length(); i++)
+    {
+        if (!code.at(i).isDigit())
+            return false;
+    }
+
+    quint32 chunk1 = code.mid(0, 1).toUInt();
+    quint32 chunk2 = code.mid(1, 5).toUInt();
+    quint32 chunk3 = code.mid(6, 4).toUInt();
+
+    // short discriminator (4 bits): chunk1 bits[0:1] (MSBs) + chunk2 bits[14:15] (LSBs)
+    discriminator = static_cast <quint16> (((chunk1 & 0x3) << 2) | ((chunk2 >> 14) & 0x3));
+
+    // passcode (27 bits): chunk2 bits[0:13] (LSBs) + chunk3 bits[0:12] (MSBs)
+    passcode = (chunk2 & 0x3FFF) | (chunk3 << 14);
+
+    if (passcode == 0 || passcode > 99999998)
+        return false;
+
+    return true;
 }

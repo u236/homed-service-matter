@@ -72,8 +72,8 @@ bool MessageCodec::decodeHeader(const QByteArray &data, MessageHeader &header, q
         return false;
 
     header.flags = readU8(data, offset);
-    header.securityFlags = readU8(data, offset);
     header.sessionId = readU16(data, offset);
+    header.securityFlags = readU8(data, offset);
     header.messageCounter = readU32(data, offset);
 
     if (header.version() != 0x00)
@@ -157,8 +157,8 @@ QByteArray MessageCodec::encodeHeader(const MessageHeader &header)
     QByteArray data;
 
     writeU8(data, header.flags);
-    writeU8(data, header.securityFlags);
     writeU16(data, header.sessionId);
+    writeU8(data, header.securityFlags);
     writeU32(data, header.messageCounter);
 
     if (header.flags & 0x04)

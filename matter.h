@@ -21,8 +21,7 @@ public:
 
     Matter(QObject *parent);
 
-    void setPermitJoin(quint32 duration);
-    void setPasscode(quint32 passcode);
+    void addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator = false);
     void sendCommand(DeviceObject *device, quint8 endpointId, const QString &name, const QVariant &value);
     void readAttributes(DeviceObject *device, const QList <AttributePath> &paths);
 
@@ -33,7 +32,9 @@ private:
         Idle,
         PASE,
         ArmFailSafe,
+        SetRegulatoryConfig,
         ReadBasicInfo,
+        TimedCommissioningComplete,
         CommissioningComplete,
         Done
     };
@@ -45,22 +46,27 @@ private:
         quint16 port;
         quint16 exchangeId;
         quint16 localSessionId;
+        quint32 passcode;
         MatterService service;
         CommissioningState state;
         DeviceObject *device;
 
-        PendingCommission(void) : pase(nullptr), port(0), exchangeId(0), localSessionId(0), state(CommissioningState::Idle), device(nullptr) {}
+        quint32 lastPeerCounter;
+
+        PendingCommission(void) : pase(nullptr), port(0), exchangeId(0), localSessionId(0), passcode(0), state(CommissioningState::Idle), device(nullptr), lastPeerCounter(0) {}
     };
 
     QUdpSocket *m_udp;
     MRP *m_mrp;
     MDNS *m_mdns;
     SessionManager *m_sessions;
-    QTimer *m_permitJoinTimer;
+    QTimer *m_searchTimer;
 
     quint16 m_port;
-    bool m_permitJoin;
-    quint32 m_passcode;
+    bool m_searching;
+    bool m_searchShortDiscriminator;
+    quint32 m_searchPasscode;
+    quint16 m_searchDiscriminator;
 
     quint32 m_messageCounter;
     quint16 m_exchangeCounter;
@@ -73,7 +79,7 @@ private:
 
     void sendRawDatagram(const QByteArray &data, const QHostAddress &address, quint16 port);
     void sendUnencrypted(quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, const QHostAddress &address, quint16 port, bool initiator, quint32 ackCounter = 0);
-    void sendEncrypted(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator);
+    void sendEncrypted(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator, quint32 ackCounter = 0);
 
     void handleSecureChannel(const MatterProtocol::MessageHeader &msgHeader, const MatterProtocol::ProtocolHeader &protoHeader, const QByteArray &payload, const QHostAddress &address, quint16 port);
     void handleInteractionModel(const MatterProtocol::MessageHeader &msgHeader, const MatterProtocol::ProtocolHeader &protoHeader, const QByteArray &payload, const QHostAddress &address, quint16 port);
@@ -85,7 +91,7 @@ private:
 private slots:
 
     void readyRead(void);
-    void permitJoinTimeout(void);
+    void searchTimeout(void);
 
     void mrpRetransmit(const QByteArray &data, const QHostAddress &address, quint16 port);
     void mrpRetransmitFailed(quint32 messageCounter, quint16 exchangeId);
@@ -98,6 +104,11 @@ private slots:
     void paseSendPake3(const QByteArray &payload);
     void paseEstablished(quint16 localSessionId, quint16 peerSessionId);
     void paseFailed(const QString &reason);
+
+public:
+
+    static bool parseQRCode(const QString &payload, quint32 &passcode, quint16 &discriminator);
+    static bool parseManualCode(const QString &code, quint32 &passcode, quint16 &discriminator);
 
 signals:
 

@@ -43,7 +43,7 @@ Requires: Qt (mqtt, network modules), OpenSSL (libssl, libcrypto)
 ## MQTT topics
 
 Same pattern as other HOMEd services:
-- `homed/command/matter` — commands (restartService, updateDevice, removeDevice, getProperties, permitJoin)
+- `homed/command/matter` — commands (restartService, updateDevice, removeDevice, getProperties, addDevice)
 - `homed/td/matter/{device}/{endpoint}` — send commands to device
 - `homed/fd/matter/{device}/{endpoint}` — device state feedback
 - `homed/device/matter/{device}` — availability (online/offline)

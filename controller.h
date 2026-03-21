@@ -21,7 +21,7 @@ public:
         updateDevice,
         removeDevice,
         getProperties,
-        permitJoin
+        addDevice
     };
 
     enum class Event

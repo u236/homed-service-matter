@@ -9,7 +9,7 @@
 
     Message Header:
     +--------+--------+--------+--------+
-    | Flags  | Session ID      | Security
+    | Flags  | Session ID      | SecFlags
     +--------+--------+--------+--------+
     | Message Counter (4 bytes)          |
     +--------+--------+--------+--------+

@@ -4,7 +4,7 @@
 
 void InteractionModel::encodeAttributePath(MatterTLV::Encoder &encoder, const AttributePath &path)
 {
-    encoder.openList(1);
+    encoder.openList();
     encoder.encodeUnsignedInt(2, path.endpointId);
     encoder.encodeUnsignedInt(3, path.clusterId);
     encoder.encodeUnsignedInt(4, path.attributeId);
@@ -71,6 +71,12 @@ QByteArray InteractionModel::encodeReadRequest(const QList <AttributePath> &path
 
     encoder.closeContainer();
 
+    // tag 3: FabricFiltered (required)
+    encoder.encodeBool(3, false);
+
+    // tag 0xFF: InteractionModelRevision (must be last)
+    encoder.encodeUnsignedInt(0xFF, 11);
+
     encoder.closeContainer();
     return encoder.data();
 }
@@ -89,7 +95,7 @@ QByteArray InteractionModel::encodeWriteRequest(quint16 endpointId, quint32 clus
     encoder.openArray(2);
 
     // AttributeDataIB
-    encoder.openStructure(0);
+    encoder.openStructure();
 
     // tag 0: DataVersion (optional, skip)
 
@@ -127,19 +133,19 @@ QByteArray InteractionModel::encodeWriteRequest(quint16 endpointId, quint32 clus
 
 // --- Invoke Request ---
 
-QByteArray InteractionModel::encodeInvokeRequest(const CommandPath &path, const MatterTLV::Encoder &fieldsEncoder)
+QByteArray InteractionModel::encodeInvokeRequest(const CommandPath &path, const MatterTLV::Encoder &fieldsEncoder, bool timedRequest)
 {
     MatterTLV::Encoder encoder;
     encoder.openStructure();
 
-    encoder.encodeBool(0, false); // suppressResponse
-    encoder.encodeBool(1, false); // timedRequest
+    encoder.encodeBool(0, false);        // suppressResponse
+    encoder.encodeBool(1, timedRequest); // timedRequest
 
     // tag 2: InvokeRequests (array of CommandDataIB)
     encoder.openArray(2);
 
     // CommandDataIB
-    encoder.openStructure(0);
+    encoder.openStructure();
 
     // tag 0: CommandPathIB
     encodeCommandPath(encoder, path);
@@ -199,6 +205,9 @@ QByteArray InteractionModel::encodeInvokeRequest(const CommandPath &path, const 
     encoder.closeContainer(); // CommandDataIB
     encoder.closeContainer(); // InvokeRequests array
 
+    // tag 0xFF: InteractionModelRevision
+    encoder.encodeUnsignedInt(0xFF, 11);
+
     encoder.closeContainer();
     return encoder.data();
 }
@@ -222,6 +231,18 @@ QByteArray InteractionModel::encodeSubscribeRequest(const QList <AttributePath> 
 
     encoder.closeContainer();
 
+    encoder.closeContainer();
+    return encoder.data();
+}
+
+// --- Timed Request ---
+
+QByteArray InteractionModel::encodeTimedRequest(quint16 timeoutMs)
+{
+    MatterTLV::Encoder encoder;
+    encoder.openStructure();
+    encoder.encodeUnsignedInt(0, timeoutMs);    // timeoutMs
+    encoder.encodeUnsignedInt(0xFF, 11);        // InteractionModelRevision
     encoder.closeContainer();
     return encoder.data();
 }
@@ -306,10 +327,10 @@ QList <CommandResponse> InteractionModel::decodeInvokeResponse(const QByteArray 
     MatterTLV::Decoder decoder(payload);
     MatterTLV::Element root = decoder.decode();
 
-    // Find invokeResponses array (tag 0)
+    // Find invokeResponses array (tag 1)
     for (const MatterTLV::Element &el : root.children)
     {
-        if (el.tag != 0)
+        if (el.tag != 1)
             continue;
 
         for (const MatterTLV::Element &responseIB : el.children)

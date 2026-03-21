@@ -2,16 +2,16 @@
 
 using namespace MatterTLV;
 
-void Encoder::encodeControl(Type type, quint8 tag)
+void Encoder::encodeControl(Type type, int tag)
 {
     quint8 control = static_cast <quint8> (type);
 
-    if (tag)
+    if (tag >= 0)
         control |= static_cast <quint8> (TagControl::ContextSpecific);
 
     m_data.append(static_cast <char> (control));
 
-    if (tag)
+    if (tag >= 0)
         m_data.append(static_cast <char> (tag));
 }
 
@@ -35,7 +35,7 @@ void Encoder::encodeLength(quint32 length)
     }
 }
 
-void Encoder::encodeSignedInt(quint8 tag, qint64 value)
+void Encoder::encodeSignedInt(int tag, qint64 value)
 {
     quint8 size;
 
@@ -58,19 +58,19 @@ void Encoder::encodeSignedInt(quint8 tag, qint64 value)
         case 8: control |= 0x03; break;
     }
 
-    if (tag)
+    if (tag >= 0)
         control |= static_cast <quint8> (TagControl::ContextSpecific);
 
     m_data.append(static_cast <char> (control));
 
-    if (tag)
+    if (tag >= 0)
         m_data.append(static_cast <char> (tag));
 
     for (quint8 i = 0; i < size; i++)
         m_data.append(static_cast <char> ((value >> (i * 8)) & 0xFF));
 }
 
-void Encoder::encodeUnsignedInt(quint8 tag, quint64 value)
+void Encoder::encodeUnsignedInt(int tag, quint64 value)
 {
     quint8 size;
 
@@ -93,32 +93,32 @@ void Encoder::encodeUnsignedInt(quint8 tag, quint64 value)
         case 8: control |= 0x03; break;
     }
 
-    if (tag)
+    if (tag >= 0)
         control |= static_cast <quint8> (TagControl::ContextSpecific);
 
     m_data.append(static_cast <char> (control));
 
-    if (tag)
+    if (tag >= 0)
         m_data.append(static_cast <char> (tag));
 
     for (quint8 i = 0; i < size; i++)
         m_data.append(static_cast <char> ((value >> (i * 8)) & 0xFF));
 }
 
-void Encoder::encodeBool(quint8 tag, bool value)
+void Encoder::encodeBool(int tag, bool value)
 {
     quint8 control = static_cast <quint8> (value ? 0x09 : 0x08);
 
-    if (tag)
+    if (tag >= 0)
         control |= static_cast <quint8> (TagControl::ContextSpecific);
 
     m_data.append(static_cast <char> (control));
 
-    if (tag)
+    if (tag >= 0)
         m_data.append(static_cast <char> (tag));
 }
 
-void Encoder::encodeFloat(quint8 tag, float value)
+void Encoder::encodeFloat(int tag, float value)
 {
     encodeControl(Type::Float, tag);
 
@@ -128,7 +128,7 @@ void Encoder::encodeFloat(quint8 tag, float value)
         m_data.append(bytes[i]);
 }
 
-void Encoder::encodeDouble(quint8 tag, double value)
+void Encoder::encodeDouble(int tag, double value)
 {
     encodeControl(Type::Double, tag);
 
@@ -138,7 +138,7 @@ void Encoder::encodeDouble(quint8 tag, double value)
         m_data.append(bytes[i]);
 }
 
-void Encoder::encodeUTF8String(quint8 tag, const QString &value)
+void Encoder::encodeUTF8String(int tag, const QString &value)
 {
     QByteArray utf8 = value.toUtf8();
     quint8 control = static_cast <quint8> (Type::UTF8String);
@@ -148,19 +148,19 @@ void Encoder::encodeUTF8String(quint8 tag, const QString &value)
     else
         control |= 0x01;
 
-    if (tag)
+    if (tag >= 0)
         control |= static_cast <quint8> (TagControl::ContextSpecific);
 
     m_data.append(static_cast <char> (control));
 
-    if (tag)
+    if (tag >= 0)
         m_data.append(static_cast <char> (tag));
 
     encodeLength(static_cast <quint32> (utf8.length()));
     m_data.append(utf8);
 }
 
-void Encoder::encodeByteString(quint8 tag, const QByteArray &value)
+void Encoder::encodeByteString(int tag, const QByteArray &value)
 {
     quint8 control = static_cast <quint8> (Type::ByteString);
 
@@ -169,34 +169,34 @@ void Encoder::encodeByteString(quint8 tag, const QByteArray &value)
     else
         control |= 0x01;
 
-    if (tag)
+    if (tag >= 0)
         control |= static_cast <quint8> (TagControl::ContextSpecific);
 
     m_data.append(static_cast <char> (control));
 
-    if (tag)
+    if (tag >= 0)
         m_data.append(static_cast <char> (tag));
 
     encodeLength(static_cast <quint32> (value.length()));
     m_data.append(value);
 }
 
-void Encoder::encodeNull(quint8 tag)
+void Encoder::encodeNull(int tag)
 {
     encodeControl(Type::Null, tag);
 }
 
-void Encoder::openStructure(quint8 tag)
+void Encoder::openStructure(int tag)
 {
     encodeControl(Type::Structure, tag);
 }
 
-void Encoder::openArray(quint8 tag)
+void Encoder::openArray(int tag)
 {
     encodeControl(Type::Array, tag);
 }
 
-void Encoder::openList(quint8 tag)
+void Encoder::openList(int tag)
 {
     encodeControl(Type::List, tag);
 }
