@@ -109,6 +109,7 @@ private:
     DeviceObject *m_caseDevice;
     QHostAddress m_caseAddress;
     quint16 m_casePort;
+    bool m_caseNeedsCommissioningComplete;
 
     QList <DeviceObject*> m_caseQueue;
 

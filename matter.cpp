@@ -23,6 +23,7 @@ Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), 
     m_pendingCASE = nullptr;
     m_caseDevice = nullptr;
     m_caseExchangeId = 0;
+    m_caseNeedsCommissioningComplete = false;
 
     // start message counter from random value to avoid replay detection after restart
     QByteArray counterBytes = Crypto::randomBytes(4);
@@ -600,6 +601,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         commission.device->setNetworkPort(commission.port);
                         emit deviceCommissioned(commission.device);
 
+                        m_caseNeedsCommissioningComplete = true;
                         connectDevice(commission.device);
 
                         // clean up PASE session
@@ -1189,11 +1191,12 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
 
     logInfo << "CASE session established with" << m_caseDevice->name();
 
-    // send CommissioningComplete on CASE session if device not yet fully commissioned
+    // send CommissioningComplete on CASE session only during initial commissioning
     SessionInfo *caseSession = m_sessions->findByLocalId(localSessionId);
 
-    if (caseSession && m_caseDevice->availability() != Availability::Online)
+    if (caseSession && m_caseNeedsCommissioningComplete)
     {
+        m_caseNeedsCommissioningComplete = false;
         logInfo << "Sending CommissioningComplete on CASE session...";
 
         MatterTLV::Encoder fields;
