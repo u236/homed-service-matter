@@ -83,6 +83,8 @@ private:
     MDNS *m_mdns;
     SessionManager *m_sessions;
     QTimer *m_searchTimer;
+    QTimer *m_reconnectTimer;
+    QTimer *m_pingTimer;
 
     quint16 m_port;
     bool m_searching;
@@ -120,9 +122,11 @@ private:
     QList <DeviceObject*> m_caseQueue;
 
     QList <Device> *m_devices;
+    QMap <quint64, QList <AttributePath>> m_subscribedPaths;
 
     QMap <quint16, PendingCommission> m_pendingCommissions;
 
+    void handleDeviceUnreachable(DeviceObject *device);
     void sendRawDatagram(const QByteArray &data, const QHostAddress &address, quint16 port);
     void sendUnencrypted(quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, const QHostAddress &address, quint16 port, bool initiator, quint32 ackCounter = 0);
     void sendEncrypted(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator, quint32 ackCounter = 0);
@@ -139,9 +143,11 @@ private slots:
 
     void readyRead(void);
     void searchTimeout(void);
+    void reconnectTimeout(void);
+    void pingTimeout(void);
 
     void mrpRetransmit(const QByteArray &data, const QHostAddress &address, quint16 port);
-    void mrpRetransmitFailed(quint32 messageCounter, quint16 exchangeId);
+    void mrpRetransmitFailed(quint32 messageCounter, quint16 exchangeId, const QHostAddress &address, quint16 port);
     void mrpSendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port);
 
     void mdnsServiceFound(const MatterService &service);
@@ -165,6 +171,8 @@ public:
 signals:
 
     void deviceCommissioned(DeviceObject *device);
+    void deviceOnline(DeviceObject *device);
+    void deviceOffline(DeviceObject *device);
     void deviceRemoved(DeviceObject *device, bool success);
 
 };

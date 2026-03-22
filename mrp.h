@@ -88,7 +88,7 @@ signals:
 
     void retransmit(const QByteArray &data, const QHostAddress &address, quint16 port);
     void sendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port);
-    void retransmitFailed(quint32 messageCounter, quint16 exchangeId);
+    void retransmitFailed(quint32 messageCounter, quint16 exchangeId, const QHostAddress &address, quint16 port);
 
 };
 

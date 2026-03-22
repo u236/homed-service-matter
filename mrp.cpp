@@ -128,7 +128,7 @@ void MRP::processTimers(void)
         if (pending.retryCount > MRP_RETRANS_MAX)
         {
             logWarning << "MRP retransmit failed for counter" << pending.messageCounter;
-            emit retransmitFailed(pending.messageCounter, pending.exchangeId);
+            emit retransmitFailed(pending.messageCounter, pending.exchangeId, pending.address, pending.port);
             m_pendingMessages.removeAt(i);
             continue;
         }

@@ -41,8 +41,9 @@ struct SessionInfo
     quint32 localMessageCounter;
 
     bool active;
+    qint64 lastSeen;
 
-    SessionInfo(void) : localSessionId(0), peerSessionId(0), peerPort(0), peerNodeId(0), localMessageCounter(0), active(false) {}
+    SessionInfo(void) : localSessionId(0), peerSessionId(0), peerPort(0), peerNodeId(0), localMessageCounter(0), active(false), lastSeen(0) {}
 };
 
 class SessionManager : public QObject

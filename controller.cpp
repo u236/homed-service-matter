@@ -13,6 +13,8 @@ Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, confi
     connect(m_timer, &QTimer::timeout, this, &Controller::updateProperties);
     connect(m_devices, &DeviceList::statusUpdated, this, &Controller::statusUpdated);
     connect(m_matter, &Matter::deviceCommissioned, this, &Controller::deviceCommissioned);
+    connect(m_matter, &Matter::deviceOnline, this, &Controller::deviceOnline);
+    connect(m_matter, &Matter::deviceOffline, this, &Controller::deviceOffline);
     connect(m_matter, &Matter::deviceRemoved, this, &Controller::deviceRemoved);
     m_matter->setDevices(m_devices);
 
@@ -305,6 +307,16 @@ void Controller::endpointUpdated(DeviceObject *device, quint8 endpointId)
 void Controller::statusUpdated(const QJsonObject &json)
 {
     mqttPublish(mqttTopic("status/%1").arg(serviceTopic()), json, true);
+}
+
+void Controller::deviceOnline(DeviceObject *device)
+{
+    updateAvailability(device);
+}
+
+void Controller::deviceOffline(DeviceObject *device)
+{
+    updateAvailability(device);
 }
 
 void Controller::deviceCommissioned(DeviceObject *device)

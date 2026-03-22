@@ -231,8 +231,8 @@ QByteArray InteractionModel::encodeSubscribeRequest(const QList <AttributePath> 
 
     encoder.closeContainer();
 
-    // tag 4: FabricFiltered (required)
-    encoder.encodeBool(4, false);
+    // tag 7: FabricFiltered (required)
+    encoder.encodeBool(7, false);
 
     // tag 0xFF: InteractionModelRevision
     encoder.encodeUnsignedInt(0xFF, 11);
@@ -440,6 +440,20 @@ QByteArray InteractionModel::encodeMoveToColorTemperatureCommand(quint16 endpoin
     fields.closeContainer();
 
     return encodeInvokeRequest(CommandPath(endpointId, Clusters::ColorControl::Id, Clusters::ColorControl::Commands::MoveToColorTemperature), fields);
+}
+
+QByteArray InteractionModel::encodeMoveToHueAndSaturationCommand(quint16 endpointId, quint8 hue, quint8 saturation, quint16 transitionTime)
+{
+    MatterTLV::Encoder fields;
+    fields.openStructure();
+    fields.encodeUnsignedInt(0, hue);              // hue
+    fields.encodeUnsignedInt(1, saturation);        // saturation
+    fields.encodeUnsignedInt(2, transitionTime);    // transitionTime
+    fields.encodeUnsignedInt(3, 0);                // optionsMask
+    fields.encodeUnsignedInt(4, 0);                // optionsOverride
+    fields.closeContainer();
+
+    return encodeInvokeRequest(CommandPath(endpointId, Clusters::ColorControl::Id, Clusters::ColorControl::Commands::MoveToHueAndSaturation), fields);
 }
 
 QByteArray InteractionModel::encodeLockCommand(quint16 endpointId, bool lock)

@@ -3,22 +3,27 @@
 #include <cstring>
 #include "matter.h"
 #include "expose.h"
+#include "color.h"
 #include "logger.h"
 #include "tlv.h"
 #include "clusters.h"
 
 using namespace MatterProtocol;
 
-Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), m_mrp(new MRP(this)), m_mdns(new MDNS(this)), m_sessions(new SessionManager(this)), m_searchTimer(new QTimer(this)), m_port(5540), m_searching(false), m_searchShortDiscriminator(false), m_searchPasscode(0), m_searchDiscriminator(0), m_messageCounter(0), m_exchangeCounter(0), m_sessionCounter(1), m_fabricId(1), m_nodeId(1)
+Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), m_mrp(new MRP(this)), m_mdns(new MDNS(this)), m_sessions(new SessionManager(this)), m_searchTimer(new QTimer(this)), m_reconnectTimer(new QTimer(this)), m_pingTimer(new QTimer(this)), m_port(5540), m_searching(false), m_searchShortDiscriminator(false), m_searchPasscode(0), m_searchDiscriminator(0), m_messageCounter(0), m_exchangeCounter(0), m_sessionCounter(1), m_fabricId(1), m_nodeId(1)
 {
     connect(m_udp, &QUdpSocket::readyRead, this, &Matter::readyRead);
     connect(m_searchTimer, &QTimer::timeout, this, &Matter::searchTimeout);
+    connect(m_reconnectTimer, &QTimer::timeout, this, &Matter::reconnectTimeout);
+    connect(m_pingTimer, &QTimer::timeout, this, &Matter::pingTimeout);
     connect(m_mrp, &MRP::retransmit, this, &Matter::mrpRetransmit);
     connect(m_mrp, &MRP::retransmitFailed, this, &Matter::mrpRetransmitFailed);
     connect(m_mrp, &MRP::sendStandaloneAck, this, &Matter::mrpSendStandaloneAck);
     connect(m_mdns, &MDNS::serviceFound, this, &Matter::mdnsServiceFound);
 
     m_searchTimer->setSingleShot(true);
+    m_reconnectTimer->setSingleShot(true);
+    m_pingTimer->start(10000);
 
     // fabric credentials will be set by Controller after database init
     m_devices = nullptr;
@@ -182,6 +187,7 @@ void Matter::sendCommand(DeviceObject *device, quint8 endpointId, const QString 
     if (!session)
     {
         logWarning << "No active session for device" << device->name();
+        handleDeviceUnreachable(device);
         return;
     }
 
@@ -200,6 +206,18 @@ void Matter::sendCommand(DeviceObject *device, quint8 endpointId, const QString 
         payload = InteractionModel::encodeMoveToLevelCommand(endpointId, static_cast <quint8> (value.toUInt()));
     else if (name == "colorTemperature")
         payload = InteractionModel::encodeMoveToColorTemperatureCommand(endpointId, static_cast <quint16> (value.toUInt()));
+    else if (name == "color")
+    {
+        QList <QVariant> list = value.toList();
+
+        if (list.count() >= 3)
+        {
+            Color color(list.at(0).toDouble() / 0xFF, list.at(1).toDouble() / 0xFF, list.at(2).toDouble() / 0xFF);
+            double h, s;
+            color.toHS(&h, &s);
+            payload = InteractionModel::encodeMoveToHueAndSaturationCommand(endpointId, static_cast <quint8> (h * 0xFF), static_cast <quint8> (s * 0xFF));
+        }
+    }
     else if (name == "lock")
         payload = InteractionModel::encodeLockCommand(endpointId, value.toString() == "lock");
     else if (name == "cover")
@@ -224,6 +242,7 @@ void Matter::readAttributes(DeviceObject *device, const QList <AttributePath> &p
     if (!session)
     {
         logWarning << "No active session for device" << device->name();
+        handleDeviceUnreachable(device);
         return;
     }
 
@@ -408,6 +427,9 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
         case InteractionModelOpcode::ReportData:
         {
             QList <AttributeReport> reports = InteractionModel::decodeReportData(payload);
+            QList <AttributePath> pendingSubPaths;
+            SessionInfo *pendingSubSession = nullptr;
+            DeviceObject *pendingSubDevice = nullptr;
 
             for (const AttributeReport &report : reports)
             {
@@ -435,6 +457,26 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                                     dev->updateEndpoint(report.path.endpointId, "status", report.value.toBool() ? "on" : "off");
                                 else if (report.path.clusterId == Clusters::LevelControl::Id && report.path.attributeId == Clusters::LevelControl::Attributes::CurrentLevel)
                                     dev->updateEndpoint(report.path.endpointId, "level", report.value.toUInt());
+                                else if (report.path.clusterId == Clusters::ColorControl::Id && (report.path.attributeId == Clusters::ColorControl::Attributes::CurrentHue || report.path.attributeId == Clusters::ColorControl::Attributes::CurrentSaturation))
+                                {
+                                    Endpoint ep = dev->endpoints().value(report.path.endpointId);
+
+                                    if (!ep.isNull())
+                                    {
+                                        if (report.path.attributeId == Clusters::ColorControl::Attributes::CurrentHue)
+                                            ep->status().insert("colorH", report.value.toUInt());
+                                        else
+                                            ep->status().insert("colorS", report.value.toUInt());
+
+                                        if (ep->status().contains("colorH") && ep->status().contains("colorS"))
+                                        {
+                                            Color color = Color::fromHS(ep->status().value("colorH").toDouble() / 0xFF, ep->status().value("colorS").toDouble() / 0xFF);
+                                            dev->updateEndpoint(report.path.endpointId, "color", QVariant(QList <QVariant> {static_cast <int> (color.r() * 0xFF), static_cast <int> (color.g() * 0xFF), static_cast <int> (color.b() * 0xFF)}));
+                                        }
+                                    }
+                                }
+                                else if (report.path.clusterId == Clusters::ColorControl::Id && report.path.attributeId == Clusters::ColorControl::Attributes::ColorTemperatureMireds)
+                                    dev->updateEndpoint(report.path.endpointId, "colorTemperature", report.value.toUInt());
                                 else if (report.path.clusterId == Clusters::TemperatureMeasurement::Id && report.path.attributeId == Clusters::TemperatureMeasurement::Attributes::MeasuredValue)
                                     dev->updateEndpoint(report.path.endpointId, "temperature", report.value.toDouble() / 100.0);
                                 else if (report.path.clusterId == Clusters::RelativeHumidityMeasurement::Id && report.path.attributeId == Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue)
@@ -545,12 +587,12 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             continue;
 
                         // ServerList is an array — parse children
+                        logInfo << "ServerList for ep" << report.path.endpointId << ":" << report.rawValue.children.count() << "clusters, type:" << static_cast <int> (report.rawValue.type);
+
                         for (const MatterTLV::Element &child : report.rawValue.children)
                         {
                             quint32 clusterId = child.value.toUInt();
-
-                            if (clusterId)
-                                endpointClusters[report.path.endpointId].append(clusterId);
+                            endpointClusters[report.path.endpointId].append(clusterId);
                         }
                     }
 
@@ -590,11 +632,9 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         }
                     }
 
-                    // subscribe to state attributes
+                    // collect subscribe paths for after StatusResponse
                     if (!endpointClusters.isEmpty() && reportSession)
                     {
-                        QList <AttributePath> subPaths;
-
                         for (auto it = endpointClusters.begin(); it != endpointClusters.end(); it++)
                         {
                             quint8 epId = it.key();
@@ -603,24 +643,27 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                                 continue;
 
                             if (it.value().contains(Clusters::OnOff::Id))
-                                subPaths.append(AttributePath(epId, Clusters::OnOff::Id, Clusters::OnOff::Attributes::OnOff));
+                                pendingSubPaths.append(AttributePath(epId, Clusters::OnOff::Id, Clusters::OnOff::Attributes::OnOff));
 
                             if (it.value().contains(Clusters::LevelControl::Id))
-                                subPaths.append(AttributePath(epId, Clusters::LevelControl::Id, Clusters::LevelControl::Attributes::CurrentLevel));
+                                pendingSubPaths.append(AttributePath(epId, Clusters::LevelControl::Id, Clusters::LevelControl::Attributes::CurrentLevel));
+
+                            if (it.value().contains(Clusters::ColorControl::Id))
+                            {
+                                pendingSubPaths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentHue));
+                                pendingSubPaths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentSaturation));
+                                pendingSubPaths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTemperatureMireds));
+                            }
 
                             if (it.value().contains(Clusters::TemperatureMeasurement::Id))
-                                subPaths.append(AttributePath(epId, Clusters::TemperatureMeasurement::Id, Clusters::TemperatureMeasurement::Attributes::MeasuredValue));
+                                pendingSubPaths.append(AttributePath(epId, Clusters::TemperatureMeasurement::Id, Clusters::TemperatureMeasurement::Attributes::MeasuredValue));
 
                             if (it.value().contains(Clusters::RelativeHumidityMeasurement::Id))
-                                subPaths.append(AttributePath(epId, Clusters::RelativeHumidityMeasurement::Id, Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue));
+                                pendingSubPaths.append(AttributePath(epId, Clusters::RelativeHumidityMeasurement::Id, Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue));
                         }
 
-                        if (!subPaths.isEmpty())
-                        {
-                            logInfo << "Subscribing to" << subPaths.count() << "attributes on" << reportDevice->name();
-                            QByteArray subPayload = InteractionModel::encodeSubscribeRequest(subPaths, 0, 60);
-                            sendEncrypted(reportSession, static_cast <quint8> (InteractionModelOpcode::SubscribeRequest), static_cast <quint16> (ProtocolId::InteractionModel), subPayload, m_exchangeCounter++, true);
-                        }
+                        pendingSubSession = reportSession;
+                        pendingSubDevice = reportDevice;
                     }
                 }
             }
@@ -632,6 +675,15 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
             {
                 QByteArray statusPayload = InteractionModel::encodeStatusResponse(0);
                 sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::StatusResponse), static_cast <quint16> (ProtocolId::InteractionModel), statusPayload, protoHeader.exchangeId, false);
+            }
+
+            // send SubscribeRequest after StatusResponse has been sent
+            if (!pendingSubPaths.isEmpty() && pendingSubSession && pendingSubDevice)
+            {
+                logInfo << "Subscribing to" << pendingSubPaths.count() << "attributes on" << pendingSubDevice->name();
+                m_subscribedPaths[pendingSubDevice->nodeId()] = pendingSubPaths;
+                QByteArray subPayload = InteractionModel::encodeSubscribeRequest(pendingSubPaths, 0, 10);
+                sendEncrypted(pendingSubSession, static_cast <quint8> (InteractionModelOpcode::SubscribeRequest), static_cast <quint16> (ProtocolId::InteractionModel), subPayload, m_exchangeCounter++, true);
             }
 
             // continue commissioning if applicable
@@ -665,6 +717,33 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         break;
                     }
                 }
+            }
+
+            break;
+        }
+
+        case InteractionModelOpcode::SubscribeResponse:
+        {
+            MatterTLV::Decoder decoder(payload);
+            MatterTLV::Element root = decoder.decode();
+            quint32 subscriptionId = 0;
+            quint16 maxInterval = 0;
+
+            for (const MatterTLV::Element &el : root.children)
+            {
+                if (el.tag == 0) subscriptionId = el.value.toUInt();
+                if (el.tag == 1) maxInterval = el.value.toUInt();
+            }
+
+            logInfo << "Subscription established, id:" << subscriptionId << "maxInterval:" << maxInterval;
+
+            // send StatusResponse to confirm
+            SessionInfo *session = m_sessions->findByLocalId(msgHeader.sessionId);
+
+            if (session)
+            {
+                QByteArray statusPayload = InteractionModel::encodeStatusResponse(0);
+                sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::StatusResponse), static_cast <quint16> (ProtocolId::InteractionModel), statusPayload, protoHeader.exchangeId, false);
             }
 
             break;
@@ -841,6 +920,17 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                 }
             }
 
+            // read back subscribed attributes after successful device command
+            {
+                SessionInfo *session = m_sessions->findByLocalId(msgHeader.sessionId);
+
+                if (session && m_subscribedPaths.contains(session->peerNodeId))
+                {
+                    QByteArray readPayload = InteractionModel::encodeReadRequest(m_subscribedPaths.value(session->peerNodeId));
+                    sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), readPayload, m_exchangeCounter++, true);
+                }
+            }
+
             // handle CommissioningComplete response on CASE session (after AddNOC → CASE)
             if (m_pendingCommissionDevice)
             {
@@ -857,10 +947,6 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
             break;
         }
-
-        case InteractionModelOpcode::SubscribeResponse:
-            logInfo << "SubscribeResponse received";
-            break;
 
         default:
             logWarning << "Unknown IM opcode:" << QString::number(protoHeader.opcode, 16);
@@ -1175,10 +1261,7 @@ void Matter::readyRead(void)
             SessionInfo *session = m_sessions->findByLocalId(msgHeader.sessionId);
 
             if (!session)
-            {
-                logWarning << "Unknown session" << msgHeader.sessionId << "from" << sender.toString();
                 continue;
-            }
 
             QByteArray header = datagram.left(headerOffset);
             QByteArray ciphertext = datagram.mid(headerOffset);
@@ -1192,6 +1275,7 @@ void Matter::readyRead(void)
             }
 
             logInfo << "Decrypted message from session" << msgHeader.sessionId << "counter:" << msgHeader.messageCounter << "size:" << payload.size();
+            session->lastSeen = QDateTime::currentMSecsSinceEpoch();
         }
         else
         {
@@ -1234,14 +1318,112 @@ void Matter::searchTimeout(void)
     logWarning << "Device search timeout, device not found";
 }
 
+void Matter::reconnectTimeout(void)
+{
+    if (!m_devices)
+        return;
+
+    bool hasOffline = false;
+
+    for (int i = 0; i < m_devices->count(); i++)
+    {
+        DeviceObject *device = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
+
+        if (device->availability() != Availability::Online && !device->networkAddress().isNull())
+        {
+            connectDevice(device);
+            hasOffline = true;
+        }
+    }
+
+    if (hasOffline)
+        m_reconnectTimer->start(30000);
+}
+
+void Matter::pingTimeout(void)
+{
+    if (!m_devices)
+        return;
+
+    qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+    for (int i = 0; i < m_devices->count(); i++)
+    {
+        DeviceObject *device = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
+
+        if (device->availability() != Availability::Online)
+            continue;
+
+        SessionInfo *session = m_sessions->findByPeerNodeId(device->nodeId());
+
+        if (!session)
+        {
+            handleDeviceUnreachable(device);
+            continue;
+        }
+
+        if (session->lastSeen && now - session->lastSeen > 10000)
+        {
+            QList <AttributePath> paths = {AttributePath(0, Clusters::BasicInformation::Id, Clusters::BasicInformation::Attributes::DataModelRevision)};
+            QByteArray payload = InteractionModel::encodeReadRequest(paths);
+            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+        }
+    }
+}
+
 void Matter::mrpRetransmit(const QByteArray &data, const QHostAddress &address, quint16 port)
 {
     sendRawDatagram(data, address, port);
 }
 
-void Matter::mrpRetransmitFailed(quint32 messageCounter, quint16 exchangeId)
+void Matter::handleDeviceUnreachable(DeviceObject *device)
+{
+    SessionInfo *session = m_sessions->findByPeerNodeId(device->nodeId());
+
+    if (session)
+        m_sessions->removeSession(session->localSessionId);
+
+    if (device->availability() == Availability::Online)
+    {
+        logWarning << "Device" << device->name() << "is unreachable, marking offline";
+        device->setAvailability(Availability::Offline);
+        emit deviceOffline(device);
+    }
+
+    connectDevice(device);
+
+    if (!m_reconnectTimer->isActive())
+        m_reconnectTimer->start(30000);
+}
+
+void Matter::mrpRetransmitFailed(quint32 messageCounter, quint16 exchangeId, const QHostAddress &address, quint16 port)
 {
     logWarning << "Message delivery failed, counter:" << messageCounter << "exchange:" << exchangeId;
+
+    // check if this is a pending CASE handshake failure
+    if (m_pendingCASE && m_caseAddress == address)
+    {
+        caseFailed("MRP retransmit failed");
+        return;
+    }
+
+    SessionInfo *session = m_sessions->findByPeerAddress(address, port);
+
+    if (!session || !m_devices)
+        return;
+
+    quint64 nodeId = session->peerNodeId;
+
+    for (int i = 0; i < m_devices->count(); i++)
+    {
+        DeviceObject *device = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
+
+        if (device->nodeId() == nodeId)
+        {
+            handleDeviceUnreachable(device);
+            break;
+        }
+    }
 }
 
 void Matter::mrpSendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port)
@@ -1412,6 +1594,7 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
 
     session.peerAddress = m_caseDevice->networkAddress();
     session.peerPort = m_caseDevice->networkPort();
+    session.lastSeen = QDateTime::currentMSecsSinceEpoch();
 
     // remove old (dead) session
     SessionInfo *existing = m_sessions->findByPeerNodeId(m_caseDevice->nodeId());
@@ -1445,6 +1628,7 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
     }
 
     m_caseDevice->setAvailability(Availability::Online);
+    emit deviceOnline(m_caseDevice);
 
     m_pendingCASE->deleteLater();
     m_pendingCASE = nullptr;
@@ -1466,6 +1650,9 @@ void Matter::caseFailed(const QString &reason)
     }
 
     m_caseDevice = nullptr;
+
+    if (!m_reconnectTimer->isActive())
+        m_reconnectTimer->start(30000);
 
     // connect next queued device
     if (!m_caseQueue.isEmpty())

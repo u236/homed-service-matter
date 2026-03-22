@@ -3,6 +3,7 @@ include(../homed-common/homed-endpoint.pri)
 include(../homed-common/homed-parser.pri)
 
 HEADERS += \
+    ../homed-common/color.h \
     case.h \
     clusters.h \
     controller.h \
@@ -18,6 +19,7 @@ HEADERS += \
     tlv.h
 
 SOURCES += \
+    ../homed-common/color.cpp \
     case.cpp \
     controller.cpp \
     crypto.cpp \

@@ -68,6 +68,8 @@ private slots:
     void statusUpdated(const QJsonObject &json);
 
     void deviceCommissioned(DeviceObject *device);
+    void deviceOnline(DeviceObject *device);
+    void deviceOffline(DeviceObject *device);
     void deviceRemoved(DeviceObject *device, bool success);
 
 };
