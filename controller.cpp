@@ -13,6 +13,7 @@ Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, confi
     connect(m_timer, &QTimer::timeout, this, &Controller::updateProperties);
     connect(m_devices, &DeviceList::statusUpdated, this, &Controller::statusUpdated);
     connect(m_matter, &Matter::deviceCommissioned, this, &Controller::deviceCommissioned);
+    connect(m_matter, &Matter::deviceRemoved, this, &Controller::deviceRemoved);
 
     m_timer->setSingleShot(true);
 
@@ -194,22 +195,10 @@ void Controller::mqttReceived(const QByteArray &message, const QMqttTopicName &t
 
             case Command::removeDevice:
             {
-                int index = -1;
-                Device device = m_devices->byName(json.value("device").toString(), &index);
+                Device device = m_devices->byName(json.value("device").toString());
 
-                if (index >= 0)
-                {
-                    DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
-                    bool graceful = m_matter->removeDevice(obj);
-
-                    disconnect(device.data(), &DeviceObject::deviceUpdated, this, &Controller::deviceUpdated);
-                    disconnect(device.data(), &DeviceObject::endpointUpdated, this, &Controller::endpointUpdated);
-
-                    m_devices->removeAt(index);
-                    logInfo << device << (graceful ? "removed gracefully" : "removed forcefully");
-                    deviceEvent(device.data(), Event::removed);
-                    m_devices->store(true);
-                }
+                if (!device.isNull())
+                    m_matter->removeDevice(reinterpret_cast <DeviceObject*> (device.data()));
 
                 break;
             }
@@ -330,7 +319,19 @@ void Controller::deviceCommissioned(DeviceObject *device)
     m_devices->store(true);
 }
 
-void Controller::deviceRemoved(quint64 nodeId)
+void Controller::deviceRemoved(DeviceObject *device, bool success)
 {
-    Q_UNUSED(nodeId)
+    int index = -1;
+    m_devices->byName(device->name(), &index);
+
+    if (index < 0)
+        return;
+
+    disconnect(device, &DeviceObject::deviceUpdated, this, &Controller::deviceUpdated);
+    disconnect(device, &DeviceObject::endpointUpdated, this, &Controller::endpointUpdated);
+
+    m_devices->removeAt(index);
+    logInfo << device << "removed" << (success ? "gracefully" : "forcefully");
+    deviceEvent(device, Event::removed);
+    m_devices->store(true);
 }

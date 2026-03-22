@@ -68,7 +68,7 @@ private slots:
     void statusUpdated(const QJsonObject &json);
 
     void deviceCommissioned(DeviceObject *device);
-    void deviceRemoved(quint64 nodeId);
+    void deviceRemoved(DeviceObject *device, bool success);
 
 };
 

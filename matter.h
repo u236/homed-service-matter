@@ -31,7 +31,7 @@ public:
 
     void addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator = false, quint64 nodeId = 0);
     void connectDevice(DeviceObject *device);
-    bool removeDevice(DeviceObject *device);
+    void removeDevice(DeviceObject *device);
     void sendCommand(DeviceObject *device, quint8 endpointId, const QString &name, const QVariant &value);
     void readAttributes(DeviceObject *device, const QList <AttributePath> &paths);
 
@@ -113,6 +113,7 @@ private:
     quint16 m_casePort;
     bool m_caseNeedsCommissioningComplete;
     DeviceObject *m_pendingCommissionDevice;
+    DeviceObject *m_pendingRemoveDevice;
 
     QList <DeviceObject*> m_caseQueue;
 
@@ -160,6 +161,7 @@ public:
 signals:
 
     void deviceCommissioned(DeviceObject *device);
+    void deviceRemoved(DeviceObject *device, bool success);
 
 };
 

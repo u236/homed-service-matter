@@ -25,6 +25,7 @@ Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), 
     m_caseExchangeId = 0;
     m_caseNeedsCommissioningComplete = false;
     m_pendingCommissionDevice = nullptr;
+    m_pendingRemoveDevice = nullptr;
 
     // start message counter from random value to avoid replay detection after restart
     QByteArray counterBytes = Crypto::randomBytes(4);
@@ -114,17 +115,20 @@ void Matter::connectDevice(DeviceObject *device)
                    m_ipk, m_controllerNOC, m_controllerRCAC);
 }
 
-bool Matter::removeDevice(DeviceObject *device)
+void Matter::removeDevice(DeviceObject *device)
 {
     SessionInfo *session = m_sessions->findByPeerNodeId(device->nodeId());
 
     if (!session || !session->active)
     {
-        logWarning << "No active session for" << device->name() << ", force removing";
-        return false;
+        logWarning << "No active session for" << device->name();
+        emit deviceRemoved(device, false);
+        return;
     }
 
     logInfo << "Sending RemoveFabric to" << device->name() << "fabricIndex:" << device->fabricIndex();
+
+    m_pendingRemoveDevice = device;
 
     MatterTLV::Encoder fields;
     fields.openStructure();
@@ -135,7 +139,6 @@ bool Matter::removeDevice(DeviceObject *device)
     sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
 
     session->active = false;
-    return true;
 }
 
 void Matter::addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator, quint64 nodeId)
@@ -621,6 +624,26 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         commission.state = CommissioningState::Done;
                         continueCommissioning(commission);
                         break;
+                    }
+                }
+            }
+
+            // handle RemoveFabric response (NOCResponse cmd 0x08)
+            if (m_pendingRemoveDevice)
+            {
+                for (const CommandResponse &response : responses)
+                {
+                    if (response.path.clusterId == Clusters::OperationalCredentials::Id && response.path.commandId == Clusters::OperationalCredentials::Commands::NOCResponse)
+                    {
+                        quint8 status = 0xFF;
+
+                        for (const MatterTLV::Element &field : response.data.children)
+                        {
+                            if (field.tag == 0) status = field.value.toUInt();
+                        }
+
+                        emit deviceRemoved(m_pendingRemoveDevice, status == 0);
+                        m_pendingRemoveDevice = nullptr;
                     }
                 }
             }
