@@ -10,6 +10,8 @@ Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, confi
     m_haEnabled = getConfig()->value("homeassistant/enabled", false).toBool();
     m_haUpdate = getConfig()->value("homeassistant/update", false).toBool();
 
+    m_matter->setDebug(getConfig()->value("debug/matter", false).toBool());
+
     connect(m_timer, &QTimer::timeout, this, &Controller::updateProperties);
     connect(m_devices, &DeviceList::statusUpdated, this, &Controller::statusUpdated);
     connect(m_matter, &Matter::deviceCommissioned, this, &Controller::deviceCommissioned);

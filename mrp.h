@@ -63,6 +63,8 @@ public:
 
     MRP(QObject *parent);
 
+    inline void setDebug(bool value) { m_debug = value; }
+
     void messageSent(const QByteArray &data, const QHostAddress &address, quint16 port, quint32 messageCounter, quint16 exchangeId, bool needsAck);
     void messageReceived(quint32 messageCounter, quint16 exchangeId, bool hasAck, quint32 ackCounter, const QHostAddress &address, quint16 port, quint16 sessionId, bool needsAck);
     void cancelPendingAck(quint32 messageCounter);
@@ -72,6 +74,7 @@ public:
 private:
 
     QTimer *m_timer;
+    bool m_debug;
 
     QList <PendingMessage> m_pendingMessages;
     QList <PendingAck> m_pendingAcks;

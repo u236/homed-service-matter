@@ -5,7 +5,7 @@
 
 #define COUNTER_WINDOW_SIZE 32
 
-MRP::MRP(QObject *parent) : QObject(parent), m_timer(new QTimer(this))
+MRP::MRP(QObject *parent) : QObject(parent), m_timer(new QTimer(this)), m_debug(false)
 {
     connect(m_timer, &QTimer::timeout, this, &MRP::processTimers);
     m_timer->start(50);
@@ -133,7 +133,7 @@ void MRP::processTimers(void)
             continue;
         }
 
-        logInfo << "MRP retransmit" << pending.retryCount << "for counter" << pending.messageCounter;
+        logDebug(m_debug) << "MRP retransmit" << pending.retryCount << "for counter" << pending.messageCounter;
         emit retransmit(pending.data, pending.address, pending.port);
         pending.nextRetransmit = now + retransmitInterval(pending.retryCount);
     }

@@ -23,6 +23,7 @@ public:
     Matter(QObject *parent);
 
     void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC = QByteArray(), const QByteArray &controllerRCAC = QByteArray());
+    inline void setDebug(bool value) { m_debug = value; m_mrp->setDebug(value); }
     inline void setDevices(QList <Device> *devices) { m_devices = devices; }
     inline QByteArray fabricKey(void) { return m_fabricKey; }
     inline quint64 rootCAId(void) { return m_rootCAId; }
@@ -87,6 +88,7 @@ private:
     QTimer *m_pingTimer;
 
     quint16 m_port;
+    bool m_debug;
     bool m_searching;
     bool m_searchShortDiscriminator;
     quint32 m_searchPasscode;

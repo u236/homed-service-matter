@@ -10,7 +10,7 @@
 
 using namespace MatterProtocol;
 
-Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), m_mrp(new MRP(this)), m_mdns(new MDNS(this)), m_sessions(new SessionManager(this)), m_searchTimer(new QTimer(this)), m_reconnectTimer(new QTimer(this)), m_pingTimer(new QTimer(this)), m_port(5540), m_searching(false), m_searchShortDiscriminator(false), m_searchPasscode(0), m_searchDiscriminator(0), m_messageCounter(0), m_exchangeCounter(0), m_sessionCounter(1), m_fabricId(1), m_nodeId(1)
+Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), m_mrp(new MRP(this)), m_mdns(new MDNS(this)), m_sessions(new SessionManager(this)), m_searchTimer(new QTimer(this)), m_reconnectTimer(new QTimer(this)), m_pingTimer(new QTimer(this)), m_port(5540), m_debug(false), m_searching(false), m_searchShortDiscriminator(false), m_searchPasscode(0), m_searchDiscriminator(0), m_messageCounter(0), m_exchangeCounter(0), m_sessionCounter(1), m_fabricId(1), m_nodeId(1)
 {
     connect(m_udp, &QUdpSocket::readyRead, this, &Matter::readyRead);
     connect(m_searchTimer, &QTimer::timeout, this, &Matter::searchTimeout);
@@ -85,7 +85,7 @@ void Matter::connectDevice(DeviceObject *device)
 
     if (existing && existing->active)
     {
-        logInfo << "Already have active session for" << device->name();
+        logDebug(m_debug) << "Already have active session for" << device->name();
         return;
     }
 
@@ -389,12 +389,12 @@ void Matter::handleSecureChannel(const MessageHeader &msgHeader, const ProtocolH
                 return;
             }
 
-            logInfo << "StatusReport from session" << msgHeader.sessionId;
+            logDebug(m_debug) << "StatusReport from session" << msgHeader.sessionId;
             break;
         }
 
         case SecureChannelOpcode::CASESigma1:
-            logInfo << "CASE Sigma1 from" << msgHeader.sourceNodeId;
+            logDebug(m_debug) << "CASE Sigma1 from" << msgHeader.sourceNodeId;
             break;
 
         case SecureChannelOpcode::CASESigma2:
@@ -439,7 +439,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                     continue;
                 }
 
-                logInfo << "Attribute, ep:" << report.path.endpointId << "cluster:" << QString::number(report.path.clusterId, 16) << "attr:" << QString::number(report.path.attributeId, 16) << "value:" << report.value;
+                logDebug(m_debug) << "Attribute, ep:" << report.path.endpointId << "cluster:" << QString::number(report.path.clusterId, 16) << "attr:" << QString::number(report.path.attributeId, 16) << "value:" << report.value;
 
                 // update device state from subscription reports
                 {
@@ -587,7 +587,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             continue;
 
                         // ServerList is an array — parse children
-                        logInfo << "ServerList for ep" << report.path.endpointId << ":" << report.rawValue.children.count() << "clusters, type:" << static_cast <int> (report.rawValue.type);
+                        logDebug(m_debug) << "ServerList for ep" << report.path.endpointId << ":" << report.rawValue.children.count() << "clusters, type:" << static_cast <int> (report.rawValue.type);
 
                         for (const MatterTLV::Element &child : report.rawValue.children)
                         {
@@ -703,7 +703,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
         case InteractionModelOpcode::StatusResponse:
         {
             quint8 status = InteractionModel::decodeStatusResponse(payload);
-            logInfo << "StatusResponse:" << status;
+            logDebug(m_debug) << "StatusResponse:" << status;
 
             // TimedRequest was ACKed with StatusResponse(0) — now send the actual command
             if (status == 0)
@@ -753,11 +753,11 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
         {
             QList <CommandResponse> responses = InteractionModel::decodeInvokeResponse(payload);
 
-            logInfo << "InvokeResponse received, entries:" << responses.count() << "payload size:" << payload.size();
+            logDebug(m_debug) << "InvokeResponse received, entries:" << responses.count() << "payload size:" << payload.size();
 
             for (const CommandResponse &response : responses)
             {
-                logInfo << "InvokeResponse, cluster:" << QString::number(response.path.clusterId, 16) << "cmd:" << QString::number(response.path.commandId, 16) << "status:" << response.status;
+                logDebug(m_debug) << "InvokeResponse, cluster:" << QString::number(response.path.clusterId, 16) << "cmd:" << QString::number(response.path.commandId, 16) << "status:" << response.status;
 
                 // check commissioning responses
                 for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
@@ -766,7 +766,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                     if (commission.state == CommissioningState::ArmFailSafe && response.path.clusterId == Clusters::GeneralCommissioning::Id && response.path.commandId == Clusters::GeneralCommissioning::Commands::ArmFailSafeResponse)
                     {
-                        logInfo << "ArmFailSafe response, setting regulatory config...";
+                        logDebug(m_debug) << "ArmFailSafe response, setting regulatory config...";
                         commission.state = CommissioningState::SetRegulatoryConfig;
                         continueCommissioning(commission);
                         break;
@@ -774,7 +774,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                     if (commission.state == CommissioningState::SetRegulatoryConfig && response.path.clusterId == Clusters::GeneralCommissioning::Id && response.path.commandId == Clusters::GeneralCommissioning::Commands::SetRegulatoryConfigResponse)
                     {
-                        logInfo << "SetRegulatoryConfig response, reading basic info...";
+                        logDebug(m_debug) << "SetRegulatoryConfig response, reading basic info...";
                         commission.state = CommissioningState::ReadBasicInfo;
                         continueCommissioning(commission);
                         break;
@@ -782,7 +782,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                     if (commission.state == CommissioningState::RequestPAI && response.path.clusterId == Clusters::OperationalCredentials::Id && response.path.commandId == Clusters::OperationalCredentials::Commands::CertificateChainResponse)
                     {
-                        logInfo << "PAI certificate received, requesting DAC...";
+                        logDebug(m_debug) << "PAI certificate received, requesting DAC...";
                         commission.state = CommissioningState::RequestDAC;
                         continueCommissioning(commission);
                         break;
@@ -790,7 +790,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                     if (commission.state == CommissioningState::RequestDAC && response.path.clusterId == Clusters::OperationalCredentials::Id && response.path.commandId == Clusters::OperationalCredentials::Commands::CertificateChainResponse)
                     {
-                        logInfo << "DAC certificate received, requesting attestation...";
+                        logDebug(m_debug) << "DAC certificate received, requesting attestation...";
                         commission.state = CommissioningState::RequestAttestation;
                         continueCommissioning(commission);
                         break;
@@ -798,7 +798,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                     if (commission.state == CommissioningState::RequestAttestation && response.path.clusterId == Clusters::OperationalCredentials::Id && response.path.commandId == Clusters::OperationalCredentials::Commands::AttestationResponse)
                     {
-                        logInfo << "Attestation received, sending CSR request...";
+                        logDebug(m_debug) << "Attestation received, sending CSR request...";
                         commission.state = CommissioningState::CSRRequest;
                         continueCommissioning(commission);
                         break;
@@ -806,7 +806,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                     if (commission.state == CommissioningState::CSRRequest && response.path.clusterId == Clusters::OperationalCredentials::Id && response.path.commandId == Clusters::OperationalCredentials::Commands::CSRResponse)
                     {
-                        logInfo << "CSRResponse received";
+                        logDebug(m_debug) << "CSRResponse received";
 
                         for (const MatterTLV::Element &field : response.data.children)
                         {
@@ -829,14 +829,14 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             break;
                         }
 
-                        logInfo << "Device public key extracted," << commission.devicePublicKey.length() << "bytes";
+                        logDebug(m_debug) << "Device public key extracted," << commission.devicePublicKey.length() << "bytes";
 
                         commission.rcacTLV = generateFabricCert(m_fabricId, 0, m_fabricPublicKey, true);
                         commission.nocTLV = generateFabricCert(m_fabricId, commission.device->nodeId(), commission.devicePublicKey, false);
 
-                        logInfo << "Generated RCAC" << commission.rcacTLV.length() << "bytes, NOC" << commission.nocTLV.length() << "bytes";
-        logInfo << "NOC hex:" << commission.nocTLV.toHex();
-        logInfo << "RCAC hex:" << commission.rcacTLV.toHex();
+                        logDebug(m_debug) << "Generated RCAC" << commission.rcacTLV.length() << "bytes, NOC" << commission.nocTLV.length() << "bytes";
+        logDebug(m_debug) << "NOC hex:" << commission.nocTLV.toHex();
+        logDebug(m_debug) << "RCAC hex:" << commission.rcacTLV.toHex();
 
                         commission.state = CommissioningState::AddTrustedRootCert;
                         continueCommissioning(commission);
@@ -851,7 +851,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             break;
                         }
 
-                        logInfo << "AddTrustedRootCertificate accepted, sending AddNOC...";
+                        logDebug(m_debug) << "AddTrustedRootCertificate accepted, sending AddNOC...";
                         commission.state = CommissioningState::AddNOC;
                         continueCommissioning(commission);
                         break;
@@ -1000,7 +1000,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
     {
         case CommissioningState::ArmFailSafe:
         {
-            logInfo << "Sending ArmFailSafe...";
+            logDebug(m_debug) << "Sending ArmFailSafe...";
 
             MatterTLV::Encoder fields;
             fields.openStructure();
@@ -1015,7 +1015,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
 
         case CommissioningState::SetRegulatoryConfig:
         {
-            logInfo << "Sending SetRegulatoryConfig...";
+            logDebug(m_debug) << "Sending SetRegulatoryConfig...";
 
             MatterTLV::Encoder fields;
             fields.openStructure();
@@ -1031,7 +1031,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
 
         case CommissioningState::ReadBasicInfo:
         {
-            logInfo << "Reading BasicInformation cluster...";
+            logDebug(m_debug) << "Reading BasicInformation cluster...";
 
             QList <AttributePath> paths;
             paths.append(AttributePath(0, Clusters::BasicInformation::Id, Clusters::BasicInformation::Attributes::VendorName));
@@ -1047,7 +1047,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
 
         case CommissioningState::RequestPAI:
         {
-            logInfo << "Requesting PAI certificate...";
+            logDebug(m_debug) << "Requesting PAI certificate...";
 
             MatterTLV::Encoder fields;
             fields.openStructure();
@@ -1061,7 +1061,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
 
         case CommissioningState::RequestDAC:
         {
-            logInfo << "Requesting DAC certificate...";
+            logDebug(m_debug) << "Requesting DAC certificate...";
 
             MatterTLV::Encoder fields;
             fields.openStructure();
@@ -1075,7 +1075,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
 
         case CommissioningState::RequestAttestation:
         {
-            logInfo << "Requesting attestation...";
+            logDebug(m_debug) << "Requesting attestation...";
 
             MatterTLV::Encoder fields;
             fields.openStructure();
@@ -1089,7 +1089,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
 
         case CommissioningState::CSRRequest:
         {
-            logInfo << "Sending CSRRequest...";
+            logDebug(m_debug) << "Sending CSRRequest...";
 
             MatterTLV::Encoder fields;
             fields.openStructure();
@@ -1103,7 +1103,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
 
         case CommissioningState::AddTrustedRootCert:
         {
-            logInfo << "Sending AddTrustedRootCertificate...";
+            logDebug(m_debug) << "Sending AddTrustedRootCertificate...";
 
             MatterTLV::Encoder fields;
             fields.openStructure();
@@ -1117,7 +1117,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
 
         case CommissioningState::AddNOC:
         {
-            logInfo << "Sending AddNOC...";
+            logDebug(m_debug) << "Sending AddNOC...";
 
             MatterTLV::Encoder fields;
             fields.openStructure();
@@ -1137,7 +1137,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
         {
             if (!commission.timedInvokePending)
             {
-                logInfo << "Sending TimedRequest for CommissioningComplete...";
+                logDebug(m_debug) << "Sending TimedRequest for CommissioningComplete...";
                 commission.exchangeId = m_exchangeCounter++;
                 QByteArray payload = InteractionModel::encodeTimedRequest(5000);
                 sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::TimedRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, commission.exchangeId, true);
@@ -1146,7 +1146,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
             }
 
             commission.timedInvokePending = false;
-            logInfo << "Sending CommissioningComplete...";
+            logDebug(m_debug) << "Sending CommissioningComplete...";
 
             MatterTLV::Encoder fields;
             fields.openStructure();
@@ -1159,7 +1159,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
 
         case CommissioningState::Done:
         {
-            logInfo << "CommissioningComplete success, starting CASE...";
+            logDebug(m_debug) << "CommissioningComplete success, starting CASE...";
             session->peerNodeId = commission.device->nodeId();
             session->active = false;
             emit deviceCommissioned(commission.device);
@@ -1192,10 +1192,10 @@ QByteArray Matter::generateFabricCert(quint64 fabricId, quint64 nodeId, const QB
     }
 
     QByteArray tlvCert = Crypto::x509DerToMatterTLV(derCert);
-    logInfo << "Generated" << (isRCAC ? "RCAC" : "NOC") << derCert.length() << "DER bytes," << tlvCert.length() << "TLV bytes";
+    logDebug(m_debug) << "Generated" << (isRCAC ? "RCAC" : "NOC") << derCert.length() << "DER bytes," << tlvCert.length() << "TLV bytes";
 
     if (!isRCAC)
-        logInfo << "NOC DER hex:" << derCert.toHex();
+        logDebug(m_debug) << "NOC DER hex:" << derCert.toHex();
     return tlvCert;
 }
 
@@ -1246,7 +1246,7 @@ void Matter::readyRead(void)
 
         if (!MessageCodec::decodeHeader(datagram, msgHeader, headerOffset))
         {
-            logWarning << "Invalid message header from" << sender.toString() << "size:" << datagram.size() << "hex:" << datagram.left(16).toHex();
+            logDebug(m_debug) << "Invalid message header from" << sender.toString() << "size:" << datagram.size() << "hex:" << datagram.left(16).toHex();
             continue;
         }
 
@@ -1270,11 +1270,11 @@ void Matter::readyRead(void)
 
             if (payload.isEmpty())
             {
-                logWarning << "Decryption failed for session" << msgHeader.sessionId << "from" << sender.toString() << "size:" << ciphertext.size();
+                logDebug(m_debug) << "Decryption failed for session" << msgHeader.sessionId << "from" << sender.toString() << "size:" << ciphertext.size();
                 continue;
             }
 
-            logInfo << "Decrypted message from session" << msgHeader.sessionId << "counter:" << msgHeader.messageCounter << "size:" << payload.size();
+            logDebug(m_debug) << "Decrypted message from session" << msgHeader.sessionId << "counter:" << msgHeader.messageCounter << "size:" << payload.size();
             session->lastSeen = QDateTime::currentMSecsSinceEpoch();
         }
         else
@@ -1284,7 +1284,7 @@ void Matter::readyRead(void)
 
         if (!MessageCodec::decodeProtocolHeader(payload, 0, protoHeader, payloadOffset))
         {
-            logWarning << "Invalid protocol header from" << sender.toString();
+            logDebug(m_debug) << "Invalid protocol header from" << sender.toString();
             continue;
         }
 
@@ -1617,7 +1617,7 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
     {
         m_caseNeedsCommissioningComplete = false;
         m_pendingCommissionDevice = m_caseDevice;
-        logInfo << "Sending CommissioningComplete on CASE session...";
+        logDebug(m_debug) << "Sending CommissioningComplete on CASE session...";
 
         MatterTLV::Encoder fields;
         fields.openStructure();
