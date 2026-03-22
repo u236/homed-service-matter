@@ -231,6 +231,12 @@ QByteArray InteractionModel::encodeSubscribeRequest(const QList <AttributePath> 
 
     encoder.closeContainer();
 
+    // tag 4: FabricFiltered (required)
+    encoder.encodeBool(4, false);
+
+    // tag 0xFF: InteractionModelRevision
+    encoder.encodeUnsignedInt(0xFF, 11);
+
     encoder.closeContainer();
     return encoder.data();
 }

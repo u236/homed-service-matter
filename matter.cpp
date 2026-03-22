@@ -2,6 +2,7 @@
 #include <QDateTime>
 #include <cstring>
 #include "matter.h"
+#include "expose.h"
 #include "logger.h"
 #include "tlv.h"
 #include "clusters.h"
@@ -20,6 +21,7 @@ Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), 
     m_searchTimer->setSingleShot(true);
 
     // fabric credentials will be set by Controller after database init
+    m_devices = nullptr;
     m_pendingCASE = nullptr;
     m_caseDevice = nullptr;
     m_caseExchangeId = 0;
@@ -113,6 +115,24 @@ void Matter::connectDevice(DeviceObject *device)
                    m_operationalKey, m_operationalPubKey,
                    m_fabricId, m_nodeId, m_rootCAId,
                    m_ipk, m_controllerNOC, m_controllerRCAC);
+}
+
+void Matter::discoverDevice(DeviceObject *device)
+{
+    SessionInfo *session = m_sessions->findByPeerNodeId(device->nodeId());
+
+    if (!session || !session->active)
+        return;
+
+    logInfo << "Discovering endpoints for" << device->name();
+
+    // read PartsList and ServerList for endpoint 0 + all parts
+    QList <AttributePath> paths;
+    paths.append(AttributePath(0, Clusters::Descriptor::Id, Clusters::Descriptor::Attributes::PartsList));
+    paths.append(AttributePath(0xFFFF, Clusters::Descriptor::Id, Clusters::Descriptor::Attributes::ServerList)); // wildcard endpoint
+
+    QByteArray payload = InteractionModel::encodeReadRequest(paths);
+    sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
 }
 
 void Matter::removeDevice(DeviceObject *device)
@@ -400,6 +420,33 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                 logInfo << "Attribute, ep:" << report.path.endpointId << "cluster:" << QString::number(report.path.clusterId, 16) << "attr:" << QString::number(report.path.attributeId, 16) << "value:" << report.value;
 
+                // update device state from subscription reports
+                {
+                    SessionInfo *attrSession = m_sessions->findByLocalId(msgHeader.sessionId);
+
+                    if (attrSession)
+                    {
+                        for (int i = 0; i < m_devices->count(); i++)
+                        {
+                            DeviceObject *dev = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
+
+                            if (dev->nodeId() == attrSession->peerNodeId)
+                            {
+                                if (report.path.clusterId == Clusters::OnOff::Id && report.path.attributeId == Clusters::OnOff::Attributes::OnOff)
+                                    dev->updateEndpoint(report.path.endpointId, "status", report.value.toBool() ? "on" : "off");
+                                else if (report.path.clusterId == Clusters::LevelControl::Id && report.path.attributeId == Clusters::LevelControl::Attributes::CurrentLevel)
+                                    dev->updateEndpoint(report.path.endpointId, "level", report.value.toUInt());
+                                else if (report.path.clusterId == Clusters::TemperatureMeasurement::Id && report.path.attributeId == Clusters::TemperatureMeasurement::Attributes::MeasuredValue)
+                                    dev->updateEndpoint(report.path.endpointId, "temperature", report.value.toDouble() / 100.0);
+                                else if (report.path.clusterId == Clusters::RelativeHumidityMeasurement::Id && report.path.attributeId == Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue)
+                                    dev->updateEndpoint(report.path.endpointId, "humidity", report.value.toDouble() / 100.0);
+
+                                break;
+                            }
+                        }
+                    }
+                }
+
                 // check if this is part of commissioning (BasicInformation read)
                 for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
                 {
@@ -427,6 +474,115 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                                     commission.device->setProductId(report.value.toUInt());
                                     break;
                             }
+                        }
+                    }
+                }
+            }
+
+            // process Descriptor cluster reports — build endpoints and exposes
+            {
+                SessionInfo *reportSession = m_sessions->findByLocalId(msgHeader.sessionId);
+                DeviceObject *reportDevice = nullptr;
+
+                if (reportSession)
+                {
+                    for (int i = 0; i < m_devices->count(); i++)
+                    {
+                        DeviceObject *dev = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
+
+                        if (dev->nodeId() == reportSession->peerNodeId)
+                        {
+                            reportDevice = dev;
+                            break;
+                        }
+                    }
+                }
+
+                if (reportDevice)
+                {
+                    // collect server lists per endpoint
+                    QMap <quint8, QList <quint32>> endpointClusters;
+
+                    for (const AttributeReport &report : reports)
+                    {
+                        if (report.hasError || report.path.clusterId != Clusters::Descriptor::Id)
+                            continue;
+
+                        if (report.path.attributeId == Clusters::Descriptor::Attributes::ServerList)
+                        {
+                            quint32 clusterId = report.value.toUInt();
+
+                            if (clusterId)
+                                endpointClusters[report.path.endpointId].append(clusterId);
+                        }
+                    }
+
+                    // create endpoints and exposes
+                    for (auto it = endpointClusters.begin(); it != endpointClusters.end(); it++)
+                    {
+                        quint8 epId = it.key();
+                        const QList <quint32> &clusters = it.value();
+
+                        if (epId == 0 || (!clusters.contains(Clusters::OnOff::Id) && !clusters.contains(Clusters::TemperatureMeasurement::Id) && !clusters.contains(Clusters::RelativeHumidityMeasurement::Id)))
+                            continue;
+
+                        Endpoint endpoint = reportDevice->endpoints().value(epId);
+
+                        if (endpoint.isNull())
+                        {
+                            endpoint = Endpoint(new EndpointObject(epId, Device(reportDevice)));
+                            reportDevice->endpoints().insert(epId, endpoint);
+                        }
+
+                        if (clusters.contains(Clusters::OnOff::Id) && endpoint->exposes().isEmpty())
+                        {
+                            endpoint->exposes().append(clusters.contains(Clusters::LevelControl::Id) || clusters.contains(Clusters::ColorControl::Id) ? Expose(new LightObject) : Expose(new SwitchObject));
+                            logInfo << "Endpoint" << epId << "on" << reportDevice->name() << ":" << (clusters.contains(Clusters::LevelControl::Id) ? "light" : "switch");
+                        }
+
+                        if (clusters.contains(Clusters::TemperatureMeasurement::Id))
+                        {
+                            endpoint->exposes().append(Expose(new SensorObject("temperature")));
+                            logInfo << "Endpoint" << epId << "on" << reportDevice->name() << ": temperature";
+                        }
+
+                        if (clusters.contains(Clusters::RelativeHumidityMeasurement::Id))
+                        {
+                            endpoint->exposes().append(Expose(new SensorObject("humidity")));
+                            logInfo << "Endpoint" << epId << "on" << reportDevice->name() << ": humidity";
+                        }
+                    }
+
+                    // subscribe to state attributes
+                    if (!endpointClusters.isEmpty() && reportSession)
+                    {
+                        QList <AttributePath> subPaths;
+
+                        for (auto it = endpointClusters.begin(); it != endpointClusters.end(); it++)
+                        {
+                            quint8 epId = it.key();
+
+                            if (epId == 0)
+                                continue;
+
+                            if (it.value().contains(Clusters::OnOff::Id))
+                                subPaths.append(AttributePath(epId, Clusters::OnOff::Id, Clusters::OnOff::Attributes::OnOff));
+
+                            if (it.value().contains(Clusters::LevelControl::Id))
+                                subPaths.append(AttributePath(epId, Clusters::LevelControl::Id, Clusters::LevelControl::Attributes::CurrentLevel));
+
+                            if (it.value().contains(Clusters::TemperatureMeasurement::Id))
+                                subPaths.append(AttributePath(epId, Clusters::TemperatureMeasurement::Id, Clusters::TemperatureMeasurement::Attributes::MeasuredValue));
+
+                            if (it.value().contains(Clusters::RelativeHumidityMeasurement::Id))
+                                subPaths.append(AttributePath(epId, Clusters::RelativeHumidityMeasurement::Id, Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue));
+                        }
+
+                        if (!subPaths.isEmpty())
+                        {
+                            logInfo << "Subscribing to" << subPaths.count() << "attributes on" << reportDevice->name();
+                            QByteArray subPayload = InteractionModel::encodeSubscribeRequest(subPaths, 0, 60);
+                            sendEncrypted(reportSession, static_cast <quint8> (InteractionModelOpcode::SubscribeRequest), static_cast <quint16> (ProtocolId::InteractionModel), subPayload, m_exchangeCounter++, true);
                         }
                     }
                 }
@@ -1229,6 +1385,10 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
     m_sessions->addSession(session);
 
     logInfo << "CASE session established with" << m_caseDevice->name();
+
+    // discover device endpoints (read PartsList from endpoint 0)
+    if (m_caseDevice->endpoints().isEmpty())
+        discoverDevice(m_caseDevice);
 
     // send CommissioningComplete on CASE session only during initial commissioning
     SessionInfo *caseSession = m_sessions->findByLocalId(localSessionId);

@@ -23,6 +23,7 @@ public:
     Matter(QObject *parent);
 
     void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC = QByteArray(), const QByteArray &controllerRCAC = QByteArray());
+    inline void setDevices(QList <Device> *devices) { m_devices = devices; }
     inline QByteArray fabricKey(void) { return m_fabricKey; }
     inline quint64 rootCAId(void) { return m_rootCAId; }
     inline QByteArray ipk(void) { return m_ipk; }
@@ -31,6 +32,7 @@ public:
 
     void addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator = false, quint64 nodeId = 0);
     void connectDevice(DeviceObject *device);
+    void discoverDevice(DeviceObject *device);
     void removeDevice(DeviceObject *device);
     void sendCommand(DeviceObject *device, quint8 endpointId, const QString &name, const QVariant &value);
     void readAttributes(DeviceObject *device, const QList <AttributePath> &paths);
@@ -116,6 +118,8 @@ private:
     DeviceObject *m_pendingRemoveDevice;
 
     QList <DeviceObject*> m_caseQueue;
+
+    QList <Device> *m_devices;
 
     QMap <quint16, PendingCommission> m_pendingCommissions;
 

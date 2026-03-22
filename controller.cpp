@@ -14,6 +14,7 @@ Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, confi
     connect(m_devices, &DeviceList::statusUpdated, this, &Controller::statusUpdated);
     connect(m_matter, &Matter::deviceCommissioned, this, &Controller::deviceCommissioned);
     connect(m_matter, &Matter::deviceRemoved, this, &Controller::deviceRemoved);
+    m_matter->setDevices(m_devices);
 
     m_timer->setSingleShot(true);
 
