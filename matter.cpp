@@ -431,6 +431,20 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
             SessionInfo *pendingSubSession = nullptr;
             DeviceObject *pendingSubDevice = nullptr;
 
+            // check for subscriptionId and suppressResponse in ReportData
+            {
+                MatterTLV::Decoder rdDecoder(payload);
+                MatterTLV::Element rdRoot = rdDecoder.decode();
+
+                for (const MatterTLV::Element &el : rdRoot.children)
+                {
+                    if (el.tag == 0)
+                        logDebug(m_debug) << "ReportData subscriptionId:" << el.value.toUInt();
+                    if (el.tag == 3)
+                        logDebug(m_debug) << "ReportData suppressResponse:" << el.value.toBool();
+                }
+            }
+
             for (const AttributeReport &report : reports)
             {
                 if (report.hasError)
@@ -673,8 +687,9 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
             if (session)
             {
+                logDebug(m_debug) << "Sending StatusResponse(0) for ReportData, exchange:" << protoHeader.exchangeId << "ack:" << msgHeader.messageCounter;
                 QByteArray statusPayload = InteractionModel::encodeStatusResponse(0);
-                sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::StatusResponse), static_cast <quint16> (ProtocolId::InteractionModel), statusPayload, protoHeader.exchangeId, false);
+                sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::StatusResponse), static_cast <quint16> (ProtocolId::InteractionModel), statusPayload, protoHeader.exchangeId, !protoHeader.isInitiator(), msgHeader.messageCounter);
             }
 
             // send SubscribeRequest after StatusResponse has been sent
@@ -682,7 +697,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
             {
                 logInfo << "Subscribing to" << pendingSubPaths.count() << "attributes on" << pendingSubDevice->name();
                 m_subscribedPaths[pendingSubDevice->nodeId()] = pendingSubPaths;
-                QByteArray subPayload = InteractionModel::encodeSubscribeRequest(pendingSubPaths, 0, 10);
+                QByteArray subPayload = InteractionModel::encodeSubscribeRequest(pendingSubPaths, 0, 60);
                 sendEncrypted(pendingSubSession, static_cast <quint8> (InteractionModelOpcode::SubscribeRequest), static_cast <quint16> (ProtocolId::InteractionModel), subPayload, m_exchangeCounter++, true);
             }
 
@@ -732,20 +747,10 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
             for (const MatterTLV::Element &el : root.children)
             {
                 if (el.tag == 0) subscriptionId = el.value.toUInt();
-                if (el.tag == 1) maxInterval = el.value.toUInt();
+                if (el.tag == 2) maxInterval = el.value.toUInt();
             }
 
             logInfo << "Subscription established, id:" << subscriptionId << "maxInterval:" << maxInterval;
-
-            // send StatusResponse to confirm
-            SessionInfo *session = m_sessions->findByLocalId(msgHeader.sessionId);
-
-            if (session)
-            {
-                QByteArray statusPayload = InteractionModel::encodeStatusResponse(0);
-                sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::StatusResponse), static_cast <quint16> (ProtocolId::InteractionModel), statusPayload, protoHeader.exchangeId, false);
-            }
-
             break;
         }
 
@@ -1203,21 +1208,53 @@ QByteArray Matter::generateFabricCert(quint64 fabricId, quint64 nodeId, const QB
 
 void Matter::sendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port)
 {
-    MessageHeader msgHeader;
-    msgHeader.flags = 0x00;
-    msgHeader.securityFlags = 0x00;
-    msgHeader.sessionId = sessionId;
-    msgHeader.messageCounter = ++m_messageCounter;
+    SessionInfo *session = m_sessions->findByLocalId(sessionId);
 
-    ProtocolHeader protoHeader;
-    protoHeader.exchangeFlags = static_cast <quint8> (ExchangeFlag::Acknowledgement);
-    protoHeader.opcode = static_cast <quint8> (SecureChannelOpcode::MRPStandaloneAck);
-    protoHeader.exchangeId = exchangeId;
-    protoHeader.protocolId = static_cast <quint16> (ProtocolId::SecureChannel);
-    protoHeader.ackCounter = ackCounter;
+    if (session && session->active)
+    {
+        session->localMessageCounter++;
 
-    QByteArray data = MessageCodec::encodeMessage(msgHeader, protoHeader, QByteArray());
-    sendRawDatagram(data, address, port);
+        MessageHeader msgHeader;
+        msgHeader.flags = 0x00;
+        msgHeader.securityFlags = 0x00;
+        msgHeader.sessionId = session->peerSessionId;
+        msgHeader.messageCounter = session->localMessageCounter;
+
+        QByteArray header = MessageCodec::encodeHeader(msgHeader);
+
+        ProtocolHeader protoHeader;
+        protoHeader.exchangeFlags = static_cast <quint8> (ExchangeFlag::Acknowledgement);
+        protoHeader.opcode = static_cast <quint8> (SecureChannelOpcode::MRPStandaloneAck);
+        protoHeader.exchangeId = exchangeId;
+        protoHeader.protocolId = static_cast <quint16> (ProtocolId::SecureChannel);
+        protoHeader.ackCounter = ackCounter;
+
+        QByteArray plaintext = MessageCodec::encodeProtocolHeader(protoHeader);
+        QByteArray nonce = SessionManager::buildNonce(msgHeader.securityFlags, msgHeader.messageCounter, session->active ? m_nodeId : 0);
+        QByteArray encrypted = Crypto::aesCcmEncrypt(session->i2rKey, nonce, header, plaintext, SESSION_TAG_LENGTH);
+
+        QByteArray data = header;
+        data.append(encrypted);
+        sendRawDatagram(data, session->peerAddress, session->peerPort);
+    }
+    else
+    {
+        MessageHeader msgHeader;
+        msgHeader.flags = 0x00;
+        msgHeader.securityFlags = 0x00;
+        msgHeader.sessionId = sessionId;
+        msgHeader.messageCounter = ++m_messageCounter;
+
+        ProtocolHeader protoHeader;
+        protoHeader.exchangeFlags = static_cast <quint8> (ExchangeFlag::Acknowledgement);
+        protoHeader.opcode = static_cast <quint8> (SecureChannelOpcode::MRPStandaloneAck);
+        protoHeader.exchangeId = exchangeId;
+        protoHeader.protocolId = static_cast <quint16> (ProtocolId::SecureChannel);
+        protoHeader.ackCounter = ackCounter;
+
+        QByteArray data = MessageCodec::encodeMessage(msgHeader, protoHeader, QByteArray());
+        sendRawDatagram(data, address, port);
+    }
 }
 
 // --- UDP read ---
@@ -1270,7 +1307,7 @@ void Matter::readyRead(void)
 
             if (payload.isEmpty())
             {
-                logDebug(m_debug) << "Decryption failed for session" << msgHeader.sessionId << "from" << sender.toString() << "size:" << ciphertext.size();
+                logDebug(m_debug) << "Decryption failed for session" << msgHeader.sessionId << "counter:" << msgHeader.messageCounter << "from" << sender.toString() << "size:" << ciphertext.size();
                 continue;
             }
 
@@ -1364,7 +1401,11 @@ void Matter::pingTimeout(void)
 
         if (session->lastSeen && now - session->lastSeen > 10000)
         {
-            QList <AttributePath> paths = {AttributePath(0, Clusters::BasicInformation::Id, Clusters::BasicInformation::Attributes::DataModelRevision)};
+            QList <AttributePath> paths = m_subscribedPaths.value(device->nodeId());
+
+            if (paths.isEmpty())
+                paths.append(AttributePath(0, Clusters::BasicInformation::Id, Clusters::BasicInformation::Attributes::DataModelRevision));
+
             QByteArray payload = InteractionModel::encodeReadRequest(paths);
             sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
         }

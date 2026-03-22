@@ -111,8 +111,14 @@ void MRP::processTimers(void)
 
         if (now >= ack.deadline)
         {
-            emit sendStandaloneAck(ack.messageCounter, ack.exchangeId, ack.sessionId, ack.address, ack.port);
+            quint32 messageCounter = ack.messageCounter;
+            quint16 exchangeId = ack.exchangeId;
+            quint16 sessionId = ack.sessionId;
+            QHostAddress address = ack.address;
+            quint16 port = ack.port;
+
             m_pendingAcks.removeAt(i);
+            emit sendStandaloneAck(messageCounter, exchangeId, sessionId, address, port);
         }
     }
 
