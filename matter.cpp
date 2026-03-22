@@ -495,6 +495,16 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                                     dev->updateEndpoint(report.path.endpointId, "temperature", report.value.toDouble() / 100.0);
                                 else if (report.path.clusterId == Clusters::RelativeHumidityMeasurement::Id && report.path.attributeId == Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue)
                                     dev->updateEndpoint(report.path.endpointId, "humidity", report.value.toDouble() / 100.0);
+                                else if (report.path.clusterId == Clusters::ElectricalPowerMeasurement::Id && report.path.attributeId == Clusters::ElectricalPowerMeasurement::Attributes::ActivePower)
+                                    dev->updateEndpoint(report.path.endpointId, "power", report.value.toLongLong() / 1000.0);
+                                else if (report.path.clusterId == Clusters::ElectricalEnergyMeasurement::Id && report.path.attributeId == Clusters::ElectricalEnergyMeasurement::Attributes::CumulativeEnergyImported)
+                                {
+                                    for (const MatterTLV::Element &child : report.rawValue.children)
+                                    {
+                                        if (child.tag == 0)
+                                            dev->updateEndpoint(report.path.endpointId, "energy", child.value.toLongLong() / 1000.0);
+                                    }
+                                }
 
                                 break;
                             }
@@ -616,7 +626,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         quint8 epId = it.key();
                         const QList <quint32> &clusters = it.value();
 
-                        if (epId == 0 || (!clusters.contains(Clusters::OnOff::Id) && !clusters.contains(Clusters::TemperatureMeasurement::Id) && !clusters.contains(Clusters::RelativeHumidityMeasurement::Id)))
+                        if (epId == 0 || (!clusters.contains(Clusters::OnOff::Id) && !clusters.contains(Clusters::TemperatureMeasurement::Id) && !clusters.contains(Clusters::RelativeHumidityMeasurement::Id) && !clusters.contains(Clusters::ElectricalPowerMeasurement::Id) && !clusters.contains(Clusters::ElectricalEnergyMeasurement::Id)))
                             continue;
 
                         Endpoint endpoint = reportDevice->endpoints().value(epId);
@@ -626,6 +636,8 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             endpoint = Endpoint(new EndpointObject(epId, reportDeviceHolder));
                             reportDevice->endpoints().insert(epId, endpoint);
                         }
+
+                        reinterpret_cast <EndpointObject*> (endpoint.data())->clusters() = clusters;
 
                         if (clusters.contains(Clusters::OnOff::Id) && endpoint->exposes().isEmpty())
                         {
@@ -643,6 +655,18 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         {
                             endpoint->exposes().append(Expose(new SensorObject("humidity")));
                             logInfo << "Endpoint" << epId << "on" << reportDevice->name() << ": humidity";
+                        }
+
+                        if (clusters.contains(Clusters::ElectricalPowerMeasurement::Id))
+                        {
+                            endpoint->exposes().append(Expose(new SensorObject("power")));
+                            logInfo << "Endpoint" << epId << "on" << reportDevice->name() << ": power";
+                        }
+
+                        if (clusters.contains(Clusters::ElectricalEnergyMeasurement::Id))
+                        {
+                            endpoint->exposes().append(Expose(new SensorObject("energy")));
+                            logInfo << "Endpoint" << epId << "on" << reportDevice->name() << ": energy";
                         }
                     }
 
@@ -674,6 +698,12 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                             if (it.value().contains(Clusters::RelativeHumidityMeasurement::Id))
                                 pendingSubPaths.append(AttributePath(epId, Clusters::RelativeHumidityMeasurement::Id, Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue));
+
+                            if (it.value().contains(Clusters::ElectricalPowerMeasurement::Id))
+                                pendingSubPaths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::ActivePower));
+
+                            if (it.value().contains(Clusters::ElectricalEnergyMeasurement::Id))
+                                pendingSubPaths.append(AttributePath(epId, Clusters::ElectricalEnergyMeasurement::Id, Clusters::ElectricalEnergyMeasurement::Attributes::CumulativeEnergyImported));
                         }
 
                         pendingSubSession = reportSession;
@@ -699,6 +729,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                 m_subscribedPaths[pendingSubDevice->nodeId()] = pendingSubPaths;
                 QByteArray subPayload = InteractionModel::encodeSubscribeRequest(pendingSubPaths, 0, 60);
                 sendEncrypted(pendingSubSession, static_cast <quint8> (InteractionModelOpcode::SubscribeRequest), static_cast <quint16> (ProtocolId::InteractionModel), subPayload, m_exchangeCounter++, true);
+                pendingSubDevice->deviceUpdated(pendingSubDevice);
             }
 
             // continue commissioning if applicable

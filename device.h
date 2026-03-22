@@ -16,10 +16,12 @@ public:
     EndpointObject(quint8 id, const Device &device) : AbstractEndpointObject(id, device) {}
 
     inline QMap <QString, QVariant> &status(void) { return m_status; }
+    inline QList <quint32> &clusters(void) { return m_clusters; }
 
 private:
 
     QMap <QString, QVariant> m_status;
+    QList <quint32> m_clusters;
 
 };
 

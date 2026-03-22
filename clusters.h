@@ -201,6 +201,28 @@ namespace Clusters
         }
     }
 
+    namespace ElectricalPowerMeasurement // 0x0090
+    {
+        const quint32 Id = 0x0090;
+
+        namespace Attributes
+        {
+            const quint32 Voltage       = 0x0004;
+            const quint32 ActiveCurrent = 0x0005;
+            const quint32 ActivePower   = 0x0008;
+        }
+    }
+
+    namespace ElectricalEnergyMeasurement // 0x0091
+    {
+        const quint32 Id = 0x0091;
+
+        namespace Attributes
+        {
+            const quint32 CumulativeEnergyImported = 0x0001;
+        }
+    }
+
     namespace OccupancySensing // 0x0406
     {
         const quint32 Id = 0x0406;

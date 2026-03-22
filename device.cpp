@@ -205,6 +205,31 @@ QJsonArray DeviceList::serialize(void)
         if (obj->networkPort() != 5540)
             json.insert("networkPort", obj->networkPort());
 
+        if (!obj->endpoints().isEmpty())
+        {
+            QJsonArray endpoints;
+
+            for (auto it = obj->endpoints().begin(); it != obj->endpoints().end(); it++)
+            {
+                EndpointObject *ep = reinterpret_cast <EndpointObject*> (it.value().data());
+                QJsonObject epJson = {{"endpointId", ep->id()}};
+
+                if (!ep->clusters().isEmpty())
+                {
+                    QJsonArray clusters;
+
+                    for (int i = 0; i < ep->clusters().count(); i++)
+                        clusters.append(static_cast <qint64> (ep->clusters().at(i)));
+
+                    epJson.insert("clusters", clusters);
+                }
+
+                endpoints.append(epJson);
+            }
+
+            json.insert("endpoints", endpoints);
+        }
+
         array.append(json);
     }
 
