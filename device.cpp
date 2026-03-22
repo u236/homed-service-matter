@@ -60,7 +60,7 @@ void DeviceList::init(void)
 
     QJsonObject fabric = json.value("fabric").toObject();
     m_fabricKey = QByteArray::fromHex(fabric.value("key").toString().toUtf8());
-    m_rootCAId = static_cast <quint64> (fabric.value("rootCAId").toDouble());
+    m_rootCAId = fabric.value("rootCAId").toString().toULongLong(nullptr, 16);
     m_ipk = QByteArray::fromHex(fabric.value("ipk").toString().toUtf8());
     m_operationalKey = QByteArray::fromHex(fabric.value("operationalKey").toString().toUtf8());
     m_controllerNOC = QByteArray::fromHex(fabric.value("controllerNOC").toString().toUtf8());
@@ -209,7 +209,7 @@ void DeviceList::writeDatabase(void)
     if (!m_fabricKey.isEmpty())
     {
         fabric.insert("key", QString(m_fabricKey.toHex()));
-        fabric.insert("rootCAId", static_cast <double> (m_rootCAId));
+        fabric.insert("rootCAId", QString::number(m_rootCAId, 16));
         fabric.insert("ipk", QString(m_ipk.toHex()));
         fabric.insert("operationalKey", QString(m_operationalKey.toHex()));
         fabric.insert("controllerNOC", QString(m_controllerNOC.toHex()));

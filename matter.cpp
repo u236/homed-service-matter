@@ -527,7 +527,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                         logInfo << "Device public key extracted," << commission.devicePublicKey.length() << "bytes";
 
-                        commission.rcacTLV = m_controllerRCAC; // use persisted RCAC for all devices
+                        commission.rcacTLV = generateFabricCert(m_fabricId, 0, m_fabricPublicKey, true);
                         commission.nocTLV = generateFabricCert(m_fabricId, commission.device->nodeId(), commission.devicePublicKey, false);
 
                         logInfo << "Generated RCAC" << commission.rcacTLV.length() << "bytes, NOC" << commission.nocTLV.length() << "bytes";
