@@ -44,7 +44,7 @@ void MRP::messageSent(const QByteArray &data, const QHostAddress &address, quint
     m_pendingMessages.append(pending);
 }
 
-void MRP::messageReceived(quint32 messageCounter, quint16 exchangeId, bool hasAck, quint32 ackCounter, const QHostAddress &address, quint16 port, quint16 sessionId, bool needsAck)
+void MRP::messageReceived(quint32 messageCounter, quint16 exchangeId, bool hasAck, quint32 ackCounter, const QHostAddress &address, quint16 port, quint16 sessionId, bool needsAck, bool initiator)
 {
     if (hasAck)
     {
@@ -66,6 +66,7 @@ void MRP::messageReceived(quint32 messageCounter, quint16 exchangeId, bool hasAc
         ack.sessionId = sessionId;
         ack.messageCounter = messageCounter;
         ack.exchangeId = exchangeId;
+        ack.initiator = !initiator;
         ack.deadline = QDateTime::currentMSecsSinceEpoch() + MRP_STANDALONE_ACK_TIMEOUT;
 
         m_pendingAcks.append(ack);
@@ -117,8 +118,9 @@ void MRP::processTimers(void)
             QHostAddress address = ack.address;
             quint16 port = ack.port;
 
+            bool init = m_pendingAcks.at(i).initiator;
             m_pendingAcks.removeAt(i);
-            emit sendStandaloneAck(messageCounter, exchangeId, sessionId, address, port);
+            emit sendStandaloneAck(messageCounter, exchangeId, sessionId, address, port, init);
         }
     }
 

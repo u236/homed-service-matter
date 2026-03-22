@@ -219,7 +219,7 @@ QByteArray InteractionModel::encodeSubscribeRequest(const QList <AttributePath> 
     MatterTLV::Encoder encoder;
     encoder.openStructure();
 
-    encoder.encodeBool(0, true);  // keepSubscriptions
+    encoder.encodeBool(0, false); // keepSubscriptions — cancel old subscriptions from this fabric
     encoder.encodeUnsignedInt(1, minInterval);
     encoder.encodeUnsignedInt(2, maxInterval);
 

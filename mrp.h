@@ -56,9 +56,10 @@ public:
         quint16 sessionId;
         quint32 messageCounter;
         quint16 exchangeId;
+        bool initiator;
         qint64 deadline;
 
-        PendingAck(void) : port(0), sessionId(0), messageCounter(0), exchangeId(0), deadline(0) {}
+        PendingAck(void) : port(0), sessionId(0), messageCounter(0), exchangeId(0), initiator(false), deadline(0) {}
     };
 
     MRP(QObject *parent);
@@ -66,7 +67,7 @@ public:
     inline void setDebug(bool value) { m_debug = value; }
 
     void messageSent(const QByteArray &data, const QHostAddress &address, quint16 port, quint32 messageCounter, quint16 exchangeId, bool needsAck);
-    void messageReceived(quint32 messageCounter, quint16 exchangeId, bool hasAck, quint32 ackCounter, const QHostAddress &address, quint16 port, quint16 sessionId, bool needsAck);
+    void messageReceived(quint32 messageCounter, quint16 exchangeId, bool hasAck, quint32 ackCounter, const QHostAddress &address, quint16 port, quint16 sessionId, bool needsAck, bool initiator);
     void cancelPendingAck(quint32 messageCounter);
 
     bool isDuplicate(const QHostAddress &address, quint32 messageCounter);
@@ -90,7 +91,7 @@ private slots:
 signals:
 
     void retransmit(const QByteArray &data, const QHostAddress &address, quint16 port);
-    void sendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port);
+    void sendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port, bool initiator);
     void retransmitFailed(quint32 messageCounter, quint16 exchangeId, const QHostAddress &address, quint16 port);
 
 };

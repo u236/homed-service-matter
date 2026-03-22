@@ -136,7 +136,7 @@ private:
     void handleSecureChannel(const MatterProtocol::MessageHeader &msgHeader, const MatterProtocol::ProtocolHeader &protoHeader, const QByteArray &payload, const QHostAddress &address, quint16 port);
     void handleInteractionModel(const MatterProtocol::MessageHeader &msgHeader, const MatterProtocol::ProtocolHeader &protoHeader, const QByteArray &payload, const QHostAddress &address, quint16 port);
 
-    void sendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port);
+    void sendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port, bool initiator);
     void startCommissioning(const MatterService &service);
     void continueCommissioning(PendingCommission &commission);
     QByteArray generateFabricCert(quint64 fabricId, quint64 nodeId, const QByteArray &subjectPubKey, bool isRCAC);
@@ -150,7 +150,7 @@ private slots:
 
     void mrpRetransmit(const QByteArray &data, const QHostAddress &address, quint16 port);
     void mrpRetransmitFailed(quint32 messageCounter, quint16 exchangeId, const QHostAddress &address, quint16 port);
-    void mrpSendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port);
+    void mrpSendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port, bool initiator);
 
     void mdnsServiceFound(const MatterService &service);
 

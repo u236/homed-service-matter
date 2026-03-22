@@ -1206,7 +1206,7 @@ QByteArray Matter::generateFabricCert(quint64 fabricId, quint64 nodeId, const QB
 
 // --- Standalone ACK ---
 
-void Matter::sendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port)
+void Matter::sendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port, bool initiator)
 {
     SessionInfo *session = m_sessions->findByLocalId(sessionId);
 
@@ -1224,6 +1224,9 @@ void Matter::sendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 s
 
         ProtocolHeader protoHeader;
         protoHeader.exchangeFlags = static_cast <quint8> (ExchangeFlag::Acknowledgement);
+
+        if (initiator)
+            protoHeader.exchangeFlags |= static_cast <quint8> (ExchangeFlag::Initiator);
         protoHeader.opcode = static_cast <quint8> (SecureChannelOpcode::MRPStandaloneAck);
         protoHeader.exchangeId = exchangeId;
         protoHeader.protocolId = static_cast <quint16> (ProtocolId::SecureChannel);
@@ -1247,6 +1250,10 @@ void Matter::sendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 s
 
         ProtocolHeader protoHeader;
         protoHeader.exchangeFlags = static_cast <quint8> (ExchangeFlag::Acknowledgement);
+
+        if (initiator)
+            protoHeader.exchangeFlags |= static_cast <quint8> (ExchangeFlag::Initiator);
+
         protoHeader.opcode = static_cast <quint8> (SecureChannelOpcode::MRPStandaloneAck);
         protoHeader.exchangeId = exchangeId;
         protoHeader.protocolId = static_cast <quint16> (ProtocolId::SecureChannel);
@@ -1325,7 +1332,7 @@ void Matter::readyRead(void)
             continue;
         }
 
-        m_mrp->messageReceived(msgHeader.messageCounter, protoHeader.exchangeId, protoHeader.hasAck(), protoHeader.ackCounter, sender, senderPort, msgHeader.sessionId, protoHeader.needsAck());
+        m_mrp->messageReceived(msgHeader.messageCounter, protoHeader.exchangeId, protoHeader.hasAck(), protoHeader.ackCounter, sender, senderPort, msgHeader.sessionId, protoHeader.needsAck(), protoHeader.isInitiator());
 
         QByteArray messagePayload = payload.mid(payloadOffset);
 
@@ -1467,9 +1474,9 @@ void Matter::mrpRetransmitFailed(quint32 messageCounter, quint16 exchangeId, con
     }
 }
 
-void Matter::mrpSendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port)
+void Matter::mrpSendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port, bool initiator)
 {
-    sendStandaloneAck(ackCounter, exchangeId, sessionId, address, port);
+    sendStandaloneAck(ackCounter, exchangeId, sessionId, address, port, initiator);
 }
 
 void Matter::mdnsServiceFound(const MatterService &service)
@@ -1779,18 +1786,20 @@ bool Matter::parseQRCode(const QString &payload, quint32 &passcode, quint16 &dis
 
 bool Matter::parseManualCode(const QString &code, quint32 &passcode, quint16 &discriminator)
 {
-    if (code.length() != 11 && code.length() != 21)
-        return false;
+    QString clean;
 
-    for (int i = 0; i < code.length(); i++)
+    for (const QChar &ch : code)
     {
-        if (!code.at(i).isDigit())
-            return false;
+        if (ch.isDigit())
+            clean.append(ch);
     }
 
-    quint32 chunk1 = code.mid(0, 1).toUInt();
-    quint32 chunk2 = code.mid(1, 5).toUInt();
-    quint32 chunk3 = code.mid(6, 4).toUInt();
+    if (clean.length() != 11 && clean.length() != 21)
+        return false;
+
+    quint32 chunk1 = clean.mid(0, 1).toUInt();
+    quint32 chunk2 = clean.mid(1, 5).toUInt();
+    quint32 chunk3 = clean.mid(6, 4).toUInt();
 
     // short discriminator (4 bits): chunk1 bits[0:1] (MSBs) + chunk2 bits[14:15] (LSBs)
     discriminator = static_cast <quint16> (((chunk1 & 0x3) << 2) | ((chunk2 >> 14) & 0x3));
