@@ -330,8 +330,8 @@ void Controller::deviceRemoved(DeviceObject *device, bool success)
     disconnect(device, &DeviceObject::deviceUpdated, this, &Controller::deviceUpdated);
     disconnect(device, &DeviceObject::endpointUpdated, this, &Controller::endpointUpdated);
 
-    m_devices->removeAt(index);
     logInfo << device << "removed" << (success ? "gracefully" : "forcefully");
     deviceEvent(device, Event::removed);
+    m_devices->removeAt(index);
     m_devices->store(true);
 }
