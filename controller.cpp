@@ -247,7 +247,6 @@ void Controller::mqttReceived(const QByteArray &message, const QMqttTopicName &t
                 quint64 nodeId = m_devices->nextNodeId();
                 logInfo << "Adding device, passcode:" << passcode << "discriminator:" << discriminator << (shortDiscriminator ? "(short)" : "(full)") << "nodeId:" << nodeId;
                 m_matter->addDevice(passcode, discriminator, shortDiscriminator, nodeId);
-                m_devices->store(true); // persist nextNodeId
                 break;
             }
         }
@@ -326,6 +325,7 @@ void Controller::deviceCommissioned(DeviceObject *device)
     connect(device, &DeviceObject::endpointUpdated, this, &Controller::endpointUpdated);
 
     m_devices->append(Device(device));
+    m_devices->setNextNodeId(device->nodeId() + 1);
     deviceEvent(device, Event::added);
     m_devices->store(true);
 }

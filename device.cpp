@@ -24,11 +24,6 @@ void DeviceList::setFabricCredentials(const QByteArray &fabricKey, quint64 rootC
     m_controllerRCAC = controllerRCAC;
 }
 
-quint64 DeviceList::nextNodeId(void)
-{
-    return m_nextNodeId++;
-}
-
 DeviceList::DeviceList(QSettings *config, QObject *parent) : QObject(parent), m_timer(new QTimer(this)), m_sync(false), m_nextNodeId(2), m_rootCAId(0)
 {
     QFile file(config->value("device/expose", "/usr/share/homed-common/expose.json").toString());

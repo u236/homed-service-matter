@@ -84,7 +84,8 @@ public:
     void init(void);
     void store(bool sync = false);
 
-    quint64 nextNodeId(void);
+    inline quint64 nextNodeId(void) { return m_nextNodeId; }
+    inline void setNextNodeId(quint64 value) { m_nextNodeId = value; }
 
     inline QByteArray fabricKey(void) { return m_fabricKey; }
     inline quint64 rootCAId(void) { return m_rootCAId; }
