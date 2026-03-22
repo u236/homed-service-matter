@@ -499,6 +499,17 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                 if (reportDevice)
                 {
+                    Device reportDeviceHolder; // keep shared pointer alive
+
+                    for (int di = 0; di < m_devices->count(); di++)
+                    {
+                        if (m_devices->at(di).data() == reportDevice)
+                        {
+                            reportDeviceHolder = m_devices->at(di);
+                            break;
+                        }
+                    }
+
                     // step 1 response: PartsList — request ServerList for discovered endpoints
                     QList <quint8> discoveredEndpoints;
 
@@ -556,7 +567,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                         if (endpoint.isNull())
                         {
-                            endpoint = Endpoint(new EndpointObject(epId, Device(reportDevice)));
+                            endpoint = Endpoint(new EndpointObject(epId, reportDeviceHolder));
                             reportDevice->endpoints().insert(epId, endpoint);
                         }
 
