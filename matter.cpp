@@ -505,7 +505,11 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                     for (const AttributeReport &report : reports)
                     {
                         if (!report.hasError && report.path.clusterId == Clusters::Descriptor::Id && report.path.attributeId == Clusters::Descriptor::Attributes::PartsList && report.path.endpointId == 0)
-                            discoveredEndpoints.append(static_cast <quint8> (report.value.toUInt()));
+                        {
+                            // PartsList is an array — parse children
+                            for (const MatterTLV::Element &child : report.rawValue.children)
+                                discoveredEndpoints.append(static_cast <quint8> (child.value.toUInt()));
+                        }
                     }
 
                     if (!discoveredEndpoints.isEmpty() && reportDevice->endpoints().isEmpty())
@@ -526,12 +530,13 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                     for (const AttributeReport &report : reports)
                     {
-                        if (report.hasError || report.path.clusterId != Clusters::Descriptor::Id)
+                        if (report.hasError || report.path.clusterId != Clusters::Descriptor::Id || report.path.attributeId != Clusters::Descriptor::Attributes::ServerList)
                             continue;
 
-                        if (report.path.attributeId == Clusters::Descriptor::Attributes::ServerList)
+                        // ServerList is an array — parse children
+                        for (const MatterTLV::Element &child : report.rawValue.children)
                         {
-                            quint32 clusterId = report.value.toUInt();
+                            quint32 clusterId = child.value.toUInt();
 
                             if (clusterId)
                                 endpointClusters[report.path.endpointId].append(clusterId);
