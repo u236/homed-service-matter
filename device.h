@@ -99,7 +99,7 @@ public:
 
     void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC, const QByteArray &controllerRCAC);
 
-    void setupEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters);
+    void setupEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters, quint16 colorCapabilities = 0);
     void updateMultiple(DeviceObject *device);
 
     Device byName(const QString &name, int *index = nullptr);

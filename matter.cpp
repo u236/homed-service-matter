@@ -490,6 +490,8 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                                 }
                                 else if (report.path.clusterId == Clusters::ColorControl::Id && report.path.attributeId == Clusters::ColorControl::Attributes::ColorTemperatureMireds)
                                     dev->updateEndpoint(report.path.endpointId, "colorTemperature", report.value.toUInt());
+                                else if (report.path.clusterId == Clusters::ColorControl::Id && report.path.attributeId == Clusters::ColorControl::Attributes::ColorMode)
+                                    dev->updateEndpoint(report.path.endpointId, "colorMode", report.value.toUInt() != 2);
                                 else if (report.path.clusterId == Clusters::TemperatureMeasurement::Id && report.path.attributeId == Clusters::TemperatureMeasurement::Attributes::MeasuredValue)
                                     dev->updateEndpoint(report.path.endpointId, "temperature", report.value.toDouble() / 100.0);
                                 else if (report.path.clusterId == Clusters::RelativeHumidityMeasurement::Id && report.path.attributeId == Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue)
@@ -595,27 +597,35 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         QList <AttributePath> serverPaths;
 
                         for (quint8 ep : discoveredEndpoints)
+                        {
                             serverPaths.append(AttributePath(ep, Clusters::Descriptor::Id, Clusters::Descriptor::Attributes::ServerList));
+                            serverPaths.append(AttributePath(ep, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorCapabilities));
+                        }
 
                         QByteArray serverPayload = InteractionModel::encodeReadRequest(serverPaths);
                         sendEncrypted(reportSession, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), serverPayload, m_exchangeCounter++, true);
                     }
 
-                    // step 2 response: ServerList — create exposes and subscribe
+                    // step 2 response: ServerList + ColorCapabilities — create exposes and subscribe
                     QMap <quint8, QList <quint32>> endpointClusters;
+                    QMap <quint8, quint16> colorCapabilities;
 
                     for (const AttributeReport &report : reports)
                     {
-                        if (report.hasError || report.path.clusterId != Clusters::Descriptor::Id || report.path.attributeId != Clusters::Descriptor::Attributes::ServerList)
+                        if (report.hasError)
                             continue;
 
-                        // ServerList is an array — parse children
-                        logDebug(m_debug) << "ServerList for ep" << report.path.endpointId << ":" << report.rawValue.children.count() << "clusters, type:" << static_cast <int> (report.rawValue.type);
-
-                        for (const MatterTLV::Element &child : report.rawValue.children)
+                        if (report.path.clusterId == Clusters::Descriptor::Id && report.path.attributeId == Clusters::Descriptor::Attributes::ServerList)
                         {
-                            quint32 clusterId = child.value.toUInt();
-                            endpointClusters[report.path.endpointId].append(clusterId);
+                            logDebug(m_debug) << "ServerList for ep" << report.path.endpointId << ":" << report.rawValue.children.count() << "clusters, type:" << static_cast <int> (report.rawValue.type);
+
+                            for (const MatterTLV::Element &child : report.rawValue.children)
+                                endpointClusters[report.path.endpointId].append(child.value.toUInt());
+                        }
+                        else if (report.path.clusterId == Clusters::ColorControl::Id && report.path.attributeId == Clusters::ColorControl::Attributes::ColorCapabilities)
+                        {
+                            colorCapabilities[report.path.endpointId] = report.value.toUInt();
+                            logDebug(m_debug) << "ColorCapabilities for ep" << report.path.endpointId << ":" << QString::number(report.value.toUInt(), 16);
                         }
                     }
 
@@ -623,7 +633,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                     for (auto it = endpointClusters.begin(); it != endpointClusters.end(); it++)
                     {
                         if (it.key() > 0)
-                            m_devices->setupEndpoint(reportDevice, it.key(), it.value());
+                            m_devices->setupEndpoint(reportDevice, it.key(), it.value(), colorCapabilities.value(it.key(), 0));
                     }
 
                     m_devices->updateMultiple(reportDevice);
@@ -646,9 +656,19 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                             if (it.value().contains(Clusters::ColorControl::Id))
                             {
-                                pendingSubPaths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentHue));
-                                pendingSubPaths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentSaturation));
-                                pendingSubPaths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTemperatureMireds));
+                                quint16 caps = colorCapabilities.value(epId, 0);
+
+                                if (caps & 0x0009)
+                                {
+                                    pendingSubPaths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentHue));
+                                    pendingSubPaths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentSaturation));
+                                }
+
+                                if (caps & 0x0010)
+                                    pendingSubPaths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTemperatureMireds));
+
+                                if ((caps & 0x0019) == 0x0019)
+                                    pendingSubPaths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorMode));
                             }
 
                             if (it.value().contains(Clusters::TemperatureMeasurement::Id))

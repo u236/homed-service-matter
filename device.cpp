@@ -15,7 +15,7 @@ void DeviceObject::updateEndpoint(quint8 endpointId, const QString &property, co
     emit endpointUpdated(this, endpointId);
 }
 
-void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters)
+void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters, quint16 colorCapabilities)
 {
     Device holder;
 
@@ -52,7 +52,28 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QL
     };
 
     if (clusters.contains(Clusters::OnOff::Id) && endpoint->exposes().isEmpty())
-        addExpose(clusters.contains(Clusters::LevelControl::Id) || clusters.contains(Clusters::ColorControl::Id) ? static_cast <ExposeObject*> (new LightObject) : new SwitchObject, clusters.contains(Clusters::LevelControl::Id) || clusters.contains(Clusters::ColorControl::Id) ? "light" : "switch");
+    {
+        if (clusters.contains(Clusters::LevelControl::Id) || clusters.contains(Clusters::ColorControl::Id))
+        {
+            QList <QVariant> options;
+
+            if (colorCapabilities & 0x0009)
+                options.append("color");
+
+            if (colorCapabilities & 0x0010)
+                options.append("colorTemperature");
+
+            if ((colorCapabilities & 0x0019) == 0x0019)
+                options.append("colorMode");
+
+            addExpose(new LightObject, "light");
+            device->options().insert(QString("light_%1").arg(endpointId), options);
+        }
+        else
+        {
+            addExpose(new SwitchObject, "switch");
+        }
+    }
 
     if (clusters.contains(Clusters::TemperatureMeasurement::Id))
         addExpose(new SensorObject("temperature"), "temperature");
