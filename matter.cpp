@@ -24,6 +24,7 @@ Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), 
     m_caseDevice = nullptr;
     m_caseExchangeId = 0;
     m_caseNeedsCommissioningComplete = false;
+    m_pendingCommissionDevice = nullptr;
 
     // start message counter from random value to avoid replay detection after restart
     QByteArray counterBytes = Crypto::randomBytes(4);
@@ -113,14 +114,14 @@ void Matter::connectDevice(DeviceObject *device)
                    m_ipk, m_controllerNOC, m_controllerRCAC);
 }
 
-void Matter::removeDevice(DeviceObject *device)
+bool Matter::removeDevice(DeviceObject *device)
 {
     SessionInfo *session = m_sessions->findByPeerNodeId(device->nodeId());
 
     if (!session || !session->active)
     {
-        logWarning << "No active session for" << device->name() << ", removing locally only";
-        return;
+        logWarning << "No active session for" << device->name() << ", force removing";
+        return false;
     }
 
     logInfo << "Sending RemoveFabric to" << device->name() << "fabricIndex:" << device->fabricIndex();
@@ -133,8 +134,8 @@ void Matter::removeDevice(DeviceObject *device)
     QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::RemoveFabric), fields);
     sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
 
-    // mark session inactive — will be cleaned up naturally
     session->active = false;
+    return true;
 }
 
 void Matter::addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator)
@@ -599,7 +600,6 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         logInfo << "AddNOC success, starting CASE for CommissioningComplete...";
                         commission.device->setNetworkAddress(commission.address);
                         commission.device->setNetworkPort(commission.port);
-                        emit deviceCommissioned(commission.device);
 
                         m_caseNeedsCommissioningComplete = true;
                         connectDevice(commission.device);
@@ -620,6 +620,20 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         commission.state = CommissioningState::Done;
                         continueCommissioning(commission);
                         break;
+                    }
+                }
+            }
+
+            // handle CommissioningComplete response on CASE session (after AddNOC → CASE)
+            if (m_pendingCommissionDevice)
+            {
+                for (const CommandResponse &response : responses)
+                {
+                    if (response.path.clusterId == Clusters::GeneralCommissioning::Id && response.path.commandId == Clusters::GeneralCommissioning::Commands::CommissioningCompleteResponse)
+                    {
+                        logInfo << "CommissioningComplete on CASE success, device fully commissioned";
+                        emit deviceCommissioned(m_pendingCommissionDevice);
+                        m_pendingCommissionDevice = nullptr;
                     }
                 }
             }
@@ -1197,6 +1211,7 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
     if (caseSession && m_caseNeedsCommissioningComplete)
     {
         m_caseNeedsCommissioningComplete = false;
+        m_pendingCommissionDevice = m_caseDevice;
         logInfo << "Sending CommissioningComplete on CASE session...";
 
         MatterTLV::Encoder fields;

@@ -31,7 +31,7 @@ public:
 
     void addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator = false);
     void connectDevice(DeviceObject *device);
-    void removeDevice(DeviceObject *device);
+    bool removeDevice(DeviceObject *device);
     void sendCommand(DeviceObject *device, quint8 endpointId, const QString &name, const QVariant &value);
     void readAttributes(DeviceObject *device, const QList <AttributePath> &paths);
 
@@ -110,6 +110,7 @@ private:
     QHostAddress m_caseAddress;
     quint16 m_casePort;
     bool m_caseNeedsCommissioningComplete;
+    DeviceObject *m_pendingCommissionDevice;
 
     QList <DeviceObject*> m_caseQueue;
 

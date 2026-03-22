@@ -199,15 +199,14 @@ void Controller::mqttReceived(const QByteArray &message, const QMqttTopicName &t
 
                 if (index >= 0)
                 {
-                    // send RemoveFabric to the device before removing locally
                     DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
-                    m_matter->removeDevice(obj);
+                    bool graceful = m_matter->removeDevice(obj);
 
                     disconnect(device.data(), &DeviceObject::deviceUpdated, this, &Controller::deviceUpdated);
                     disconnect(device.data(), &DeviceObject::endpointUpdated, this, &Controller::endpointUpdated);
 
                     m_devices->removeAt(index);
-                    logInfo << device << "removed";
+                    logInfo << device << (graceful ? "removed gracefully" : "removed forcefully");
                     deviceEvent(device.data(), Event::removed);
                     m_devices->store(true);
                 }
