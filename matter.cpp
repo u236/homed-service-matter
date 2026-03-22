@@ -126,10 +126,9 @@ void Matter::discoverDevice(DeviceObject *device)
 
     logInfo << "Discovering endpoints for" << device->name();
 
-    // read PartsList and ServerList for endpoint 0 + all parts
+    // step 1: read PartsList from endpoint 0
     QList <AttributePath> paths;
     paths.append(AttributePath(0, Clusters::Descriptor::Id, Clusters::Descriptor::Attributes::PartsList));
-    paths.append(AttributePath(0xFFFF, Clusters::Descriptor::Id, Clusters::Descriptor::Attributes::ServerList)); // wildcard endpoint
 
     QByteArray payload = InteractionModel::encodeReadRequest(paths);
     sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
@@ -500,7 +499,29 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                 if (reportDevice)
                 {
-                    // collect server lists per endpoint
+                    // step 1 response: PartsList — request ServerList for discovered endpoints
+                    QList <quint8> discoveredEndpoints;
+
+                    for (const AttributeReport &report : reports)
+                    {
+                        if (!report.hasError && report.path.clusterId == Clusters::Descriptor::Id && report.path.attributeId == Clusters::Descriptor::Attributes::PartsList && report.path.endpointId == 0)
+                            discoveredEndpoints.append(static_cast <quint8> (report.value.toUInt()));
+                    }
+
+                    if (!discoveredEndpoints.isEmpty() && reportDevice->endpoints().isEmpty())
+                    {
+                        logInfo << "Found" << discoveredEndpoints.count() << "endpoints on" << reportDevice->name();
+
+                        QList <AttributePath> serverPaths;
+
+                        for (quint8 ep : discoveredEndpoints)
+                            serverPaths.append(AttributePath(ep, Clusters::Descriptor::Id, Clusters::Descriptor::Attributes::ServerList));
+
+                        QByteArray serverPayload = InteractionModel::encodeReadRequest(serverPaths);
+                        sendEncrypted(reportSession, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), serverPayload, m_exchangeCounter++, true);
+                    }
+
+                    // step 2 response: ServerList — create exposes and subscribe
                     QMap <quint8, QList <quint32>> endpointClusters;
 
                     for (const AttributeReport &report : reports)
