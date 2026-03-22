@@ -244,8 +244,10 @@ void Controller::mqttReceived(const QByteArray &message, const QMqttTopicName &t
                     break;
                 }
 
-                logInfo << "Adding device, passcode:" << passcode << "discriminator:" << discriminator << (shortDiscriminator ? "(short)" : "(full)");
-                m_matter->addDevice(passcode, discriminator, shortDiscriminator);
+                quint64 nodeId = m_devices->nextNodeId();
+                logInfo << "Adding device, passcode:" << passcode << "discriminator:" << discriminator << (shortDiscriminator ? "(short)" : "(full)") << "nodeId:" << nodeId;
+                m_matter->addDevice(passcode, discriminator, shortDiscriminator, nodeId);
+                m_devices->store(true); // persist nextNodeId
                 break;
             }
         }

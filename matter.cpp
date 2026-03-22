@@ -138,7 +138,7 @@ bool Matter::removeDevice(DeviceObject *device)
     return true;
 }
 
-void Matter::addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator)
+void Matter::addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator, quint64 nodeId)
 {
     m_searching = true;
     m_searchPasscode = passcode;
@@ -146,7 +146,8 @@ void Matter::addDevice(quint32 passcode, quint16 discriminator, bool shortDiscri
     m_searchShortDiscriminator = shortDiscriminator;
 
     m_searchTimer->start(60000);
-    logInfo << "Searching for commissionable device, discriminator:" << discriminator << (shortDiscriminator ? "(short)" : "(full)");
+    m_searchNodeId = nodeId;
+    logInfo << "Searching for commissionable device, discriminator:" << discriminator << (shortDiscriminator ? "(short)" : "(full)") << "nodeId:" << nodeId;
     m_mdns->browse();
 }
 
@@ -673,6 +674,7 @@ void Matter::startCommissioning(const MatterService &service)
     commission.exchangeId = exchangeId;
     commission.localSessionId = sessionId;
     commission.passcode = m_searchPasscode;
+    commission.assignedNodeId = m_searchNodeId;
     commission.service = service;
     commission.state = CommissioningState::PASE;
 
@@ -1130,8 +1132,8 @@ void Matter::paseEstablished(quint16 localSessionId, quint16 peerSessionId)
     m_sessions->addSession(session);
 
     // create device object
-    quint64 nodeId = m_nodeId + m_sessionCounter;
-    commission.device = new DeviceObject(nodeId, commission.service.deviceName.isEmpty() ? QString("matter_%1").arg(commission.service.discriminator) : commission.service.deviceName);
+    quint64 nodeId = commission.assignedNodeId;
+    commission.device = new DeviceObject(nodeId, QString("matter_%1").arg(nodeId));
     commission.device->setVendorId(commission.service.vendorId);
     commission.device->setProductId(commission.service.productId);
     commission.device->setNetworkAddress(commission.address);

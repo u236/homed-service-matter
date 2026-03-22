@@ -24,7 +24,12 @@ void DeviceList::setFabricCredentials(const QByteArray &fabricKey, quint64 rootC
     m_controllerRCAC = controllerRCAC;
 }
 
-DeviceList::DeviceList(QSettings *config, QObject *parent) : QObject(parent), m_timer(new QTimer(this)), m_sync(false), m_rootCAId(0)
+quint64 DeviceList::nextNodeId(void)
+{
+    return m_nextNodeId++;
+}
+
+DeviceList::DeviceList(QSettings *config, QObject *parent) : QObject(parent), m_timer(new QTimer(this)), m_sync(false), m_nextNodeId(2), m_rootCAId(0)
 {
     QFile file(config->value("device/expose", "/usr/share/homed-common/expose.json").toString());
 
@@ -56,6 +61,11 @@ void DeviceList::init(void)
         return;
 
     json = QJsonDocument::fromJson(m_file.readAll()).object();
+    m_nextNodeId = json.value("nextNodeId").toString().toULongLong();
+
+    if (m_nextNodeId < 2)
+        m_nextNodeId = 2;
+
     unserialize(json.value("devices").toArray());
 
     QJsonObject fabric = json.value("fabric").toObject();
@@ -107,7 +117,7 @@ Device DeviceList::byNodeId(quint64 nodeId)
 Device DeviceList::parse(const QJsonObject &json)
 {
     QString name = mqttSafe(json.value("name").toString());
-    quint64 nodeId = static_cast <quint64> (json.value("nodeId").toDouble());
+    quint64 nodeId = json.contains("id") ? json.value("id").toString().toULongLong() : static_cast <quint64> (json.value("nodeId").toDouble()); // backward compat
 
     if (name.isEmpty() || !nodeId)
         return Device();
@@ -174,7 +184,7 @@ QJsonArray DeviceList::serialize(void)
     {
         const Device &device = at(i);
         DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
-        QJsonObject json = {{"nodeId", static_cast <double> (obj->nodeId())}, {"name", device->name()}, {"active", device->active()}, {"cloud", device->cloud()}, {"discovery", device->discovery()}};
+        QJsonObject json = {{"id", QString::number(obj->nodeId())}, {"name", device->name()}, {"active", device->active()}, {"cloud", device->cloud()}, {"discovery", device->discovery()}};
 
         if (obj->vendorId())
             json.insert("vendorId", obj->vendorId());
@@ -220,7 +230,7 @@ void DeviceList::writeDatabase(void)
         fabric.insert("controllerRCAC", QString(m_controllerRCAC.toHex()));
     }
 
-    QJsonObject json = {{"devices", serialize()}, {"fabric", fabric}, {"names", m_names}, {"timestamp", QDateTime::currentSecsSinceEpoch()}, {"version", SERVICE_VERSION}};
+    QJsonObject json = {{"devices", serialize()}, {"fabric", fabric}, {"nextNodeId", QString::number(m_nextNodeId)}, {"names", m_names}, {"timestamp", QDateTime::currentSecsSinceEpoch()}, {"version", SERVICE_VERSION}};
 
     emit statusUpdated(json);
 

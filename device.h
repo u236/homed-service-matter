@@ -50,7 +50,7 @@ public:
     inline quint16 networkPort(void) { return m_networkPort; }
     inline void setNetworkPort(quint16 value) { m_networkPort = value; }
 
-    inline QString address(void) { return QString("0x%1").arg(m_nodeId, 16, 16, QLatin1Char('0')); }
+    inline QString address(void) { return QString::number(m_nodeId); }
 
     void updateEndpoint(quint8 endpointId, const QString &property, const QVariant &value);
 
@@ -84,6 +84,8 @@ public:
     void init(void);
     void store(bool sync = false);
 
+    quint64 nextNodeId(void);
+
     inline QByteArray fabricKey(void) { return m_fabricKey; }
     inline quint64 rootCAId(void) { return m_rootCAId; }
     inline QByteArray ipk(void) { return m_ipk; }
@@ -103,6 +105,7 @@ private:
     QFile m_file;
     bool m_names, m_sync;
 
+    quint64 m_nextNodeId;
     QByteArray m_fabricKey;
     quint64 m_rootCAId;
     QByteArray m_ipk;

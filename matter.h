@@ -29,7 +29,7 @@ public:
     inline QByteArray controllerNOC(void) { return m_controllerNOC; }
     inline QByteArray controllerRCAC(void) { return m_controllerRCAC; }
 
-    void addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator = false);
+    void addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator = false, quint64 nodeId = 0);
     void connectDevice(DeviceObject *device);
     bool removeDevice(DeviceObject *device);
     void sendCommand(DeviceObject *device, quint8 endpointId, const QString &name, const QVariant &value);
@@ -62,6 +62,7 @@ private:
         quint16 exchangeId;
         quint16 localSessionId;
         quint32 passcode;
+        quint64 assignedNodeId;
         MatterService service;
         CommissioningState state;
         DeviceObject *device;
@@ -72,7 +73,7 @@ private:
         QByteArray rcacTLV;
         QByteArray nocTLV;
 
-        PendingCommission(void) : pase(nullptr), port(0), exchangeId(0), localSessionId(0), passcode(0), state(CommissioningState::Idle), device(nullptr), lastPeerCounter(0), timedInvokePending(false) {}
+        PendingCommission(void) : pase(nullptr), port(0), exchangeId(0), localSessionId(0), passcode(0), assignedNodeId(0), state(CommissioningState::Idle), device(nullptr), lastPeerCounter(0), timedInvokePending(false) {}
     };
 
     QUdpSocket *m_udp;
@@ -86,6 +87,7 @@ private:
     bool m_searchShortDiscriminator;
     quint32 m_searchPasscode;
     quint16 m_searchDiscriminator;
+    quint64 m_searchNodeId;
 
     quint32 m_messageCounter;
     quint16 m_exchangeCounter;
