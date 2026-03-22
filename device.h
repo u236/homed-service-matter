@@ -82,6 +82,7 @@ public:
 
     inline bool names(void) { return m_names; }
     inline void setNames(bool value) { m_names = value; }
+    inline QMap <QString, QVariant> &exposeOptions(void) { return m_exposeOptions; }
 
     void init(void);
     void store(bool sync = false);
@@ -97,6 +98,8 @@ public:
     inline QByteArray controllerRCAC(void) { return m_controllerRCAC; }
 
     void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC, const QByteArray &controllerRCAC);
+
+    void setupEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters);
 
     Device byName(const QString &name, int *index = nullptr);
     Device byNodeId(quint64 nodeId);

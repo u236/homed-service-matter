@@ -2,7 +2,6 @@
 #include <QDateTime>
 #include <cstring>
 #include "matter.h"
-#include "expose.h"
 #include "color.h"
 #include "logger.h"
 #include "tlv.h"
@@ -623,51 +622,8 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                     // create endpoints and exposes
                     for (auto it = endpointClusters.begin(); it != endpointClusters.end(); it++)
                     {
-                        quint8 epId = it.key();
-                        const QList <quint32> &clusters = it.value();
-
-                        if (epId == 0 || (!clusters.contains(Clusters::OnOff::Id) && !clusters.contains(Clusters::TemperatureMeasurement::Id) && !clusters.contains(Clusters::RelativeHumidityMeasurement::Id) && !clusters.contains(Clusters::ElectricalPowerMeasurement::Id) && !clusters.contains(Clusters::ElectricalEnergyMeasurement::Id)))
-                            continue;
-
-                        Endpoint endpoint = reportDevice->endpoints().value(epId);
-
-                        if (endpoint.isNull())
-                        {
-                            endpoint = Endpoint(new EndpointObject(epId, reportDeviceHolder));
-                            reportDevice->endpoints().insert(epId, endpoint);
-                        }
-
-                        reinterpret_cast <EndpointObject*> (endpoint.data())->clusters() = clusters;
-
-                        if (clusters.contains(Clusters::OnOff::Id) && endpoint->exposes().isEmpty())
-                        {
-                            endpoint->exposes().append(clusters.contains(Clusters::LevelControl::Id) || clusters.contains(Clusters::ColorControl::Id) ? Expose(new LightObject) : Expose(new SwitchObject));
-                            logInfo << "Endpoint" << epId << "on" << reportDevice->name() << ":" << (clusters.contains(Clusters::LevelControl::Id) ? "light" : "switch");
-                        }
-
-                        if (clusters.contains(Clusters::TemperatureMeasurement::Id))
-                        {
-                            endpoint->exposes().append(Expose(new SensorObject("temperature")));
-                            logInfo << "Endpoint" << epId << "on" << reportDevice->name() << ": temperature";
-                        }
-
-                        if (clusters.contains(Clusters::RelativeHumidityMeasurement::Id))
-                        {
-                            endpoint->exposes().append(Expose(new SensorObject("humidity")));
-                            logInfo << "Endpoint" << epId << "on" << reportDevice->name() << ": humidity";
-                        }
-
-                        if (clusters.contains(Clusters::ElectricalPowerMeasurement::Id))
-                        {
-                            endpoint->exposes().append(Expose(new SensorObject("power")));
-                            logInfo << "Endpoint" << epId << "on" << reportDevice->name() << ": power";
-                        }
-
-                        if (clusters.contains(Clusters::ElectricalEnergyMeasurement::Id))
-                        {
-                            endpoint->exposes().append(Expose(new SensorObject("energy")));
-                            logInfo << "Endpoint" << epId << "on" << reportDevice->name() << ": energy";
-                        }
+                        if (it.key() > 0)
+                            m_devices->setupEndpoint(reportDevice, it.key(), it.value());
                     }
 
                     // collect subscribe paths for after StatusResponse

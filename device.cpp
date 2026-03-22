@@ -1,6 +1,7 @@
 #include "controller.h"
 #include "device.h"
 #include "expose.h"
+#include "clusters.h"
 #include "logger.h"
 
 void DeviceObject::updateEndpoint(quint8 endpointId, const QString &property, const QVariant &value)
@@ -12,6 +13,58 @@ void DeviceObject::updateEndpoint(quint8 endpointId, const QString &property, co
 
     endpoint->status().insert(property, value);
     emit endpointUpdated(this, endpointId);
+}
+
+void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters)
+{
+    Device holder;
+
+    for (int i = 0; i < count(); i++)
+    {
+        if (at(i).data() == device)
+        {
+            holder = at(i);
+            break;
+        }
+    }
+
+    if (holder.isNull())
+        return;
+
+    Endpoint endpoint = device->endpoints().value(endpointId);
+
+    if (endpoint.isNull())
+    {
+        endpoint = Endpoint(new EndpointObject(endpointId, holder));
+        device->endpoints().insert(endpointId, endpoint);
+    }
+
+    reinterpret_cast <EndpointObject*> (endpoint.data())->clusters() = clusters;
+
+    auto addExpose = [&](ExposeObject *obj, const QString &name)
+    {
+        Expose expose(obj);
+        expose->setName(name);
+        expose->setParent(endpoint.data());
+        endpoint->exposes().append(expose);
+        device->options().insert(name, m_exposeOptions.value(name));
+        logInfo << "Endpoint" << endpointId << "on" << device->name() << ":" << name;
+    };
+
+    if (clusters.contains(Clusters::OnOff::Id) && endpoint->exposes().isEmpty())
+        addExpose(clusters.contains(Clusters::LevelControl::Id) || clusters.contains(Clusters::ColorControl::Id) ? static_cast <ExposeObject*> (new LightObject) : new SwitchObject, clusters.contains(Clusters::LevelControl::Id) || clusters.contains(Clusters::ColorControl::Id) ? "light" : "switch");
+
+    if (clusters.contains(Clusters::TemperatureMeasurement::Id))
+        addExpose(new SensorObject("temperature"), "temperature");
+
+    if (clusters.contains(Clusters::RelativeHumidityMeasurement::Id))
+        addExpose(new SensorObject("humidity"), "humidity");
+
+    if (clusters.contains(Clusters::ElectricalPowerMeasurement::Id))
+        addExpose(new SensorObject("power"), "power");
+
+    if (clusters.contains(Clusters::ElectricalEnergyMeasurement::Id))
+        addExpose(new SensorObject("energy"), "energy");
 }
 
 void DeviceList::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC, const QByteArray &controllerRCAC)

@@ -24,7 +24,7 @@ public:
 
     void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC = QByteArray(), const QByteArray &controllerRCAC = QByteArray());
     inline void setDebug(bool value) { m_debug = value; m_mrp->setDebug(value); }
-    inline void setDevices(QList <Device> *devices) { m_devices = devices; }
+    inline void setDevices(DeviceList *devices) { m_devices = devices; }
     inline QByteArray fabricKey(void) { return m_fabricKey; }
     inline quint64 rootCAId(void) { return m_rootCAId; }
     inline QByteArray ipk(void) { return m_ipk; }
@@ -123,7 +123,7 @@ private:
 
     QList <DeviceObject*> m_caseQueue;
 
-    QList <Device> *m_devices;
+    DeviceList *m_devices;
     QMap <quint64, QList <AttributePath>> m_subscribedPaths;
 
     QMap <quint16, PendingCommission> m_pendingCommissions;

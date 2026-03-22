@@ -288,6 +288,7 @@ void Controller::updateProperties(void)
 void Controller::deviceUpdated(DeviceObject *device)
 {
     logInfo << device->name() << "successfully updated";
+    publishExposes(device);
     m_devices->store(true);
 }
 
