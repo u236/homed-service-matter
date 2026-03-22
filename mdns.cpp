@@ -6,20 +6,25 @@
 #define MATTER_COMMISSION_SERVICE   "_matterc._udp.local"
 #define MATTER_OPERATIVE_SERVICE    "_matter._tcp.local"
 
-MDNS::MDNS(QObject *parent) : QObject(parent), m_socket(new QUdpSocket(this)), m_browseTimer(new QTimer(this))
+MDNS::MDNS(QObject *parent) : QObject(parent), m_socket(new QUdpSocket(this)), m_socket6(new QUdpSocket(this)), m_browseTimer(new QTimer(this))
 {
     connect(m_socket, &QUdpSocket::readyRead, this, &MDNS::readyRead);
+    connect(m_socket6, &QUdpSocket::readyRead, this, &MDNS::readyRead);
     connect(m_browseTimer, &QTimer::timeout, this, &MDNS::browseTimeout);
 
     m_browseTimer->setSingleShot(true);
 
     if (m_socket->bind(QHostAddress::AnyIPv4, MDNS_PORT, QAbstractSocket::ShareAddress | QAbstractSocket::ReuseAddressHint))
     {
-        m_socket->joinMulticastGroup(QHostAddress(MDNS_MULTICAST_ADDR));
-        logInfo << "mDNS listening on" << MDNS_MULTICAST_ADDR << ":" << MDNS_PORT;
+        m_socket->joinMulticastGroup(QHostAddress(MDNS_MULTICAST_ADDR4));
+        logInfo << "MDNS listening on" << MDNS_MULTICAST_ADDR4 << ":" << MDNS_PORT;
     }
-    else
-        logWarning << "Failed to bind mDNS socket";
+
+    if (m_socket6->bind(QHostAddress::AnyIPv6, MDNS_PORT, QAbstractSocket::ShareAddress | QAbstractSocket::ReuseAddressHint))
+    {
+        m_socket6->joinMulticastGroup(QHostAddress(MDNS_MULTICAST_ADDR6));
+        logInfo << "MDNS listening on" << MDNS_MULTICAST_ADDR6 << ":" << MDNS_PORT;
+    }
 }
 
 QByteArray MDNS::encodeName(const QString &name)
@@ -294,7 +299,9 @@ void MDNS::processMdnsResponse(const DNS::Message &message)
             }
             else if (record.type == DNS::Type::TXT && record.name == service.instanceName)
                 parseTxtRecord(record, service);
-            else if ((record.type == DNS::Type::A || record.type == DNS::Type::AAAA) && record.name == service.hostName)
+            else if (record.type == DNS::Type::A && record.name == service.hostName)
+                service.address = record.address;
+            else if (record.type == DNS::Type::AAAA && record.name == service.hostName && service.address.isNull())
                 service.address = record.address;
         }
     }
@@ -314,8 +321,9 @@ void MDNS::processMdnsResponse(const DNS::Message &message)
 void MDNS::browse(void)
 {
     QByteArray query = encodeQuery(MATTER_COMMISSION_SERVICE, DNS::Type::PTR);
-    m_socket->writeDatagram(query, QHostAddress(MDNS_MULTICAST_ADDR), MDNS_PORT);
-    logInfo << "mDNS browse for commissionable Matter devices";
+    m_socket->writeDatagram(query, QHostAddress(MDNS_MULTICAST_ADDR4), MDNS_PORT);
+    m_socket6->writeDatagram(query, QHostAddress(MDNS_MULTICAST_ADDR6), MDNS_PORT);
+    logInfo << "MDNS browse for commissionable Matter devices";
     m_browseTimer->start(5000);
 }
 
@@ -332,19 +340,24 @@ void MDNS::resolve(const QString &instanceName)
 
 void MDNS::readyRead(void)
 {
-    while (m_socket->hasPendingDatagrams())
+    QList <QUdpSocket*> sockets = {m_socket, m_socket6};
+
+    for (QUdpSocket *socket : sockets)
+    {
+    while (socket->hasPendingDatagrams())
     {
         QByteArray datagram;
         QHostAddress sender;
         quint16 senderPort;
 
-        datagram.resize(m_socket->pendingDatagramSize());
-        m_socket->readDatagram(datagram.data(), datagram.size(), &sender, &senderPort);
+        datagram.resize(socket->pendingDatagramSize());
+        socket->readDatagram(datagram.data(), datagram.size(), &sender, &senderPort);
 
         DNS::Message msg = decodeMessage(datagram);
 
         if (msg.isResponse())
             processMdnsResponse(msg);
+    }
     }
 }
 

@@ -26,7 +26,8 @@
     - IPv6: ff02::fb:5353
 */
 
-#define MDNS_MULTICAST_ADDR     "224.0.0.251"
+#define MDNS_MULTICAST_ADDR4    "224.0.0.251"
+#define MDNS_MULTICAST_ADDR6    "ff02::fb"
 #define MDNS_PORT               5353
 
 namespace DNS
@@ -110,6 +111,7 @@ public:
 private:
 
     QUdpSocket *m_socket;
+    QUdpSocket *m_socket6;
     QTimer *m_browseTimer;
 
     QMap <QString, MatterService> m_services;
