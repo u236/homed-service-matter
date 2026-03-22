@@ -112,6 +112,30 @@ void Matter::connectDevice(DeviceObject *device)
                    m_ipk, m_controllerNOC, m_controllerRCAC);
 }
 
+void Matter::removeDevice(DeviceObject *device)
+{
+    SessionInfo *session = m_sessions->findByPeerNodeId(device->nodeId());
+
+    if (!session || !session->active)
+    {
+        logWarning << "No active session for" << device->name() << ", removing locally only";
+        return;
+    }
+
+    logInfo << "Sending RemoveFabric to" << device->name() << "fabricIndex:" << device->fabricIndex();
+
+    MatterTLV::Encoder fields;
+    fields.openStructure();
+    fields.encodeUnsignedInt(0, device->fabricIndex());
+    fields.closeContainer();
+
+    QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::RemoveFabric), fields);
+    sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+
+    // clean up session
+    m_sessions->removeSession(session->localSessionId);
+}
+
 void Matter::addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator)
 {
     m_searching = true;

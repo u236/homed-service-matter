@@ -31,6 +31,7 @@ public:
 
     void addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator = false);
     void connectDevice(DeviceObject *device);
+    void removeDevice(DeviceObject *device);
     void sendCommand(DeviceObject *device, quint8 endpointId, const QString &name, const QVariant &value);
     void readAttributes(DeviceObject *device, const QList <AttributePath> &paths);
 
