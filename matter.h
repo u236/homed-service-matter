@@ -109,6 +109,8 @@ private:
     QHostAddress m_caseAddress;
     quint16 m_casePort;
 
+    QList <DeviceObject*> m_caseQueue;
+
     QMap <quint16, PendingCommission> m_pendingCommissions;
 
     void sendRawDatagram(const QByteArray &data, const QHostAddress &address, quint16 port);

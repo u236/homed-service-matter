@@ -65,7 +65,9 @@ void Matter::connectDevice(DeviceObject *device)
 {
     if (m_pendingCASE)
     {
-        logWarning << "CASE session already in progress";
+        if (!m_caseQueue.contains(device))
+            m_caseQueue.append(device);
+
         return;
     }
 
@@ -1183,6 +1185,10 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
     m_pendingCASE->deleteLater();
     m_pendingCASE = nullptr;
     m_caseDevice = nullptr;
+
+    // connect next queued device
+    if (!m_caseQueue.isEmpty())
+        connectDevice(m_caseQueue.takeFirst());
 }
 
 void Matter::caseFailed(const QString &reason)
@@ -1196,6 +1202,10 @@ void Matter::caseFailed(const QString &reason)
     }
 
     m_caseDevice = nullptr;
+
+    // connect next queued device
+    if (!m_caseQueue.isEmpty())
+        connectDevice(m_caseQueue.takeFirst());
 }
 
 // --- Setup code parsing ---
