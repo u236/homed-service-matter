@@ -100,6 +100,7 @@ public:
     void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC, const QByteArray &controllerRCAC);
 
     void setupEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters);
+    void updateMultiple(DeviceObject *device);
 
     Device byName(const QString &name, int *index = nullptr);
     Device byNodeId(quint64 nodeId);

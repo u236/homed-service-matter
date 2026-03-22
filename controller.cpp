@@ -1,6 +1,7 @@
 #include "controller.h"
 #include "crypto.h"
 #include "pase.h"
+#include "expose.h"
 #include "logger.h"
 
 Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, configFile), m_timer(new QTimer(this)), m_devices(new DeviceList(getConfig(), this)), m_matter(new Matter(this)), m_commands(QMetaEnum::fromType <Command> ()), m_events(QMetaEnum::fromType <Event> ())
@@ -260,7 +261,15 @@ void Controller::mqttReceived(const QByteArray &message, const QMqttTopicName &t
             if (!it.value().toVariant().isValid())
                 continue;
 
-            m_matter->sendCommand(device.data(), endpointId, it.key(), it.value().toVariant());
+            if (endpointId)
+            {
+                m_matter->sendCommand(device.data(), endpointId, it.key(), it.value().toVariant());
+            }
+            else
+            {
+                for (auto ep = device->endpoints().begin(); ep != device->endpoints().end(); ep++)
+                    m_matter->sendCommand(device.data(), ep.key(), it.key(), it.value().toVariant());
+            }
         }
     }
     else if (topic.name() == m_haStatus)
@@ -295,16 +304,26 @@ void Controller::deviceUpdated(DeviceObject *device)
 void Controller::endpointUpdated(DeviceObject *device, quint8 endpointId)
 {
     Endpoint endpoint = device->endpoints().value(endpointId);
+    bool multiple = false;
 
-    if (!endpoint->status().isEmpty())
+    if (endpoint.isNull() || endpoint->status().isEmpty())
+        return;
+
+    for (int i = 0; i < endpoint->exposes().count(); i++)
     {
-        QString topic = mqttTopic("fd/%1/%2").arg(serviceTopic(), m_devices->names() ? device->name() : device->address());
-
-        if (endpointId)
-            topic.append(QString("/%1").arg(endpointId));
-
-        mqttPublish(topic, QJsonObject::fromVariantMap(endpoint->status()));
+        if (endpoint->exposes().at(i)->multiple())
+        {
+            multiple = true;
+            break;
+        }
     }
+
+    QString topic = mqttTopic("fd/%1/%2").arg(serviceTopic(), m_devices->names() ? device->name() : device->address());
+
+    if (multiple)
+        topic.append(QString("/%1").arg(endpointId));
+
+    mqttPublish(topic, QJsonObject::fromVariantMap(endpoint->status()));
 }
 
 void Controller::statusUpdated(const QJsonObject &json)

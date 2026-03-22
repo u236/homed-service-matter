@@ -626,6 +626,8 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             m_devices->setupEndpoint(reportDevice, it.key(), it.value());
                     }
 
+                    m_devices->updateMultiple(reportDevice);
+
                     // collect subscribe paths for after StatusResponse
                     if (!endpointClusters.isEmpty() && reportSession)
                     {
@@ -671,7 +673,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
             // send StatusResponse (success) to acknowledge ReportData
             SessionInfo *session = m_sessions->findByLocalId(msgHeader.sessionId);
 
-            if (session)
+            if (session && !reports.isEmpty())
             {
                 logDebug(m_debug) << "Sending StatusResponse(0) for ReportData, exchange:" << protoHeader.exchangeId << "ack:" << msgHeader.messageCounter;
                 QByteArray statusPayload = InteractionModel::encodeStatusResponse(0);

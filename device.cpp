@@ -77,6 +77,29 @@ void DeviceList::setFabricCredentials(const QByteArray &fabricKey, quint64 rootC
     m_controllerRCAC = controllerRCAC;
 }
 
+void DeviceList::updateMultiple(DeviceObject *device)
+{
+    QMap <QString, int> exposeCounts;
+
+    for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
+    {
+        for (int i = 0; i < it.value()->exposes().count(); i++)
+        {
+            QString name = it.value()->exposes().at(i)->name().split('_').value(0);
+            exposeCounts[name]++;
+        }
+    }
+
+    for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
+    {
+        for (int i = 0; i < it.value()->exposes().count(); i++)
+        {
+            QString name = it.value()->exposes().at(i)->name().split('_').value(0);
+            it.value()->exposes().at(i)->setMultiple(exposeCounts.value(name) > 1);
+        }
+    }
+}
+
 DeviceList::DeviceList(QSettings *config, QObject *parent) : QObject(parent), m_timer(new QTimer(this)), m_sync(false), m_nextNodeId(2), m_rootCAId(0)
 {
     QFile file(config->value("device/expose", "/usr/share/homed-common/expose.json").toString());
