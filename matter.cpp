@@ -133,8 +133,8 @@ void Matter::removeDevice(DeviceObject *device)
     QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::RemoveFabric), fields);
     sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
 
-    // clean up session
-    m_sessions->removeSession(session->localSessionId);
+    // mark session inactive — will be cleaned up naturally
+    session->active = false;
 }
 
 void Matter::addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator)

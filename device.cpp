@@ -130,6 +130,7 @@ Device DeviceList::parse(const QJsonObject &json)
     obj->setProductId(static_cast <quint16> (json.value("productId").toInt()));
     obj->setManufacturerName(json.value("manufacturerName").toString());
     obj->setModelName(json.value("modelName").toString());
+    obj->setFabricIndex(static_cast <quint8> (json.value("fabricIndex").toInt()));
 
     if (json.contains("networkAddress"))
         obj->setNetworkAddress(QHostAddress(json.value("networkAddress").toString()));
@@ -180,6 +181,9 @@ QJsonArray DeviceList::serialize(void)
 
         if (obj->productId())
             json.insert("productId", obj->productId());
+
+        if (obj->fabricIndex())
+            json.insert("fabricIndex", obj->fabricIndex());
 
         if (!device->manufacturerName().isEmpty())
             json.insert("manufacturerName", device->manufacturerName());
