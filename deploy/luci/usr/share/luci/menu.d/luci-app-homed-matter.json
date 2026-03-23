@@ -1,0 +1,14 @@
+{
+  "admin/homed":
+  {
+    "title": "HOMEd",
+    "action": {"type": "firstchild"},
+    "depends": {"acl": ["luci-app-homed-matter"]},
+    "order": 60
+  },
+  "admin/homed/matter":
+  {
+    "title": "Matter Service Configuration",
+    "action": {"type": "view", "path": "homed/matter"}
+  }
+}

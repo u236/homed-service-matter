@@ -1,0 +1,6 @@
+#!/bin/sh
+
+/etc/init.d/homed-matter stop
+/etc/init.d/homed-matter disable
+
+exit 0

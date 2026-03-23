@@ -1,0 +1,16 @@
+{
+  "luci-app-homed-matter":
+  {
+    "description": "Grant access to /etc/homed/homed-matter.conf",
+    "read":
+    {
+      "file": {"/etc/homed/homed-matter.conf": ["read"]},
+      "ubus": {"file": ["read"]}
+    },
+    "write":
+    {
+      "file": {"/etc/homed/homed-matter.conf": ["write"]},
+      "ubus": {"file": ["write"]}
+    }
+  }
+}

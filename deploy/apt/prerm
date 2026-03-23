@@ -1,0 +1,6 @@
+#!/bin/bash
+
+systemctl stop homed-matter.service
+systemctl disable homed-matter.service
+
+exit 0

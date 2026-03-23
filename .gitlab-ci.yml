@@ -1,0 +1,7 @@
+variables:
+  NAME: homed-matter
+  PACKAGE_EXTRA: mkdir -p deploy/data/opt/homed-matter
+
+include:
+- project: 'homed/services/homed-common'
+  file: '.gitlab-ci/pipeline.yml'
