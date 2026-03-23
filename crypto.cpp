@@ -531,7 +531,7 @@ QByteArray Crypto::x509DerToMatterTLV(const QByteArray &derCert)
 
     // tag 9: publicKey
     EVP_PKEY *pubPkey = X509_get0_pubkey(cert);
-    EC_KEY *pubEc = EVP_PKEY_get0_EC_KEY(pubPkey);
+    const EC_KEY *pubEc = EVP_PKEY_get0_EC_KEY(pubPkey);
     const EC_POINT *pubPoint = EC_KEY_get0_public_key(pubEc);
     const EC_GROUP *group = EC_KEY_get0_group(pubEc);
     size_t pubLen = EC_POINT_point2oct(group, pubPoint, POINT_CONVERSION_UNCOMPRESSED, nullptr, 0, nullptr);

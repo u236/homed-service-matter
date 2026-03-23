@@ -1,9 +1,9 @@
+include(../homed-common/homed-color.pri)
 include(../homed-common/homed-common.pri)
 include(../homed-common/homed-endpoint.pri)
 include(../homed-common/homed-parser.pri)
 
 HEADERS += \
-    ../homed-common/color.h \
     case.h \
     clusters.h \
     controller.h \
@@ -19,7 +19,6 @@ HEADERS += \
     tlv.h
 
 SOURCES += \
-    ../homed-common/color.cpp \
     case.cpp \
     controller.cpp \
     crypto.cpp \
@@ -33,18 +32,5 @@ SOURCES += \
     matter.cpp \
     tlv.cpp
 
-QT += network
-
-linux-arm-gnueabihf-g++
-{
-    INCLUDEPATH += /opt/arm-libs/include/
-    LIBS += -L/opt/arm-libs/lib/
-}
-
-mac-linux-arm-gnueabihf-g++
-{
-    INCLUDEPATH += /Volumes/Storage/Toolchain/arm-libs/include/
-    LIBS += -L/Volumes/Storage/Toolchain/arm-libs/lib/
-}
-
-LIBS += -lssl -lcrypto
+QMAKE_CXXFLAGS += -Wno-deprecated-declarations
+LIBS += -lcrypto -ldl -lpthread -lssl
