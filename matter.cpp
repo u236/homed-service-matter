@@ -1043,6 +1043,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                     {
                         logInfo << "CommissioningComplete on CASE success, device fully commissioned";
                         emit deviceCommissioned(m_pendingCommissionDevice);
+                        discoverDevice(m_pendingCommissionDevice);
                         m_pendingCommissionDevice = nullptr;
                     }
                 }
@@ -1990,8 +1991,8 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
 
     logInfo << "CASE session established with" << m_caseDevice->name();
 
-    // discover device endpoints (read PartsList from endpoint 0)
-    if (m_caseDevice->endpoints().isEmpty())
+    // discover device endpoints (skip during initial commissioning — discover after CommissioningComplete)
+    if (m_caseDevice->endpoints().isEmpty() && !m_caseNeedsCommissioningComplete)
         discoverDevice(m_caseDevice);
 
     // send CommissioningComplete on CASE session only during initial commissioning
