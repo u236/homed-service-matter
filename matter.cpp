@@ -981,7 +981,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         m_caseNeedsCommissioningComplete = true;
 
                         // delay CASE to give device time to initialize after AddNOC
-                        QTimer::singleShot(3000, this, [this, commission]() mutable { connectDevice(commission.device); });
+                        QTimer::singleShot(5000, this, [this, commission]() mutable { connectDevice(commission.device); });
 
                         // clean up PASE session
                         m_sessions->removeSession(commission.localSessionId);
