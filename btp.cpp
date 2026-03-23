@@ -2,7 +2,7 @@
 #include "logger.h"
 #include <QtEndian>
 
-BTP::BTP(QObject *parent) : QObject(parent), m_ready(false), m_mtu(BTP_DEFAULT_MTU), m_windowSize(BTP_DEFAULT_WINDOW), m_txSequence(0), m_rxSequence(0), m_lastAck(0), m_rxExpectedLength(0)
+BTP::BTP(QObject *parent) : QObject(parent), m_ready(false), m_ackPending(false), m_mtu(BTP_DEFAULT_MTU), m_windowSize(BTP_DEFAULT_WINDOW), m_txSequence(0), m_rxSequence(0), m_lastAck(0), m_rxExpectedLength(0)
 {
 }
 

@@ -348,6 +348,40 @@ void Matter::sendEncrypted(SessionInfo *session, quint8 opcode, quint16 protocol
     m_mrp->messageSent(data, session->peerAddress, session->peerPort, msgHeader.messageCounter, exchangeId, true);
 }
 
+void Matter::sendEncryptedBle(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator)
+{
+    session->localMessageCounter++;
+
+    MessageHeader msgHeader;
+    msgHeader.flags = 0x00;
+    msgHeader.securityFlags = 0x00;
+    msgHeader.sessionId = session->peerSessionId;
+    msgHeader.messageCounter = session->localMessageCounter;
+
+    QByteArray header = MessageCodec::encodeHeader(msgHeader);
+
+    ProtocolHeader protoHeader;
+    protoHeader.exchangeFlags = 0;
+
+    if (initiator)
+        protoHeader.exchangeFlags |= static_cast <quint8> (ExchangeFlag::Initiator);
+
+    protoHeader.opcode = opcode;
+    protoHeader.exchangeId = exchangeId;
+    protoHeader.protocolId = protocolId;
+
+    QByteArray plaintext = MessageCodec::encodeProtocolHeader(protoHeader);
+    plaintext.append(payload);
+
+    QByteArray nonce = SessionManager::buildNonce(msgHeader.securityFlags, msgHeader.messageCounter, 0);
+    QByteArray encrypted = Crypto::aesCcmEncrypt(session->i2rKey, nonce, header, plaintext, SESSION_TAG_LENGTH);
+
+    QByteArray data = header;
+    data.append(encrypted);
+
+    m_btp->sendMessage(data);
+}
+
 // --- Incoming message handling ---
 
 void Matter::handleSecureChannel(const MessageHeader &msgHeader, const ProtocolHeader &protoHeader, const QByteArray &payload, const QHostAddress &address, quint16 port)
@@ -796,6 +830,41 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                 {
                     PendingCommission &commission = it.value();
 
+                    if (commission.state == CommissioningState::AddWiFiNetwork && response.path.clusterId == Clusters::NetworkCommissioning::Id && response.path.commandId == Clusters::NetworkCommissioning::Commands::NetworkConfigResponse)
+                    {
+                        logInfo << "WiFi network added, connecting...";
+                        commission.state = CommissioningState::ConnectNetwork;
+                        continueCommissioning(commission);
+                        break;
+                    }
+
+                    if (commission.state == CommissioningState::ConnectNetwork && response.path.clusterId == Clusters::NetworkCommissioning::Id && response.path.commandId == Clusters::NetworkCommissioning::Commands::ConnectNetworkResponse)
+                    {
+                        quint8 networkingStatus = 0xFF;
+
+                        for (const MatterTLV::Element &field : response.data.children)
+                        {
+                            if (field.tag == 0) networkingStatus = field.value.toUInt();
+                        }
+
+                        if (networkingStatus != 0)
+                        {
+                            logWarning << "ConnectNetwork failed, status:" << networkingStatus;
+                            break;
+                        }
+
+                        logInfo << "Device connected to WiFi, searching via mDNS...";
+                        m_bleCommissioning = false;
+                        m_ble->disconnectDevice();
+
+                        // search for device on WiFi, continue commissioning when found
+                        commission.state = CommissioningState::ArmFailSafe;
+                        m_searching = true;
+                        m_searchTimer->start(60000);
+                        m_mdns->browse();
+                        break;
+                    }
+
                     if (commission.state == CommissioningState::ArmFailSafe && response.path.clusterId == Clusters::GeneralCommissioning::Id && response.path.commandId == Clusters::GeneralCommissioning::Commands::ArmFailSafeResponse)
                     {
                         logDebug(m_debug) << "ArmFailSafe response, setting regulatory config...";
@@ -910,7 +979,9 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         commission.device->setNetworkPort(commission.port);
 
                         m_caseNeedsCommissioningComplete = true;
-                        connectDevice(commission.device);
+
+                        // delay CASE to give device time to initialize after AddNOC
+                        QTimer::singleShot(3000, this, [this, commission]() mutable { connectDevice(commission.device); });
 
                         // clean up PASE session
                         m_sessions->removeSession(commission.localSessionId);
@@ -1030,6 +1101,37 @@ void Matter::continueCommissioning(PendingCommission &commission)
 
     switch (commission.state)
     {
+        case CommissioningState::AddWiFiNetwork:
+        {
+            logInfo << "Sending AddOrUpdateWiFiNetwork...";
+
+            MatterTLV::Encoder fields;
+            fields.openStructure();
+            fields.encodeByteString(0, m_wifiSSID.toUtf8());
+            fields.encodeByteString(1, m_wifiPassword.toUtf8());
+            fields.encodeUnsignedInt(2, 1); // breadcrumb
+            fields.closeContainer();
+
+            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::NetworkCommissioning::Id, Clusters::NetworkCommissioning::Commands::AddOrUpdateWiFiNetwork), fields);
+            sendEncryptedBle(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            break;
+        }
+
+        case CommissioningState::ConnectNetwork:
+        {
+            logInfo << "Sending ConnectNetwork...";
+
+            MatterTLV::Encoder fields;
+            fields.openStructure();
+            fields.encodeByteString(0, m_wifiSSID.toUtf8());
+            fields.encodeUnsignedInt(1, 1); // breadcrumb
+            fields.closeContainer();
+
+            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::NetworkCommissioning::Id, Clusters::NetworkCommissioning::Commands::ConnectNetwork), fields);
+            sendEncryptedBle(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            break;
+        }
+
         case CommissioningState::ArmFailSafe:
         {
             logDebug(m_debug) << "Sending ArmFailSafe...";
@@ -1403,6 +1505,8 @@ void Matter::bleDeviceFound(const BLEDevice &device)
         return;
 
     logInfo << "BLE device matched, connecting:" << device.address;
+    m_searching = false;
+    m_searchTimer->stop();
     m_ble->connectDevice(device.path);
 }
 
@@ -1474,11 +1578,41 @@ void Matter::btpMessageReceived(const QByteArray &message)
         return;
     }
 
-    payload = payload.mid(payloadOffset);
+    // encrypted BLE message — decrypt first
+    if (msgHeader.sessionId != 0)
+    {
+        SessionInfo *session = m_sessions->findByLocalId(msgHeader.sessionId);
+
+        if (!session)
+            return;
+
+        QByteArray header = message.left(headerOffset);
+        QByteArray ciphertext = message.mid(headerOffset);
+        QByteArray decrypted = m_sessions->decrypt(session, msgHeader.securityFlags, msgHeader.messageCounter, session->peerNodeId, header, ciphertext);
+
+        if (decrypted.isEmpty())
+        {
+            logWarning << "BLE: decryption failed";
+            return;
+        }
+
+        if (!MatterProtocol::MessageCodec::decodeProtocolHeader(decrypted, 0, protoHeader, payloadOffset))
+            return;
+
+        payload = decrypted.mid(payloadOffset);
+        session->lastSeen = QDateTime::currentMSecsSinceEpoch();
+    }
+    else
+    {
+        payload = payload.mid(payloadOffset);
+    }
+
     logInfo << "BLE message: protocol:" << QString::number(protoHeader.protocolId, 16) << "opcode:" << QString::number(protoHeader.opcode, 16) << "exchange:" << protoHeader.exchangeId << "payload:" << payload.size() << "bytes";
 
     if (protoHeader.protocolId == static_cast <quint16> (MatterProtocol::ProtocolId::SecureChannel))
         handleSecureChannel(msgHeader, protoHeader, payload, QHostAddress(), 0);
+    else if (protoHeader.protocolId == static_cast <quint16> (MatterProtocol::ProtocolId::InteractionModel))
+        handleInteractionModel(msgHeader, protoHeader, payload, QHostAddress(), 0);
 }
 
 void Matter::btpWriteData(const QByteArray &data)
@@ -1633,6 +1767,32 @@ void Matter::mdnsServiceFound(const MatterService &service)
     m_searchTimer->stop();
     m_mdns->stop();
 
+    // check if we already have a PASE session from BLE provisioning
+    for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
+    {
+        if (it.value().state == CommissioningState::ArmFailSafe)
+        {
+            logInfo << "Continuing commissioning over UDP at" << service.address.toString() << ":" << service.port;
+
+            SessionInfo *session = m_sessions->findByLocalId(it.key());
+
+            if (session)
+            {
+                session->peerAddress = service.address;
+                session->peerPort = service.port;
+            }
+
+            it.value().address = service.address;
+            it.value().port = service.port;
+            it.value().device->setNetworkAddress(service.address);
+            it.value().device->setNetworkPort(service.port);
+            it.value().service = service;
+
+            continueCommissioning(it.value());
+            return;
+        }
+    }
+
     startCommissioning(service);
 }
 
@@ -1746,9 +1906,18 @@ void Matter::paseEstablished(quint16 localSessionId, quint16 peerSessionId)
     commission.device->setNetworkAddress(commission.address);
     commission.device->setNetworkPort(commission.port);
 
-    // start commissioning: ArmFailSafe → ReadBasicInfo → CommissioningComplete
-    commission.state = CommissioningState::ArmFailSafe;
-    continueCommissioning(commission);
+    if (m_bleCommissioning)
+    {
+        // BLE path: send WiFi credentials before switching to UDP
+        commission.state = CommissioningState::AddWiFiNetwork;
+        continueCommissioning(commission);
+    }
+    else
+    {
+        // UDP path: proceed with commissioning
+        commission.state = CommissioningState::ArmFailSafe;
+        continueCommissioning(commission);
+    }
 }
 
 void Matter::paseFailed(const QString &reason)
@@ -1759,6 +1928,12 @@ void Matter::paseFailed(const QString &reason)
         return;
 
     logWarning << "PASE failed:" << reason;
+
+    if (m_bleCommissioning)
+    {
+        m_bleCommissioning = false;
+        m_ble->disconnectDevice();
+    }
 
     quint16 sessionId = pase->localSessionId();
     m_pendingCommissions.remove(sessionId);

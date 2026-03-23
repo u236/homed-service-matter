@@ -64,6 +64,7 @@ public:
 private:
 
     bool m_ready;
+    bool m_ackPending;
     quint16 m_mtu;
     quint8 m_windowSize;
 

@@ -47,6 +47,8 @@ private:
     {
         Idle,
         PASE,
+        AddWiFiNetwork,
+        ConnectNetwork,
         ArmFailSafe,
         SetRegulatoryConfig,
         ReadBasicInfo,
@@ -139,6 +141,7 @@ private:
 
     void handleDeviceUnreachable(DeviceObject *device);
     void sendBleMessage(quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator, quint32 ackCounter = 0);
+    void sendEncryptedBle(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator);
     void sendRawDatagram(const QByteArray &data, const QHostAddress &address, quint16 port);
     void sendUnencrypted(quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, const QHostAddress &address, quint16 port, bool initiator, quint32 ackCounter = 0);
     void sendEncrypted(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator, quint32 ackCounter = 0);

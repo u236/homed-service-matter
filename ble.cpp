@@ -118,7 +118,6 @@ void BLE::stopScan(void)
 void BLE::connectDevice(const QString &path)
 {
     stopScan();
-
     m_devicePath = path;
 
     QDBusInterface device("org.bluez", path, "org.bluez.Device1", m_bus);
@@ -137,6 +136,10 @@ void BLE::disconnectDevice(void)
     QDBusInterface device("org.bluez", m_devicePath, "org.bluez.Device1", m_bus);
     device.call("Disconnect");
 
+    // remove device from BlueZ cache to prevent stale GATT state
+    QDBusInterface adapter("org.bluez", m_adapterPath, "org.bluez.Adapter1", m_bus);
+    adapter.call("RemoveDevice", QVariant::fromValue(QDBusObjectPath(m_devicePath)));
+
     m_devicePath.clear();
     m_c1Path.clear();
     m_c2Path.clear();
@@ -153,7 +156,10 @@ void BLE::write(const QByteArray &data)
     QDBusMessage reply = c1.call("WriteValue", QVariant::fromValue(data), QVariantMap {{"type", "request"}});
 
     if (reply.type() == QDBusMessage::ErrorMessage)
+    {
         logWarning << "BLE write error:" << reply.errorMessage();
+        disconnectDevice();
+    }
 }
 
 void BLE::subscribe(void)

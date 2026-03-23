@@ -47,6 +47,19 @@ namespace Clusters
         }
     }
 
+    namespace NetworkCommissioning // 0x0031
+    {
+        const quint32 Id = 0x0031;
+
+        namespace Commands
+        {
+            const quint32 AddOrUpdateWiFiNetwork     = 0x0002;
+            const quint32 NetworkConfigResponse      = 0x0005;
+            const quint32 ConnectNetwork             = 0x0006;
+            const quint32 ConnectNetworkResponse     = 0x0007;
+        }
+    }
+
     // --- General Commissioning ---
 
     namespace GeneralCommissioning // 0x0030
