@@ -57,6 +57,9 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QL
         {
             QList <QVariant> options;
 
+            if (clusters.contains(Clusters::LevelControl::Id))
+                options.append("level");
+
             if (colorCapabilities & 0x0009)
                 options.append("color");
 
