@@ -13,6 +13,8 @@
 #include "case.h"
 #include "session.h"
 #include "interaction.h"
+#include "ble.h"
+#include "btp.h"
 
 class Matter : public QObject
 {
@@ -25,13 +27,14 @@ public:
     void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC = QByteArray(), const QByteArray &controllerRCAC = QByteArray());
     inline void setDebug(bool value) { m_debug = value; m_mrp->setDebug(value); }
     inline void setDevices(DeviceList *devices) { m_devices = devices; }
+    inline void setWiFi(const QString &ssid, const QString &password) { m_wifiSSID = ssid; m_wifiPassword = password; }
     inline QByteArray fabricKey(void) { return m_fabricKey; }
     inline quint64 rootCAId(void) { return m_rootCAId; }
     inline QByteArray ipk(void) { return m_ipk; }
     inline QByteArray controllerNOC(void) { return m_controllerNOC; }
     inline QByteArray controllerRCAC(void) { return m_controllerRCAC; }
 
-    void addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator = false, quint64 nodeId = 0);
+    void addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator = false, quint64 nodeId = 0, bool mdnsOnly = false);
     void connectDevice(DeviceObject *device);
     void discoverDevice(DeviceObject *device);
     void removeDevice(DeviceObject *device);
@@ -82,6 +85,8 @@ private:
     QUdpSocket *m_udp;
     MRP *m_mrp;
     MDNS *m_mdns;
+    BLE *m_ble;
+    BTP *m_btp;
     SessionManager *m_sessions;
     QTimer *m_searchTimer;
     QTimer *m_reconnectTimer;
@@ -126,9 +131,14 @@ private:
     DeviceList *m_devices;
     QMap <quint64, QList <AttributePath>> m_subscribedPaths;
 
+    QString m_wifiSSID;
+    QString m_wifiPassword;
+    bool m_bleCommissioning;
+
     QMap <quint16, PendingCommission> m_pendingCommissions;
 
     void handleDeviceUnreachable(DeviceObject *device);
+    void sendBleMessage(quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator, quint32 ackCounter = 0);
     void sendRawDatagram(const QByteArray &data, const QHostAddress &address, quint16 port);
     void sendUnencrypted(quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, const QHostAddress &address, quint16 port, bool initiator, quint32 ackCounter = 0);
     void sendEncrypted(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator, quint32 ackCounter = 0);
@@ -153,6 +163,14 @@ private slots:
     void mrpSendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port, bool initiator);
 
     void mdnsServiceFound(const MatterService &service);
+
+    void bleDeviceFound(const BLEDevice &device);
+    void bleConnected(void);
+    void bleDisconnected(void);
+    void bleDataReceived(const QByteArray &data);
+    void btpHandshakeComplete(void);
+    void btpMessageReceived(const QByteArray &message);
+    void btpWriteData(const QByteArray &data);
 
     void caseSendSigma1(const QByteArray &payload, quint16 localSessionId);
     void caseSendSigma3(const QByteArray &payload);

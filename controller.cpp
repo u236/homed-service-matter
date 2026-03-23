@@ -12,6 +12,7 @@ Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, confi
     m_haUpdate = getConfig()->value("homeassistant/update", false).toBool();
 
     m_matter->setDebug(getConfig()->value("debug/matter", false).toBool());
+    m_matter->setWiFi(getConfig()->value("wifi/ssid").toString(), getConfig()->value("wifi/password").toString());
 
     connect(m_timer, &QTimer::timeout, this, &Controller::updateProperties);
     connect(m_devices, &DeviceList::statusUpdated, this, &Controller::statusUpdated);
@@ -240,8 +241,9 @@ void Controller::mqttReceived(const QByteArray &message, const QMqttTopicName &t
                 }
 
                 quint64 nodeId = m_devices->nextNodeId();
+                bool mdnsOnly = json.value("mdns").toBool();
                 logInfo << "Adding device, passcode:" << passcode << "discriminator:" << discriminator << (shortDiscriminator ? "(short)" : "(full)") << "nodeId:" << nodeId;
-                m_matter->addDevice(passcode, discriminator, shortDiscriminator, nodeId);
+                m_matter->addDevice(passcode, discriminator, shortDiscriminator, nodeId, mdnsOnly);
                 break;
             }
         }

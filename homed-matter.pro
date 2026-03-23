@@ -4,6 +4,8 @@ include(../homed-common/homed-endpoint.pri)
 include(../homed-common/homed-parser.pri)
 
 HEADERS += \
+    ble.h \
+    btp.h \
     case.h \
     clusters.h \
     controller.h \
@@ -19,6 +21,8 @@ HEADERS += \
     tlv.h
 
 SOURCES += \
+    ble.cpp \
+    btp.cpp \
     case.cpp \
     controller.cpp \
     crypto.cpp \
@@ -32,5 +36,13 @@ SOURCES += \
     matter.cpp \
     tlv.cpp
 
+QT += dbus
+
 QMAKE_CXXFLAGS += -Wno-deprecated-declarations
 LIBS += -lcrypto -ldl -lpthread -lssl
+
+mac-linux-arm-gnueabihf-g++
+{
+    INCLUDEPATH += /Volumes/Storage/Toolchain/arm-libs/include/
+    LIBS += -L/Volumes/Storage/Toolchain/arm-libs/lib/
+}

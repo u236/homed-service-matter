@@ -9,7 +9,7 @@
 
 using namespace MatterProtocol;
 
-Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), m_mrp(new MRP(this)), m_mdns(new MDNS(this)), m_sessions(new SessionManager(this)), m_searchTimer(new QTimer(this)), m_reconnectTimer(new QTimer(this)), m_pingTimer(new QTimer(this)), m_port(5540), m_debug(false), m_searching(false), m_searchShortDiscriminator(false), m_searchPasscode(0), m_searchDiscriminator(0), m_messageCounter(0), m_exchangeCounter(0), m_sessionCounter(1), m_fabricId(1), m_nodeId(1)
+Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), m_mrp(new MRP(this)), m_mdns(new MDNS(this)), m_ble(new BLE(this)), m_btp(new BTP(this)), m_sessions(new SessionManager(this)), m_searchTimer(new QTimer(this)), m_reconnectTimer(new QTimer(this)), m_pingTimer(new QTimer(this)), m_port(5540), m_debug(false), m_searching(false), m_searchShortDiscriminator(false), m_searchPasscode(0), m_searchDiscriminator(0), m_messageCounter(0), m_exchangeCounter(0), m_sessionCounter(1), m_fabricId(1), m_nodeId(1), m_bleCommissioning(false)
 {
     connect(m_udp, &QUdpSocket::readyRead, this, &Matter::readyRead);
     connect(m_searchTimer, &QTimer::timeout, this, &Matter::searchTimeout);
@@ -19,6 +19,14 @@ Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), 
     connect(m_mrp, &MRP::retransmitFailed, this, &Matter::mrpRetransmitFailed);
     connect(m_mrp, &MRP::sendStandaloneAck, this, &Matter::mrpSendStandaloneAck);
     connect(m_mdns, &MDNS::serviceFound, this, &Matter::mdnsServiceFound);
+
+    connect(m_ble, &BLE::deviceFound, this, &Matter::bleDeviceFound);
+    connect(m_ble, &BLE::connected, this, &Matter::bleConnected);
+    connect(m_ble, &BLE::disconnected, this, &Matter::bleDisconnected);
+    connect(m_ble, &BLE::dataReceived, this, &Matter::bleDataReceived);
+    connect(m_btp, &BTP::handshakeComplete, this, &Matter::btpHandshakeComplete);
+    connect(m_btp, &BTP::messageReceived, this, &Matter::btpMessageReceived);
+    connect(m_btp, &BTP::writeData, this, &Matter::btpWriteData);
 
     m_searchTimer->setSingleShot(true);
     m_reconnectTimer->setSingleShot(true);
@@ -164,17 +172,27 @@ void Matter::removeDevice(DeviceObject *device)
     session->active = false;
 }
 
-void Matter::addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator, quint64 nodeId)
+void Matter::addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator, quint64 nodeId, bool mdnsOnly)
 {
     m_searching = true;
     m_searchPasscode = passcode;
     m_searchDiscriminator = discriminator;
     m_searchShortDiscriminator = shortDiscriminator;
+    m_searchNodeId = nodeId;
+    m_bleCommissioning = false;
 
     m_searchTimer->start(60000);
-    m_searchNodeId = nodeId;
     logInfo << "Searching for commissionable device, discriminator:" << discriminator << (shortDiscriminator ? "(short)" : "(full)") << "nodeId:" << nodeId;
-    m_mdns->browse();
+
+    if (!mdnsOnly && m_ble->available() && !m_wifiSSID.isEmpty())
+    {
+        logInfo << "BLE available, scanning BLE first...";
+        m_ble->scan();
+    }
+    else
+    {
+        m_mdns->browse();
+    }
 }
 
 // --- Send command to a commissioned device ---
@@ -1367,8 +1385,105 @@ void Matter::readyRead(void)
 void Matter::searchTimeout(void)
 {
     m_searching = false;
+    m_ble->stopScan();
     m_mdns->stop();
     logWarning << "Device search timeout, device not found";
+}
+
+// --- BLE signal handlers ---
+
+void Matter::bleDeviceFound(const BLEDevice &device)
+{
+    if (!m_searching)
+        return;
+
+    bool match = m_searchShortDiscriminator ? (device.discriminator >> 8) == m_searchDiscriminator : device.discriminator == m_searchDiscriminator;
+
+    if (!match)
+        return;
+
+    logInfo << "BLE device matched, connecting:" << device.address;
+    m_ble->connectDevice(device.path);
+}
+
+void Matter::bleConnected(void)
+{
+    logInfo << "BLE connected, starting BTP handshake...";
+    m_btp->startHandshake();
+    m_ble->subscribe();
+}
+
+void Matter::bleDisconnected(void)
+{
+    logInfo << "BLE disconnected";
+    m_bleCommissioning = false;
+}
+
+void Matter::bleDataReceived(const QByteArray &data)
+{
+    logInfo << "BLE data received:" << data.size() << "bytes:" << data.toHex();
+    m_btp->handleData(data);
+}
+
+void Matter::btpHandshakeComplete(void)
+{
+    logInfo << "BTP handshake complete, starting PASE over BLE...";
+    m_bleCommissioning = true;
+
+    PASESession *pase = new PASESession(this);
+    quint16 localSessionId = m_sessionCounter++;
+
+    connect(pase, &PASESession::sendPBKDFParamRequest, this, &Matter::paseSendPBKDFParamRequest);
+    connect(pase, &PASESession::sendPake1, this, &Matter::paseSendPake1);
+    connect(pase, &PASESession::sendPake3, this, &Matter::paseSendPake3);
+    connect(pase, &PASESession::established, this, &Matter::paseEstablished);
+    connect(pase, &PASESession::failed, this, &Matter::paseFailed);
+
+    PendingCommission commission;
+    commission.pase = pase;
+    commission.localSessionId = localSessionId;
+    commission.exchangeId = m_exchangeCounter++;
+    commission.passcode = m_searchPasscode;
+    commission.assignedNodeId = m_searchNodeId;
+    commission.state = CommissioningState::PASE;
+
+    m_pendingCommissions.insert(localSessionId, commission);
+    pase->start(m_searchPasscode, localSessionId);
+}
+
+void Matter::btpMessageReceived(const QByteArray &message)
+{
+    if (!m_bleCommissioning)
+        return;
+
+    MatterProtocol::MessageHeader msgHeader;
+    MatterProtocol::ProtocolHeader protoHeader;
+    quint32 headerOffset, payloadOffset;
+
+    if (!MatterProtocol::MessageCodec::decodeHeader(message, msgHeader, headerOffset))
+    {
+        logWarning << "BLE: failed to decode message header";
+        return;
+    }
+
+    QByteArray payload = message.mid(headerOffset);
+
+    if (!MatterProtocol::MessageCodec::decodeProtocolHeader(payload, 0, protoHeader, payloadOffset))
+    {
+        logWarning << "BLE: failed to decode protocol header";
+        return;
+    }
+
+    payload = payload.mid(payloadOffset);
+    logInfo << "BLE message: protocol:" << QString::number(protoHeader.protocolId, 16) << "opcode:" << QString::number(protoHeader.opcode, 16) << "exchange:" << protoHeader.exchangeId << "payload:" << payload.size() << "bytes";
+
+    if (protoHeader.protocolId == static_cast <quint16> (MatterProtocol::ProtocolId::SecureChannel))
+        handleSecureChannel(msgHeader, protoHeader, payload, QHostAddress(), 0);
+}
+
+void Matter::btpWriteData(const QByteArray &data)
+{
+    m_ble->write(data);
 }
 
 void Matter::reconnectTimeout(void)
@@ -1523,13 +1638,42 @@ void Matter::mdnsServiceFound(const MatterService &service)
 
 // --- PASE signal handlers ---
 
+void Matter::sendBleMessage(quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator, quint32 ackCounter)
+{
+    MatterProtocol::MessageHeader msgHeader;
+    msgHeader.flags = 0x04; // source node ID present (required for BLE)
+    msgHeader.securityFlags = 0x00;
+    msgHeader.sessionId = 0;
+    msgHeader.messageCounter = ++m_messageCounter;
+    msgHeader.sourceNodeId = m_nodeId;
+
+    MatterProtocol::ProtocolHeader protoHeader;
+    protoHeader.exchangeFlags = 0;
+
+    if (initiator)
+        protoHeader.exchangeFlags |= static_cast <quint8> (MatterProtocol::ExchangeFlag::Initiator);
+
+    // no MRP ACK/Reliability flags over BLE — BTP handles reliability
+
+    protoHeader.opcode = opcode;
+    protoHeader.exchangeId = exchangeId;
+    protoHeader.protocolId = protocolId;
+
+    QByteArray message = MatterProtocol::MessageCodec::encodeMessage(msgHeader, protoHeader, payload);
+    m_btp->sendMessage(message);
+}
+
 void Matter::paseSendPBKDFParamRequest(const QByteArray &payload, quint16 localSessionId)
 {
     if (!m_pendingCommissions.contains(localSessionId))
         return;
 
     const PendingCommission &commission = m_pendingCommissions.value(localSessionId);
-    sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::PBKDFParamRequest), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, commission.address, commission.port, true);
+
+    if (m_bleCommissioning)
+        sendBleMessage(static_cast <quint8> (SecureChannelOpcode::PBKDFParamRequest), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, true);
+    else
+        sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::PBKDFParamRequest), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, commission.address, commission.port, true);
 }
 
 void Matter::paseSendPake1(const QByteArray &payload)
@@ -1545,7 +1689,11 @@ void Matter::paseSendPake1(const QByteArray &payload)
         return;
 
     const PendingCommission &commission = m_pendingCommissions.value(sessionId);
-    sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::PASEPake1), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, commission.address, commission.port, true, pase->lastPeerMessageCounter());
+
+    if (m_bleCommissioning)
+        sendBleMessage(static_cast <quint8> (SecureChannelOpcode::PASEPake1), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, true, pase->lastPeerMessageCounter());
+    else
+        sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::PASEPake1), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, commission.address, commission.port, true, pase->lastPeerMessageCounter());
 }
 
 void Matter::paseSendPake3(const QByteArray &payload)
@@ -1561,7 +1709,11 @@ void Matter::paseSendPake3(const QByteArray &payload)
         return;
 
     const PendingCommission &commission = m_pendingCommissions.value(sessionId);
-    sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::PASEPake3), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, commission.address, commission.port, true, pase->lastPeerMessageCounter());
+
+    if (m_bleCommissioning)
+        sendBleMessage(static_cast <quint8> (SecureChannelOpcode::PASEPake3), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, true, pase->lastPeerMessageCounter());
+    else
+        sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::PASEPake3), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, commission.address, commission.port, true, pase->lastPeerMessageCounter());
 }
 
 void Matter::paseEstablished(quint16 localSessionId, quint16 peerSessionId)

@@ -312,7 +312,7 @@ void MDNS::processMdnsResponse(const DNS::Message &message)
 
         if (!service.address.isNull() && service.port)
         {
-            logInfo << "Matter device found:" << service.instanceName << "at" << service.address.toString() << ":" << service.port << "discriminator:" << service.discriminator;
+            // logInfo << "Matter device found:" << service.instanceName << "at" << service.address.toString() << ":" << service.port << "discriminator:" << service.discriminator;
             emit serviceFound(service);
         }
     }
