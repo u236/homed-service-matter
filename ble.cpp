@@ -41,18 +41,19 @@ void BLE::findAdapter(void)
         arg.beginMapEntry();
         arg >> path;
 
-        const QDBusArgument &interfaces = arg.asVariant().value <QDBusArgument> ();
-        interfaces.beginMap();
+        arg.beginMap(); // a{sa{sv}} — interfaces
 
-        while (!interfaces.atEnd())
+        while (!arg.atEnd())
         {
             QString interface;
-            interfaces.beginMapEntry();
-            interfaces >> interface;
-            interfaces.beginMap();
-            while (!interfaces.atEnd()) { interfaces.beginMapEntry(); QString k; QVariant v; interfaces >> k >> v; interfaces.endMapEntry(); }
-            interfaces.endMap();
-            interfaces.endMapEntry();
+            arg.beginMapEntry();
+            arg >> interface;
+
+            arg.beginMap(); // a{sv} — properties
+            while (!arg.atEnd()) { arg.beginMapEntry(); QString k; QVariant v; arg >> k >> v; arg.endMapEntry(); }
+            arg.endMap();
+
+            arg.endMapEntry();
 
             if (interface == "org.bluez.Adapter1")
             {
@@ -61,7 +62,7 @@ void BLE::findAdapter(void)
             }
         }
 
-        interfaces.endMap();
+        arg.endMap();
         arg.endMapEntry();
     }
 

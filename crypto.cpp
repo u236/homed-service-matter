@@ -409,15 +409,8 @@ QByteArray Crypto::generateX509Cert(quint64 rootCAId, quint64 fabricId, quint64 
     X509_add_ext(cert, ext, -1);
     X509_EXTENSION_free(ext);
 
-    if (isRCAC)
+    // manually set AKID using signer's public key hash (RCAC: self-signed, NOC: fabric key)
     {
-        ext = X509V3_EXT_nconf_nid(nullptr, &ctx, NID_authority_key_identifier, const_cast <char*> ("keyid"));
-        X509_add_ext(cert, ext, -1);
-        X509_EXTENSION_free(ext);
-    }
-    else
-    {
-        // manually set AKID for NOC using signer's public key hash
         QByteArray akidHash = sha1(signerPubKey);
         ASN1_OCTET_STRING *akidOctet = ASN1_OCTET_STRING_new();
         ASN1_OCTET_STRING_set(akidOctet, reinterpret_cast <const unsigned char*> (akidHash.constData()), akidHash.length());
@@ -566,7 +559,12 @@ QByteArray Crypto::x509DerToMatterTLV(const QByteArray &derCert)
         if (ASN1_BIT_STRING_get_bit(ku, 5)) kuBits |= 0x0020; // keyCertSign
         if (ASN1_BIT_STRING_get_bit(ku, 6)) kuBits |= 0x0040; // cRLSign
 
-        tlv.encodeUnsignedInt(2, kuBits);
+        // Matter spec requires KeyUsage as UInt16
+        QByteArray kuRaw;
+        kuRaw.append(static_cast <char> (0x25));             // context tag + UInt16
+        kuRaw.append(static_cast <char> (0x02));             // tag 2
+        kuRaw.append(reinterpret_cast <const char*> (&kuBits), 2); // LE
+        tlv.encodeRaw(kuRaw);
         ASN1_BIT_STRING_free(ku);
     }
 
