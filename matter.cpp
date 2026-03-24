@@ -636,9 +636,12 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                     {
                         if (!report.hasError && report.path.clusterId == Clusters::Descriptor::Id && report.path.attributeId == Clusters::Descriptor::Attributes::PartsList && report.path.endpointId == 0)
                         {
-                            // PartsList is an array — parse children
+                            // PartsList — complete array or individual list items
                             for (const MatterTLV::Element &child : report.rawValue.children)
                                 discoveredEndpoints.append(static_cast <quint8> (child.value.toUInt()));
+
+                            if (report.value.isValid() && report.value.canConvert <uint> ())
+                                discoveredEndpoints.append(static_cast <quint8> (report.value.toUInt()));
                         }
                     }
 
@@ -669,10 +672,12 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                         if (report.path.clusterId == Clusters::Descriptor::Id && report.path.attributeId == Clusters::Descriptor::Attributes::ServerList)
                         {
-                            logDebug(m_debug) << "ServerList for ep" << report.path.endpointId << ":" << report.rawValue.children.count() << "clusters, type:" << static_cast <int> (report.rawValue.type);
-
+                            // ServerList — complete array or individual list items
                             for (const MatterTLV::Element &child : report.rawValue.children)
                                 endpointClusters[report.path.endpointId].append(child.value.toUInt());
+
+                            if (report.value.isValid() && report.value.canConvert <uint> ())
+                                endpointClusters[report.path.endpointId].append(report.value.toUInt());
                         }
                         else if (report.path.clusterId == Clusters::ColorControl::Id && report.path.attributeId == Clusters::ColorControl::Attributes::ColorCapabilities)
                         {
