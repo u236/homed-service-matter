@@ -113,7 +113,6 @@ void BTP::sendMessage(const QByteArray &message)
 
 void BTP::sendSegments(const QByteArray &message)
 {
-    int maxPayload = m_mtu - 3; // flags + seq + overhead
     int offset = 0;
     bool first = true;
 
@@ -121,7 +120,7 @@ void BTP::sendSegments(const QByteArray &message)
     {
         QByteArray packet;
         quint8 flags = 0;
-        int available = maxPayload;
+        int available = first ? (m_mtu - 3) : (m_mtu - 2); // first: flags+ack+seq, continuation: flags+seq
 
         if (first)
         {
@@ -135,13 +134,14 @@ void BTP::sendSegments(const QByteArray &message)
         if (offset + chunkSize >= message.size())
             flags |= BTP_FLAG_END;
 
-        // add ACK for last received sequence
-        flags |= BTP_FLAG_ACK;
+        // add ACK only on first segment
+        if (first)
+            flags |= BTP_FLAG_ACK;
 
         packet.append(static_cast <char> (flags));
 
-        // ACK number
-        packet.append(static_cast <char> (m_rxSequence));
+        if (flags & BTP_FLAG_ACK)
+            packet.append(static_cast <char> (m_rxSequence));
 
         // sequence number
         packet.append(static_cast <char> (m_txSequence++));

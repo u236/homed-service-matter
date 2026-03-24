@@ -758,7 +758,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
             // send StatusResponse (success) to acknowledge ReportData
             SessionInfo *session = m_sessions->findByLocalId(msgHeader.sessionId);
 
-            if (session && !reports.isEmpty())
+            if (session && !reports.isEmpty() && !m_bleCommissioning)
             {
                 logDebug(m_debug) << "Sending StatusResponse(0) for ReportData, exchange:" << protoHeader.exchangeId << "ack:" << msgHeader.messageCounter;
                 QByteArray statusPayload = InteractionModel::encodeStatusResponse(0);
@@ -866,12 +866,22 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             break;
                         }
 
-                        logInfo << "Device connected to WiFi, searching via mDNS...";
+                        logInfo << "Device connected to WiFi, starting CASE...";
                         m_bleCommissioning = false;
                         m_ble->disconnectDevice();
+                        m_caseNeedsCommissioningComplete = true;
 
-                        // search for device on WiFi, continue commissioning when found
-                        commission.state = CommissioningState::ArmFailSafe;
+                        commission.device->setNetworkPort(5540);
+                        m_pendingCommissionDevice = commission.device;
+
+                        // clean up PASE session
+                        m_sessions->removeSession(commission.localSessionId);
+                        m_pendingCommissions.remove(it.key());
+
+                        if (commission.pase)
+                            commission.pase->deleteLater();
+
+                        // search for device on WiFi via mDNS (_matter._tcp or _matterc._udp)
                         m_searching = true;
                         m_searchTimer->start(60000);
                         m_mdns->browse();
@@ -987,21 +997,30 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             break;
                         }
 
-                        logInfo << "AddNOC success, starting CASE for CommissioningComplete...";
-                        commission.device->setNetworkAddress(commission.address);
-                        commission.device->setNetworkPort(commission.port);
+                        logInfo << "AddNOC success";
 
-                        m_caseNeedsCommissioningComplete = true;
+                        if (m_bleCommissioning)
+                        {
+                            // BLE path: send WiFi credentials now (device has NOC, will advertise _matter._tcp after WiFi)
+                            logInfo << "Sending WiFi credentials over BLE...";
+                            commission.state = CommissioningState::AddWiFiNetwork;
+                            continueCommissioning(commission);
+                        }
+                        else
+                        {
+                            // UDP path: start CASE for CommissioningComplete
+                            commission.device->setNetworkAddress(commission.address);
+                            commission.device->setNetworkPort(commission.port);
+                            m_caseNeedsCommissioningComplete = true;
 
-                        // delay CASE to give device time to initialize after AddNOC
-                        QTimer::singleShot(5000, this, [this, commission]() mutable { connectDevice(commission.device); });
+                            QTimer::singleShot(5000, this, [this, commission]() mutable { connectDevice(commission.device); });
 
-                        // clean up PASE session
-                        m_sessions->removeSession(commission.localSessionId);
-                        m_pendingCommissions.remove(commission.localSessionId);
+                            m_sessions->removeSession(commission.localSessionId);
+                            m_pendingCommissions.remove(commission.localSessionId);
 
-                        if (commission.pase)
-                            commission.pase->deleteLater();
+                            if (commission.pase)
+                                commission.pase->deleteLater();
+                        }
 
                         break;
                     }
@@ -1103,6 +1122,14 @@ void Matter::startCommissioning(const MatterService &service)
     pase->start(commission.passcode, sessionId);
 }
 
+void Matter::sendCommissioningMessage(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId)
+{
+    if (m_bleCommissioning)
+        sendEncryptedBle(session, opcode, protocolId, payload, exchangeId, true);
+    else
+        sendEncrypted(session, opcode, protocolId, payload, exchangeId, true);
+}
+
 void Matter::continueCommissioning(PendingCommission &commission)
 {
     SessionInfo *session = m_sessions->findByLocalId(commission.localSessionId);
@@ -1157,7 +1184,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
             fields.closeContainer();
 
             QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::GeneralCommissioning::Id, Clusters::GeneralCommissioning::Commands::ArmFailSafe), fields);
-            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++);
             break;
         }
 
@@ -1173,7 +1200,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
             fields.closeContainer();
 
             QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::GeneralCommissioning::Id, Clusters::GeneralCommissioning::Commands::SetRegulatoryConfig), fields);
-            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++);
             break;
         }
 
@@ -1189,7 +1216,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
             paths.append(AttributePath(0, Clusters::BasicInformation::Id, Clusters::BasicInformation::Attributes::SoftwareVersionString));
 
             QByteArray payload = InteractionModel::encodeReadRequest(paths);
-            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++);
             break;
         }
 
@@ -1203,7 +1230,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
             fields.closeContainer();
 
             QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::CertificateChainRequest), fields);
-            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++);
             break;
         }
 
@@ -1217,7 +1244,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
             fields.closeContainer();
 
             QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::CertificateChainRequest), fields);
-            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++);
             break;
         }
 
@@ -1231,7 +1258,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
             fields.closeContainer();
 
             QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::AttestationRequest), fields);
-            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++);
             break;
         }
 
@@ -1245,7 +1272,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
             fields.closeContainer();
 
             QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::CSRRequest), fields);
-            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++);
             break;
         }
 
@@ -1259,7 +1286,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
             fields.closeContainer();
 
             QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::AddTrustedRootCertificate), fields);
-            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++);
             break;
         }
 
@@ -1277,7 +1304,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
             fields.closeContainer();
 
             QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::AddNOC), fields);
-            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++);
             break;
         }
 
@@ -1288,7 +1315,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
                 logDebug(m_debug) << "Sending TimedRequest for CommissioningComplete...";
                 commission.exchangeId = m_exchangeCounter++;
                 QByteArray payload = InteractionModel::encodeTimedRequest(5000);
-                sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::TimedRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, commission.exchangeId, true);
+                sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::TimedRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, commission.exchangeId);
                 commission.timedInvokePending = true;
                 break;
             }
@@ -1756,7 +1783,43 @@ void Matter::mdnsServiceFound(const MatterService &service)
     if (!m_searching)
         return;
 
-    // match discriminator
+    // operational service — device found after BLE commissioning + WiFi connect
+    if (service.operational)
+    {
+        if (!m_caseNeedsCommissioningComplete || !m_pendingCommissionDevice)
+            return;
+
+        // instance name format: <compressed-fabric-id>-<node-id>._matter._tcp.local
+        // verify node ID matches the device we just commissioned
+        QString instanceName = service.instanceName.split('.').first();
+        int dash = instanceName.indexOf('-');
+
+        if (dash > 0)
+        {
+            bool ok;
+            quint64 nodeId = instanceName.mid(dash + 1).toULongLong(&ok, 16);
+
+            if (!ok || nodeId != m_pendingCommissionDevice->nodeId())
+                return;
+        }
+
+        logInfo << "Operational device found:" << service.instanceName << "at" << service.address.toString() << ":" << service.port;
+
+        m_searching = false;
+        m_searchTimer->stop();
+        m_mdns->stop();
+
+        m_pendingCommissionDevice->setNetworkAddress(service.address);
+        m_pendingCommissionDevice->setNetworkPort(service.port);
+        connectDevice(m_pendingCommissionDevice);
+        return;
+    }
+
+    // after BLE commissioning, only accept operational services
+    if (m_caseNeedsCommissioningComplete)
+        return;
+
+    // commissionable service — match discriminator
     if (m_searchShortDiscriminator)
     {
         if ((service.discriminator >> 8) != m_searchDiscriminator)
@@ -1920,18 +1983,9 @@ void Matter::paseEstablished(quint16 localSessionId, quint16 peerSessionId)
     commission.device->setNetworkAddress(commission.address);
     commission.device->setNetworkPort(commission.port);
 
-    if (m_bleCommissioning)
-    {
-        // BLE path: send WiFi credentials before switching to UDP
-        commission.state = CommissioningState::AddWiFiNetwork;
-        continueCommissioning(commission);
-    }
-    else
-    {
-        // UDP path: proceed with commissioning
-        commission.state = CommissioningState::ArmFailSafe;
-        continueCommissioning(commission);
-    }
+    // both BLE and UDP: start with ArmFailSafe
+    commission.state = CommissioningState::ArmFailSafe;
+    continueCommissioning(commission);
 }
 
 void Matter::paseFailed(const QString &reason)

@@ -284,6 +284,12 @@ void MDNS::processMdnsResponse(const DNS::Message &message)
             MatterService &service = m_services[record.ptrName];
             service.instanceName = record.ptrName;
         }
+        else if (record.type == DNS::Type::PTR && record.name == MATTER_OPERATIVE_SERVICE)
+        {
+            MatterService &service = m_services[record.ptrName];
+            service.instanceName = record.ptrName;
+            service.operational = true;
+        }
     }
 
     for (const DNS::Record &record : allRecords)
@@ -312,7 +318,6 @@ void MDNS::processMdnsResponse(const DNS::Message &message)
 
         if (!service.address.isNull() && service.port)
         {
-            // logInfo << "Matter device found:" << service.instanceName << "at" << service.address.toString() << ":" << service.port << "discriminator:" << service.discriminator;
             emit serviceFound(service);
         }
     }
@@ -323,7 +328,12 @@ void MDNS::browse(void)
     QByteArray query = encodeQuery(MATTER_COMMISSION_SERVICE, DNS::Type::PTR);
     m_socket->writeDatagram(query, QHostAddress(MDNS_MULTICAST_ADDR4), MDNS_PORT);
     m_socket6->writeDatagram(query, QHostAddress(MDNS_MULTICAST_ADDR6), MDNS_PORT);
-    logInfo << "MDNS browse for commissionable Matter devices";
+
+    QByteArray query2 = encodeQuery(MATTER_OPERATIVE_SERVICE, DNS::Type::PTR);
+    m_socket->writeDatagram(query2, QHostAddress(MDNS_MULTICAST_ADDR4), MDNS_PORT);
+    m_socket6->writeDatagram(query2, QHostAddress(MDNS_MULTICAST_ADDR6), MDNS_PORT);
+
+    logInfo << "MDNS browse for Matter devices (commissionable + operational)";
     m_browseTimer->start(5000);
 }
 

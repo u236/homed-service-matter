@@ -93,7 +93,9 @@ struct MatterService
     quint8 commissioningMode;
     QString deviceName;
 
-    MatterService(void) : port(0), discriminator(0), vendorId(0), productId(0), commissioningMode(0) {}
+    bool operational;
+
+    MatterService(void) : port(0), discriminator(0), vendorId(0), productId(0), commissioningMode(0), operational(false) {}
 };
 
 class MDNS : public QObject
