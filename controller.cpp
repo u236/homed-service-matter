@@ -240,9 +240,9 @@ void Controller::mqttReceived(const QByteArray &message, const QMqttTopicName &t
                     break;
                 }
 
-                quint64 nodeId = m_devices->nextNodeId();
+                quint64 nodeId = m_devices->generateNodeId();
                 bool mdnsOnly = json.value("mdns").toBool();
-                logInfo << "Adding device, passcode:" << passcode << "discriminator:" << discriminator << (shortDiscriminator ? "(short)" : "(full)") << "nodeId:" << nodeId;
+                logInfo << "Adding device, passcode:" << passcode << "discriminator:" << discriminator << (shortDiscriminator ? "(short)" : "(full)") << "nodeId:" << QString::number(nodeId, 16);
                 m_matter->addDevice(passcode, discriminator, shortDiscriminator, nodeId, mdnsOnly);
                 break;
             }
@@ -351,7 +351,6 @@ void Controller::deviceCommissioned(DeviceObject *device)
     connect(device, &DeviceObject::endpointUpdated, this, &Controller::endpointUpdated);
 
     m_devices->append(Device(device));
-    m_devices->setNextNodeId(device->nodeId() + 1);
     deviceEvent(device, Event::added);
     m_devices->store(true);
 }

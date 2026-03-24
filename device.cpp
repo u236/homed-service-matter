@@ -2,6 +2,7 @@
 #include "device.h"
 #include "expose.h"
 #include "clusters.h"
+#include "crypto.h"
 #include "logger.h"
 
 void DeviceObject::updateEndpoint(quint8 endpointId, const QString &property, const QVariant &value)
@@ -13,6 +14,31 @@ void DeviceObject::updateEndpoint(quint8 endpointId, const QString &property, co
 
     endpoint->status().insert(property, value);
     emit endpointUpdated(this, endpointId);
+}
+
+quint64 DeviceList::generateNodeId(void)
+{
+    quint64 nodeId;
+
+    do
+    {
+        QByteArray bytes = Crypto::randomBytes(4);
+
+        // ensure all 4 bytes are non-zero
+        for (int i = 0; i < 4; i++)
+        {
+            if (bytes.at(i) == 0)
+                bytes[i] = static_cast <char> ((static_cast <quint8> (Crypto::randomBytes(1).at(0)) % 254) + 1);
+        }
+
+        nodeId = 0;
+
+        for (int i = 0; i < 4; i++)
+            nodeId |= static_cast <quint64> (static_cast <quint8> (bytes.at(i))) << (i * 8);
+
+    } while (byNodeId(nodeId).data());
+
+    return nodeId;
 }
 
 void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters, quint16 colorCapabilities)
@@ -124,7 +150,7 @@ void DeviceList::updateMultiple(DeviceObject *device)
     }
 }
 
-DeviceList::DeviceList(QSettings *config, QObject *parent) : QObject(parent), m_timer(new QTimer(this)), m_sync(false), m_nextNodeId(2), m_rootCAId(0)
+DeviceList::DeviceList(QSettings *config, QObject *parent) : QObject(parent), m_timer(new QTimer(this)), m_sync(false), m_rootCAId(0)
 {
     QFile file(config->value("device/expose", "/usr/share/homed-common/expose.json").toString());
 
@@ -156,11 +182,6 @@ void DeviceList::init(void)
         return;
 
     json = QJsonDocument::fromJson(m_file.readAll()).object();
-    m_nextNodeId = json.value("nextNodeId").toString().toULongLong();
-
-    if (m_nextNodeId < 2)
-        m_nextNodeId = 2;
-
     unserialize(json.value("devices").toArray());
 
     QJsonObject fabric = json.value("fabric").toObject();
@@ -212,7 +233,7 @@ Device DeviceList::byNodeId(quint64 nodeId)
 Device DeviceList::parse(const QJsonObject &json)
 {
     QString name = mqttSafe(json.value("name").toString());
-    quint64 nodeId = json.contains("id") ? json.value("id").toString().toULongLong() : static_cast <quint64> (json.value("nodeId").toDouble()); // backward compat
+    quint64 nodeId = json.value("id").toString().toULongLong(nullptr, 16);
 
     if (name.isEmpty() || !nodeId)
         return Device();
@@ -279,7 +300,7 @@ QJsonArray DeviceList::serialize(void)
     {
         const Device &device = at(i);
         DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
-        QJsonObject json = {{"id", QString::number(obj->nodeId())}, {"name", device->name()}, {"active", device->active()}, {"cloud", device->cloud()}, {"discovery", device->discovery()}};
+        QJsonObject json = {{"id", QString::number(obj->nodeId(), 16)}, {"name", device->name()}, {"active", device->active()}, {"cloud", device->cloud()}, {"discovery", device->discovery()}};
 
         if (obj->vendorId())
             json.insert("vendorId", obj->vendorId());
@@ -350,7 +371,7 @@ void DeviceList::writeDatabase(void)
         fabric.insert("controllerRCAC", QString(m_controllerRCAC.toHex()));
     }
 
-    QJsonObject json = {{"devices", serialize()}, {"fabric", fabric}, {"nextNodeId", QString::number(m_nextNodeId)}, {"names", m_names}, {"timestamp", QDateTime::currentSecsSinceEpoch()}, {"version", SERVICE_VERSION}};
+    QJsonObject json = {{"devices", serialize()}, {"fabric", fabric}, {"names", m_names}, {"timestamp", QDateTime::currentSecsSinceEpoch()}, {"version", SERVICE_VERSION}};
 
     emit statusUpdated(json);
 

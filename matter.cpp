@@ -184,10 +184,18 @@ void Matter::addDevice(quint32 passcode, quint16 discriminator, bool shortDiscri
     m_searchTimer->start(60000);
     logInfo << "Searching for commissionable device, discriminator:" << discriminator << (shortDiscriminator ? "(short)" : "(full)") << "nodeId:" << nodeId;
 
-    if (!mdnsOnly && m_ble->available() && !m_wifiSSID.isEmpty())
+    if (!mdnsOnly && m_ble->available())
     {
-        logInfo << "BLE available, scanning BLE first...";
-        m_ble->scan();
+        if (m_wifiSSID.isEmpty())
+        {
+            logWarning << "BLE available but WiFi SSID not configured, falling back to mDNS";
+            m_mdns->browse();
+        }
+        else
+        {
+            logInfo << "BLE available, scanning BLE first...";
+            m_ble->scan();
+        }
     }
     else
     {
@@ -1906,7 +1914,7 @@ void Matter::paseEstablished(quint16 localSessionId, quint16 peerSessionId)
 
     // create device object
     quint64 nodeId = commission.assignedNodeId;
-    commission.device = new DeviceObject(nodeId, QString("matter_%1").arg(nodeId));
+    commission.device = new DeviceObject(nodeId, QString("matter_%1").arg(nodeId, 0, 16));
     commission.device->setVendorId(commission.service.vendorId);
     commission.device->setProductId(commission.service.productId);
     commission.device->setNetworkAddress(commission.address);
