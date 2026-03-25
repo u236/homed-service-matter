@@ -74,7 +74,7 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QL
         expose->setParent(endpoint.data());
         endpoint->exposes().append(expose);
         device->options().insert(name, m_exposeOptions.value(name));
-        logInfo << "Endpoint" << endpointId << "on" << device->name() << ":" << name;
+        logInfo << device << "endpoint" << endpointId << "expose" << name;
     };
 
     if (clusters.contains(Clusters::OnOff::Id) && endpoint->exposes().isEmpty())
@@ -233,7 +233,10 @@ Device DeviceList::byNodeId(quint64 nodeId)
 Device DeviceList::parse(const QJsonObject &json)
 {
     QString name = mqttSafe(json.value("name").toString());
-    quint64 nodeId = json.value("id").toString().toULongLong(nullptr, 16);
+    quint64 nodeId = json.value("nodeId").toString().toULongLong(nullptr, 16);
+
+    if (!nodeId) // TODO: remove after migration from 0.0.4
+        nodeId = json.value("id").toString().toULongLong(nullptr, 16);
 
     if (name.isEmpty() || !nodeId)
         return Device();
@@ -300,7 +303,7 @@ QJsonArray DeviceList::serialize(void)
     {
         const Device &device = at(i);
         DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
-        QJsonObject json = {{"id", QString::number(obj->nodeId(), 16)}, {"name", device->name()}, {"active", device->active()}, {"cloud", device->cloud()}, {"discovery", device->discovery()}};
+        QJsonObject json = {{"nodeId", QString::number(obj->nodeId(), 16)}, {"name", device->name()}, {"active", device->active()}, {"cloud", device->cloud()}, {"discovery", device->discovery()}};
 
         if (obj->vendorId())
             json.insert("vendorId", obj->vendorId());

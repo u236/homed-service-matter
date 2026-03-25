@@ -21,7 +21,8 @@ public:
         updateDevice,
         removeDevice,
         getProperties,
-        addDevice
+        addDevice,
+        shareDevice
     };
 
     enum class Event
@@ -71,6 +72,7 @@ private slots:
     void deviceOnline(DeviceObject *device);
     void deviceOffline(DeviceObject *device);
     void deviceRemoved(DeviceObject *device, bool success);
+    void deviceShared(DeviceObject *device, const QString &manualCode, const QString &qrCode, quint16 timeout);
 
 };
 

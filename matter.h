@@ -38,8 +38,12 @@ public:
     void connectDevice(DeviceObject *device);
     void discoverDevice(DeviceObject *device);
     void removeDevice(DeviceObject *device);
+    void shareDevice(DeviceObject *device, quint16 timeout = 300);
     void sendCommand(DeviceObject *device, quint8 endpointId, const QString &name, const QVariant &value);
     void readAttributes(DeviceObject *device, const QList <AttributePath> &paths);
+
+    static QString generateManualCode(quint32 passcode, quint16 discriminator);
+    static QString generateQRCode(quint32 passcode, quint16 discriminator);
 
 private:
 
@@ -139,6 +143,24 @@ private:
 
     QMap <quint16, PendingCommission> m_pendingCommissions;
 
+    struct PendingShare
+    {
+        DeviceObject *device;
+        quint16 exchangeId;
+        quint32 passcode;
+        quint16 discriminator;
+        quint16 timeout;
+        quint32 lastPeerCounter;
+        bool timedInvokePending;
+
+        PendingShare(void) : device(nullptr), exchangeId(0), passcode(0), discriminator(0), timeout(0), lastPeerCounter(0), timedInvokePending(false) {}
+    };
+
+    QMap <quint64, PendingShare> m_pendingShares; // keyed by nodeId
+    QMap <quint64, QByteArray> m_shareVerifiers;
+    QMap <quint64, QByteArray> m_shareSalts;
+    QMap <quint64, quint32> m_shareIterations;
+
     void handleDeviceUnreachable(DeviceObject *device);
     void sendBleMessage(quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator, quint32 ackCounter = 0);
     void sendEncryptedBle(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator);
@@ -198,6 +220,7 @@ signals:
     void deviceOnline(DeviceObject *device);
     void deviceOffline(DeviceObject *device);
     void deviceRemoved(DeviceObject *device, bool success);
+    void deviceShared(DeviceObject *device, const QString &manualCode, const QString &qrCode, quint16 timeout);
 
 };
 

@@ -1,3 +1,4 @@
+#include <QDateTime>
 #include "controller.h"
 #include "crypto.h"
 #include "pase.h"
@@ -20,6 +21,7 @@ Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, confi
     connect(m_matter, &Matter::deviceOnline, this, &Controller::deviceOnline);
     connect(m_matter, &Matter::deviceOffline, this, &Controller::deviceOffline);
     connect(m_matter, &Matter::deviceRemoved, this, &Controller::deviceRemoved);
+    connect(m_matter, &Matter::deviceShared, this, &Controller::deviceShared);
     m_matter->setDevices(m_devices);
 
     m_timer->setSingleShot(true);
@@ -246,6 +248,25 @@ void Controller::mqttReceived(const QByteArray &message, const QMqttTopicName &t
                 m_matter->addDevice(passcode, discriminator, shortDiscriminator, nodeId, mdnsOnly);
                 break;
             }
+
+            case Command::shareDevice:
+            {
+                Device device = m_devices->byName(json.value("device").toString());
+
+                if (device.isNull() || !device->active())
+                {
+                    logWarning << "Device not found or offline for sharing";
+                    break;
+                }
+
+                quint16 timeout = static_cast <quint16> (json.value("timeout").toInt(300));
+
+                if (timeout < 180) timeout = 180;
+                if (timeout > 900) timeout = 900;
+
+                m_matter->shareDevice(device.data(), timeout);
+                break;
+            }
         }
     }
     else if (subTopic.startsWith(QString("td/%1/").arg(serviceTopic())))
@@ -287,7 +308,7 @@ void Controller::updateAvailability(DeviceObject *device)
 {
     QString status = device->availability() == Availability::Online ? "online" : "offline";
     mqttPublish(mqttTopic("device/%1/%2").arg(serviceTopic(), m_devices->names() ? device->name() : device->address()), {{"status", status}}, true);
-    logInfo << "Device" << device->name() << "is" << status;
+    logInfo << device << "is" << status;
 }
 
 void Controller::updateProperties(void)
@@ -298,7 +319,7 @@ void Controller::updateProperties(void)
 
 void Controller::deviceUpdated(DeviceObject *device)
 {
-    logInfo << device->name() << "successfully updated";
+    logInfo << device << "successfully updated";
     publishExposes(device);
     m_devices->store(true);
 }
@@ -353,6 +374,19 @@ void Controller::deviceCommissioned(DeviceObject *device)
     m_devices->append(Device(device));
     deviceEvent(device, Event::added);
     m_devices->store(true);
+}
+
+void Controller::deviceShared(DeviceObject *device, const QString &manualCode, const QString &qrCode, quint16 timeout)
+{
+    QString topic = mqttTopic("device/%1/%2").arg(serviceTopic(), m_devices->names() ? device->name() : device->address());
+    qint64 endTime = QDateTime::currentSecsSinceEpoch() + timeout;
+    mqttPublish(topic, {{"status", "online"}, {"sharing", QJsonObject {{"manualCode", manualCode}, {"qrCode", qrCode}, {"endTime", endTime}}}}, true);
+
+    // clear sharing info after timeout
+    QTimer::singleShot(timeout * 1000, this, [this, device, topic]()
+    {
+        mqttPublish(topic, {{"status", device->availability() == Availability::Online ? "online" : "offline"}}, true);
+    });
 }
 
 void Controller::deviceRemoved(DeviceObject *device, bool success)

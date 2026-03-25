@@ -116,6 +116,18 @@ namespace Clusters
         }
     }
 
+    namespace AdministratorCommissioning // 0x003C
+    {
+        const quint32 Id = 0x003C;
+
+        namespace Commands
+        {
+            const quint32 OpenCommissioningWindow      = 0x0000;
+            const quint32 OpenBasicCommissioningWindow  = 0x0001;
+            const quint32 RevokeCommissioning           = 0x0002;
+        }
+    }
+
     // --- Application Clusters ---
 
     namespace Identify // 0x0003
