@@ -481,6 +481,9 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
             DeviceObject *pendingSubDevice = nullptr;
 
             // check for subscriptionId and suppressResponse in ReportData
+            bool hasSubscriptionId = false;
+            bool suppressResponse = false;
+
             {
                 MatterTLV::Decoder rdDecoder(payload);
                 MatterTLV::Element rdRoot = rdDecoder.decode();
@@ -488,9 +491,16 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                 for (const MatterTLV::Element &el : rdRoot.children)
                 {
                     if (el.tag == 0)
+                    {
+                        hasSubscriptionId = true;
                         logDebug(m_debug) << "ReportData subscriptionId:" << el.value.toUInt();
+                    }
+
                     if (el.tag == 3)
-                        logDebug(m_debug) << "ReportData suppressResponse:" << el.value.toBool();
+                    {
+                        suppressResponse = el.value.toBool();
+                        logDebug(m_debug) << "ReportData suppressResponse:" << suppressResponse;
+                    }
                 }
             }
 
@@ -748,7 +758,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
             // send StatusResponse (success) to acknowledge ReportData
             SessionInfo *session = m_sessions->findByLocalId(msgHeader.sessionId);
 
-            if (session && !reports.isEmpty() && !m_bleCommissioning)
+            if (session && !suppressResponse && !m_bleCommissioning && (!reports.isEmpty() || hasSubscriptionId))
             {
                 logDebug(m_debug) << "Sending StatusResponse(0) for ReportData, exchange:" << protoHeader.exchangeId << "ack:" << msgHeader.messageCounter;
                 QByteArray statusPayload = InteractionModel::encodeStatusResponse(0);
@@ -1762,13 +1772,9 @@ void Matter::pingTimeout(void)
             continue;
         }
 
-        if (session->lastSeen && now - session->lastSeen > 10000)
+        if (session->lastSeen && now - session->lastSeen > 60000)
         {
-            QList <AttributePath> paths = m_subscribedPaths.value(device->nodeId());
-
-            if (paths.isEmpty())
-                paths.append(AttributePath(0, Clusters::BasicInformation::Id, Clusters::BasicInformation::Attributes::DataModelRevision));
-
+            QList <AttributePath> paths = {AttributePath(0, Clusters::BasicInformation::Id, Clusters::BasicInformation::Attributes::DataModelRevision)};
             QByteArray payload = InteractionModel::encodeReadRequest(paths);
             sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
         }
@@ -2140,6 +2146,20 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
 
     m_caseDevice->setAvailability(Availability::Online);
     emit deviceOnline(m_caseDevice);
+
+    // re-subscribe after CASE reconnect
+    if (!m_caseDevice->endpoints().isEmpty() && m_subscribedPaths.contains(m_caseDevice->nodeId()))
+    {
+        SessionInfo *resubSession = m_sessions->findByLocalId(localSessionId);
+        QList <AttributePath> paths = m_subscribedPaths.value(m_caseDevice->nodeId());
+
+        if (resubSession && !paths.isEmpty())
+        {
+            logInfo << m_caseDevice << "re-subscribing to" << paths.count() << "attributes after CASE reconnect";
+            QByteArray subPayload = InteractionModel::encodeSubscribeRequest(paths, 0, 60);
+            sendEncrypted(resubSession, static_cast <quint8> (InteractionModelOpcode::SubscribeRequest), static_cast <quint16> (ProtocolId::InteractionModel), subPayload, m_exchangeCounter++, true);
+        }
+    }
 
     m_pendingCASE->deleteLater();
     m_pendingCASE = nullptr;
