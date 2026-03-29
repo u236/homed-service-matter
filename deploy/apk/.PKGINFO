@@ -1,0 +1,8 @@
+pkgname = homed-matter
+pkgver =
+arch =
+pkgdesc = HOMEd Matter Service
+maintainer = u236 <mail@u236.org>
+depend = homed-common
+depend = homed-qt
+backup = etc/homed/homed-matter.conf

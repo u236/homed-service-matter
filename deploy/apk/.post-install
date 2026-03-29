@@ -1,0 +1,6 @@
+#!/bin/sh
+
+/etc/init.d/homed-matter enable
+/etc/init.d/homed-matter start
+
+exit 0
