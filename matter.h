@@ -5,6 +5,7 @@
 #include <QUdpSocket>
 #include <QTimer>
 #include <QMap>
+#include <QMetaEnum>
 #include "device.h"
 #include "message.h"
 #include "mrp.h"
@@ -22,17 +23,34 @@ class Matter : public QObject
 
 public:
 
-    Matter(QObject *parent);
+    enum class Event
+    {
+        deviceFound,
+        deviceConnecting,
+        networkSetup,
+        deviceNotFound,
+        connectFailed,
+        nameDuplicate,
+        aboutToRename,
+        added,
+        updated,
+        removed
+    };
 
+    Q_ENUM(Event)
+
+    Matter(QSettings *config, QObject *parent);
     void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC = QByteArray(), const QByteArray &controllerRCAC = QByteArray());
     inline void setDebug(bool value) { m_debug = value; m_mrp->setDebug(value); }
-    inline void setDevices(DeviceList *devices) { m_devices = devices; }
     inline void setWiFi(const QString &ssid, const QString &password) { m_wifiSSID = ssid; m_wifiPassword = password; }
     inline QByteArray fabricKey(void) { return m_fabricKey; }
     inline quint64 rootCAId(void) { return m_rootCAId; }
     inline QByteArray ipk(void) { return m_ipk; }
     inline QByteArray controllerNOC(void) { return m_controllerNOC; }
     inline QByteArray controllerRCAC(void) { return m_controllerRCAC; }
+
+    inline DeviceList *devices(void) { return m_devices; }
+    inline const char *eventName(Event event) { return m_events.valueToKey(static_cast <int> (event)); }
 
     void connectDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator = false, quint64 nodeId = 0, bool mdnsOnly = false);
     void connectDevice(DeviceObject *device);
@@ -135,6 +153,7 @@ private:
     QList <DeviceObject*> m_caseQueue;
 
     DeviceList *m_devices;
+    QMetaEnum m_events;
     QMap <quint64, QList <AttributePath>> m_subscribedPaths;
 
     QString m_wifiSSID;
@@ -216,11 +235,10 @@ public:
 
 signals:
 
-    void commissioningEvent(const QString &reason, quint64 nodeId);
-    void deviceCommissioned(DeviceObject *device);
+    void deviceEvent(DeviceObject *device, Matter::Event event, const QJsonObject &json = QJsonObject());
     void deviceOnline(DeviceObject *device);
     void deviceOffline(DeviceObject *device);
-    void deviceRemoved(DeviceObject *device, bool success);
+    void statusUpdated(const QJsonObject &json);
     void deviceShared(DeviceObject *device, const QString &manualCode, const QString &qrCode, quint16 timeout);
 
 };

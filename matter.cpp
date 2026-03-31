@@ -9,7 +9,7 @@
 
 using namespace MatterProtocol;
 
-Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), m_mrp(new MRP(this)), m_mdns(new MDNS(this)), m_ble(new BLE(this)), m_btp(new BTP(this)), m_sessions(new SessionManager(this)), m_searchTimer(new QTimer(this)), m_reconnectTimer(new QTimer(this)), m_pingTimer(new QTimer(this)), m_port(5540), m_debug(false), m_searching(false), m_searchShortDiscriminator(false), m_searchPasscode(0), m_searchDiscriminator(0), m_messageCounter(0), m_exchangeCounter(0), m_sessionCounter(1), m_fabricId(1), m_nodeId(1), m_bleCommissioning(false)
+Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), m_mrp(new MRP(this)), m_mdns(new MDNS(this)), m_ble(new BLE(this)), m_btp(new BTP(this)), m_sessions(new SessionManager(this)), m_searchTimer(new QTimer(this)), m_reconnectTimer(new QTimer(this)), m_pingTimer(new QTimer(this)), m_port(5540), m_debug(false), m_searching(false), m_searchShortDiscriminator(false), m_searchPasscode(0), m_searchDiscriminator(0), m_messageCounter(0), m_exchangeCounter(0), m_sessionCounter(1), m_fabricId(1), m_nodeId(1), m_devices(new DeviceList(config, this)), m_events(QMetaEnum::fromType <Event> ()), m_bleCommissioning(false)
 {
     connect(m_udp, &QUdpSocket::readyRead, this, &Matter::readyRead);
     connect(m_searchTimer, &QTimer::timeout, this, &Matter::searchTimeout);
@@ -32,8 +32,6 @@ Matter::Matter(QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), 
     m_reconnectTimer->setSingleShot(true);
     m_pingTimer->start(10000);
 
-    // fabric credentials will be set by Controller after database init
-    m_devices = nullptr;
     m_pendingCASE = nullptr;
     m_caseDevice = nullptr;
     m_caseExchangeId = 0;
@@ -153,7 +151,7 @@ void Matter::removeDevice(DeviceObject *device)
     if (!session || !session->active)
     {
         logWarning << device << "no active session";
-        emit deviceRemoved(device, false);
+        emit deviceEvent(device, Event::removed);
         return;
     }
 
@@ -1036,7 +1034,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         {
                             // BLE path: send WiFi credentials now (device has NOC, will advertise _matter._tcp after WiFi)
                             logInfo << "Sending WiFi credentials over BLE...";
-                            emit commissioningEvent("networkSetup", commission.assignedNodeId);
+                            emit deviceEvent(commission.device, Event::networkSetup);
                             commission.state = CommissioningState::AddWiFiNetwork;
                             continueCommissioning(commission);
                         }
@@ -1083,7 +1081,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             if (field.tag == 0) status = field.value.toUInt();
                         }
 
-                        emit deviceRemoved(m_pendingRemoveDevice, status == 0);
+                        emit deviceEvent(m_pendingRemoveDevice, Event::removed, {{"success", status == 0}});
                         m_pendingRemoveDevice = nullptr;
                     }
                 }
@@ -1140,7 +1138,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                     if (response.path.clusterId == Clusters::GeneralCommissioning::Id && response.path.commandId == Clusters::GeneralCommissioning::Commands::CommissioningCompleteResponse)
                     {
                         logInfo << m_pendingCommissionDevice << "commissioning complete";
-                        emit deviceCommissioned(m_pendingCommissionDevice);
+                        emit deviceEvent(m_pendingCommissionDevice, Event::added);
                         discoverDevice(m_pendingCommissionDevice);
                         m_pendingCommissionDevice = nullptr;
                     }
@@ -1185,7 +1183,7 @@ void Matter::startCommissioning(const MatterService &service)
     m_pendingCommissions.insert(sessionId, commission);
 
     logInfo << "Starting commissioning with" << service.address.toString() << ":" << service.port;
-    emit commissioningEvent("deviceConnecting", m_searchNodeId);
+    emit deviceEvent(nullptr, Event::deviceConnecting, {{"nodeId", QString::number(m_searchNodeId, 16)}});
     pase->start(commission.passcode, sessionId);
 }
 
@@ -1404,7 +1402,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
             logDebug(m_debug) << "CommissioningComplete success, starting CASE...";
             session->peerNodeId = commission.device->nodeId();
             session->active = false;
-            emit deviceCommissioned(commission.device);
+            emit deviceEvent(commission.device, Event::added);
 
             connectDevice(commission.device);
 
@@ -1598,7 +1596,7 @@ void Matter::searchTimeout(void)
     m_ble->stopScan();
     m_mdns->stop();
     logWarning << "Device search timeout, device not found";
-    emit commissioningEvent("deviceNotFound", m_searchNodeId);
+    emit deviceEvent(nullptr, Event::deviceNotFound, {{"nodeId", QString::number(m_searchNodeId, 16)}});
 }
 
 // --- BLE signal handlers ---
@@ -1614,7 +1612,7 @@ void Matter::bleDeviceFound(const BLEDevice &device)
         return;
 
     logInfo << "BLE device matched, connecting:" << device.address;
-    emit commissioningEvent("deviceFound", m_searchNodeId);
+    emit deviceEvent(nullptr, Event::deviceFound, {{"nodeId", QString::number(m_searchNodeId, 16)}});
     m_searching = false;
     m_searchTimer->stop();
     m_mdns->stop();
@@ -1644,7 +1642,7 @@ void Matter::bleDataReceived(const QByteArray &data)
 void Matter::btpHandshakeComplete(void)
 {
     logInfo << "BTP handshake complete, starting PASE over BLE...";
-    emit commissioningEvent("deviceConnecting", m_searchNodeId);
+    emit deviceEvent(nullptr, Event::deviceConnecting, {{"nodeId", QString::number(m_searchNodeId, 16)}});
     m_bleCommissioning = true;
 
     PASESession *pase = new PASESession(this);
@@ -1908,7 +1906,7 @@ void Matter::mdnsServiceFound(const MatterService &service)
     }
 
     logInfo << "Commissionable device found:" << service.deviceName << "discriminator:" << service.discriminator << "at" << service.address.toString() << ":" << service.port;
-    emit commissioningEvent("deviceFound", m_searchNodeId);
+    emit deviceEvent(nullptr, Event::deviceFound, {{"nodeId", QString::number(m_searchNodeId, 16)}});
 
     m_searching = false;
     m_searchTimer->stop();
@@ -2070,7 +2068,7 @@ void Matter::paseFailed(const QString &reason)
     quint64 nodeId = m_pendingCommissions.value(sessionId).assignedNodeId;
 
     logWarning << "PASE failed:" << reason;
-    emit commissioningEvent("connectFailed", nodeId);
+    emit deviceEvent(nullptr, Event::connectFailed, {{"nodeId", QString::number(nodeId, 16)}});
 
     if (m_bleCommissioning)
     {
