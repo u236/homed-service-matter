@@ -17,6 +17,7 @@ Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, confi
 
     connect(m_timer, &QTimer::timeout, this, &Controller::updateProperties);
     connect(m_devices, &DeviceList::statusUpdated, this, &Controller::statusUpdated);
+    connect(m_matter, &Matter::commissioningEvent, this, &Controller::commissioningEvent);
     connect(m_matter, &Matter::deviceCommissioned, this, &Controller::deviceCommissioned);
     connect(m_matter, &Matter::deviceOnline, this, &Controller::deviceOnline);
     connect(m_matter, &Matter::deviceOffline, this, &Controller::deviceOffline);
@@ -158,46 +159,44 @@ void Controller::mqttReceived(const QByteArray &message, const QMqttTopicName &t
 
             case Command::updateDevice:
             {
-                int index = -1;
-                QJsonObject data = json.value("data").toObject();
-                QString name = mqttSafe(data.value("name").toString());
-                Device device = m_devices->byName(json.value("device").toString(), &index), other = m_devices->byName(name);
-
-                if (device != other && !other.isNull())
-                {
-                    logWarning << "Device" << name << "update failed, name already in use";
-                    publishEvent(name, Event::nameDuplicate);
-                    break;
-                }
-
-                if (!device.isNull() && device->name() != name)
-                    deviceEvent(device.data(), Event::aboutToRename);
-
-                device = m_devices->parse(data);
+                Device device = m_devices->byName(json.value("device").toString());
 
                 if (device.isNull())
                 {
-                    logWarning << "Device" << name << "update failed, data is incomplete";
-                    publishEvent(name, Event::incompleteData);
+                    logWarning << "Device" << json.value("device").toString() << "update failed, device not found";
                     break;
                 }
 
-                if (index >= 0)
+                if (json.contains("name"))
                 {
-                    m_devices->replace(index, device);
-                    logInfo << device << "successfully updated";
-                    deviceEvent(device.data(), Event::updated);
-                }
-                else
-                {
-                    m_devices->append(device);
-                    logInfo << device << "successfully added";
-                    deviceEvent(device.data(), Event::added);
+                    QString name = mqttSafe(json.value("name").toString());
+                    Device other = m_devices->byName(name);
+
+                    if (device != other && !other.isNull())
+                    {
+                        logWarning << "Device" << name << "update failed, name already in use";
+                        publishEvent(name, Event::nameDuplicate);
+                        break;
+                    }
+
+                    if (device->name() != name)
+                    {
+                        deviceEvent(device.data(), Event::aboutToRename);
+                        device->setName(name);
+                    }
                 }
 
-                connect(device.data(), &DeviceObject::deviceUpdated, this, &Controller::deviceUpdated);
-                connect(device.data(), &DeviceObject::endpointUpdated, this, &Controller::endpointUpdated);
+                if (json.contains("active"))
+                    device->setActive(json.value("active").toBool());
 
+                if (json.contains("discovery"))
+                    device->setDiscovery(json.value("discovery").toBool());
+
+                if (json.contains("cloud"))
+                    device->setCloud(json.value("cloud").toBool());
+
+                logInfo << device << "successfully updated";
+                deviceEvent(device.data(), Event::updated);
                 m_devices->store(true);
                 break;
             }
@@ -222,7 +221,7 @@ void Controller::mqttReceived(const QByteArray &message, const QMqttTopicName &t
                 break;
             }
 
-            case Command::addDevice:
+            case Command::connectDevice:
             {
                 quint32 passcode;
                 quint16 discriminator;
@@ -245,7 +244,7 @@ void Controller::mqttReceived(const QByteArray &message, const QMqttTopicName &t
                 quint64 nodeId = m_devices->generateNodeId();
                 bool mdnsOnly = json.value("mdns").toBool();
                 logInfo << "Adding device, passcode:" << passcode << "discriminator:" << discriminator << (shortDiscriminator ? "(short)" : "(full)") << "nodeId:" << QString::number(nodeId, 16);
-                m_matter->addDevice(passcode, discriminator, shortDiscriminator, nodeId, mdnsOnly);
+                m_matter->connectDevice(passcode, discriminator, shortDiscriminator, nodeId, mdnsOnly);
                 break;
             }
 
@@ -362,6 +361,11 @@ void Controller::deviceOnline(DeviceObject *device)
 void Controller::deviceOffline(DeviceObject *device)
 {
     updateAvailability(device);
+}
+
+void Controller::commissioningEvent(const QString &reason, quint64 nodeId)
+{
+    mqttPublish(mqttTopic("event/%1").arg(serviceTopic()), {{"event", reason}, {"device", QString::number(nodeId, 16)}});
 }
 
 void Controller::deviceCommissioned(DeviceObject *device)

@@ -34,7 +34,7 @@ public:
     inline QByteArray controllerNOC(void) { return m_controllerNOC; }
     inline QByteArray controllerRCAC(void) { return m_controllerRCAC; }
 
-    void addDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator = false, quint64 nodeId = 0, bool mdnsOnly = false);
+    void connectDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator = false, quint64 nodeId = 0, bool mdnsOnly = false);
     void connectDevice(DeviceObject *device);
     void discoverDevice(DeviceObject *device);
     void removeDevice(DeviceObject *device);
@@ -216,6 +216,7 @@ public:
 
 signals:
 
+    void commissioningEvent(const QString &reason, quint64 nodeId);
     void deviceCommissioned(DeviceObject *device);
     void deviceOnline(DeviceObject *device);
     void deviceOffline(DeviceObject *device);

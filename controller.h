@@ -21,14 +21,18 @@ public:
         updateDevice,
         removeDevice,
         getProperties,
-        addDevice,
+        connectDevice,
         shareDevice
     };
 
     enum class Event
     {
+        deviceFound,
+        deviceConnecting,
+        networkSetup,
+        deviceNotFound,
+        connectFailed,
         nameDuplicate,
-        incompleteData,
         aboutToRename,
         added,
         updated,
@@ -68,6 +72,7 @@ private slots:
 
     void statusUpdated(const QJsonObject &json);
 
+    void commissioningEvent(const QString &reason, quint64 nodeId);
     void deviceCommissioned(DeviceObject *device);
     void deviceOnline(DeviceObject *device);
     void deviceOffline(DeviceObject *device);
