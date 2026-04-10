@@ -64,6 +64,8 @@ Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new 
 
     logInfo << "Matter controller listening on port" << m_port;
 
+    m_devices->init();
+
     if (m_devices->fabricKey().isEmpty())
     {
         QByteArray fabricKey = Crypto::randomBytes(32), ipk = Crypto::randomBytes(16), operationalKey = Crypto::randomBytes(32), rcacIdBytes = Crypto::randomBytes(8);
@@ -78,8 +80,6 @@ Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new 
     }
     else
         setFabricCredentials(m_devices->fabricKey(), m_devices->rootCAId(), m_devices->ipk(), m_devices->operationalKey(), m_devices->controllerNOC(), m_devices->controllerRCAC());
-
-    m_devices->init();
 }
 
 void Matter::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC, const QByteArray &controllerRCAC)
@@ -175,6 +175,73 @@ void Matter::discoverDevice(DeviceObject *device)
 
     QByteArray payload = InteractionModel::encodeReadRequest(paths);
     sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+}
+
+QList <AttributePath> Matter::buildSubscribePaths(DeviceObject *device)
+{
+    QList <AttributePath> paths;
+
+    for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
+    {
+        quint8 epId = it.key();
+
+        if (epId == 0)
+            continue;
+
+        EndpointObject *ep = reinterpret_cast <EndpointObject*> (it.value().data());
+        const QList <quint32> &clusters = ep->clusters();
+        quint16 caps = ep->colorCapabilities();
+
+        if (clusters.contains(Clusters::OnOff::Id))
+            paths.append(AttributePath(epId, Clusters::OnOff::Id, Clusters::OnOff::Attributes::OnOff));
+
+        if (clusters.contains(Clusters::LevelControl::Id))
+            paths.append(AttributePath(epId, Clusters::LevelControl::Id, Clusters::LevelControl::Attributes::CurrentLevel));
+
+        if (clusters.contains(Clusters::ColorControl::Id))
+        {
+            if (caps & 0x0009)
+            {
+                paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentHue));
+                paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentSaturation));
+            }
+
+            if (caps & 0x0010)
+                paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTemperatureMireds));
+
+            if ((caps & 0x0019) == 0x0019)
+                paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorMode));
+        }
+
+        if (clusters.contains(Clusters::TemperatureMeasurement::Id))
+            paths.append(AttributePath(epId, Clusters::TemperatureMeasurement::Id, Clusters::TemperatureMeasurement::Attributes::MeasuredValue));
+
+        if (clusters.contains(Clusters::RelativeHumidityMeasurement::Id))
+            paths.append(AttributePath(epId, Clusters::RelativeHumidityMeasurement::Id, Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue));
+
+        if (clusters.contains(Clusters::ElectricalPowerMeasurement::Id))
+            paths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::ActivePower));
+
+        if (clusters.contains(Clusters::ElectricalEnergyMeasurement::Id))
+            paths.append(AttributePath(epId, Clusters::ElectricalEnergyMeasurement::Id, Clusters::ElectricalEnergyMeasurement::Attributes::CumulativeEnergyImported));
+    }
+
+    return paths;
+}
+
+void Matter::subscribeDevice(DeviceObject *device, SessionInfo *session)
+{
+    if (!session)
+        return;
+
+    QList <AttributePath> paths = buildSubscribePaths(device);
+
+    if (paths.isEmpty())
+        return;
+
+    logInfo << device << "subscribing to" << paths.count() << "attributes";
+    QByteArray subPayload = InteractionModel::encodeSubscribeRequest(paths, 0, 60);
+    sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::SubscribeRequest), static_cast <quint16> (ProtocolId::InteractionModel), subPayload, m_exchangeCounter++, true);
 }
 
 void Matter::removeDevice(DeviceObject *device)
@@ -737,49 +804,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                     // collect subscribe paths for after StatusResponse
                     if (!endpointClusters.isEmpty() && reportSession)
                     {
-                        for (auto it = endpointClusters.begin(); it != endpointClusters.end(); it++)
-                        {
-                            quint8 epId = it.key();
-
-                            if (epId == 0)
-                                continue;
-
-                            if (it.value().contains(Clusters::OnOff::Id))
-                                pendingSubPaths.append(AttributePath(epId, Clusters::OnOff::Id, Clusters::OnOff::Attributes::OnOff));
-
-                            if (it.value().contains(Clusters::LevelControl::Id))
-                                pendingSubPaths.append(AttributePath(epId, Clusters::LevelControl::Id, Clusters::LevelControl::Attributes::CurrentLevel));
-
-                            if (it.value().contains(Clusters::ColorControl::Id))
-                            {
-                                quint16 caps = colorCapabilities.value(epId, 0);
-
-                                if (caps & 0x0009)
-                                {
-                                    pendingSubPaths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentHue));
-                                    pendingSubPaths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentSaturation));
-                                }
-
-                                if (caps & 0x0010)
-                                    pendingSubPaths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTemperatureMireds));
-
-                                if ((caps & 0x0019) == 0x0019)
-                                    pendingSubPaths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorMode));
-                            }
-
-                            if (it.value().contains(Clusters::TemperatureMeasurement::Id))
-                                pendingSubPaths.append(AttributePath(epId, Clusters::TemperatureMeasurement::Id, Clusters::TemperatureMeasurement::Attributes::MeasuredValue));
-
-                            if (it.value().contains(Clusters::RelativeHumidityMeasurement::Id))
-                                pendingSubPaths.append(AttributePath(epId, Clusters::RelativeHumidityMeasurement::Id, Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue));
-
-                            if (it.value().contains(Clusters::ElectricalPowerMeasurement::Id))
-                                pendingSubPaths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::ActivePower));
-
-                            if (it.value().contains(Clusters::ElectricalEnergyMeasurement::Id))
-                                pendingSubPaths.append(AttributePath(epId, Clusters::ElectricalEnergyMeasurement::Id, Clusters::ElectricalEnergyMeasurement::Attributes::CumulativeEnergyImported));
-                        }
-
+                        pendingSubPaths = buildSubscribePaths(reportDevice);
                         pendingSubSession = reportSession;
                         pendingSubDevice = reportDevice;
                     }
@@ -800,7 +825,6 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
             if (!pendingSubPaths.isEmpty() && pendingSubSession && pendingSubDevice)
             {
                 logInfo << pendingSubDevice << "subscribing to" << pendingSubPaths.count() << "attributes";
-                m_subscribedPaths[pendingSubDevice->nodeId()] = pendingSubPaths;
                 QByteArray subPayload = InteractionModel::encodeSubscribeRequest(pendingSubPaths, 0, 60);
                 sendEncrypted(pendingSubSession, static_cast <quint8> (InteractionModelOpcode::SubscribeRequest), static_cast <quint16> (ProtocolId::InteractionModel), subPayload, m_exchangeCounter++, true);
                 pendingSubDevice->deviceUpdated(pendingSubDevice);
@@ -1151,17 +1175,6 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                     }
                 }
             }
-
-            // TODO: read back subscribed attributes after successful device command
-            // {
-            //     SessionInfo *session = m_sessions->findByLocalId(msgHeader.sessionId);
-            //
-            //     if (session && m_subscribedPaths.contains(session->peerNodeId))
-            //     {
-            //         QByteArray readPayload = InteractionModel::encodeReadRequest(m_subscribedPaths.value(session->peerNodeId));
-            //         sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), readPayload, m_exchangeCounter++, true);
-            //     }
-            // }
 
             // handle CommissioningComplete response on CASE session (after AddNOC → CASE)
             if (m_pendingCommissionDevice)
@@ -2187,19 +2200,9 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
     m_caseDevice->setAvailability(Availability::Online);
     emit updateAvailability(m_caseDevice);
 
-    // re-subscribe after CASE reconnect
-    if (!m_caseDevice->endpoints().isEmpty() && m_subscribedPaths.contains(m_caseDevice->nodeId()))
-    {
-        SessionInfo *resubSession = m_sessions->findByLocalId(localSessionId);
-        QList <AttributePath> paths = m_subscribedPaths.value(m_caseDevice->nodeId());
-
-        if (resubSession && !paths.isEmpty())
-        {
-            logInfo << m_caseDevice << "re-subscribing to" << paths.count() << "attributes after CASE reconnect";
-            QByteArray subPayload = InteractionModel::encodeSubscribeRequest(paths, 0, 60);
-            sendEncrypted(resubSession, static_cast <quint8> (InteractionModelOpcode::SubscribeRequest), static_cast <quint16> (ProtocolId::InteractionModel), subPayload, m_exchangeCounter++, true);
-        }
-    }
+    // subscribe to attributes for known devices (cold start or CASE reconnect)
+    if (!m_caseDevice->endpoints().isEmpty())
+        subscribeDevice(m_caseDevice, m_sessions->findByLocalId(localSessionId));
 
     m_pendingCASE->deleteLater();
     m_pendingCASE = nullptr;

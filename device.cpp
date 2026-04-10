@@ -66,7 +66,9 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QL
         device->endpoints().insert(endpointId, endpoint);
     }
 
-    reinterpret_cast <EndpointObject*> (endpoint.data())->clusters() = clusters;
+    EndpointObject *ep = reinterpret_cast <EndpointObject*> (endpoint.data());
+    ep->clusters() = clusters;
+    ep->setColorCapabilities(colorCapabilities);
 
     auto addExpose = [&](ExposeObject *obj, const QString &name)
     {
@@ -268,6 +270,26 @@ Device DeviceList::parse(const QJsonObject &json)
     if (json.contains("networkPort"))
         obj->setNetworkPort(static_cast <quint16> (json.value("networkPort").toInt()));
 
+    QJsonArray endpoints = json.value("endpoints").toArray();
+
+    for (auto it = endpoints.begin(); it != endpoints.end(); it++)
+    {
+        QJsonObject epJson = it->toObject();
+        quint8 endpointId = static_cast <quint8> (epJson.value("endpointId").toInt());
+
+        Endpoint endpoint(new EndpointObject(endpointId, device));
+        EndpointObject *ep = reinterpret_cast <EndpointObject*> (endpoint.data());
+
+        QJsonArray clusters = epJson.value("clusters").toArray();
+
+        for (auto ci = clusters.begin(); ci != clusters.end(); ci++)
+            ep->clusters().append(static_cast <quint32> (ci->toVariant().toULongLong()));
+
+        ep->setColorCapabilities(static_cast <quint16> (epJson.value("colorCapabilities").toInt()));
+
+        obj->endpoints().insert(endpointId, endpoint);
+    }
+
     return device;
 }
 
@@ -290,6 +312,17 @@ void DeviceList::unserialize(const QJsonArray &devices)
 
         append(device);
         count++;
+
+        // recreate exposes from restored endpoints + clusters
+        DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
+
+        for (auto ep = obj->endpoints().begin(); ep != obj->endpoints().end(); ep++)
+        {
+            EndpointObject *epObj = reinterpret_cast <EndpointObject*> (ep.value().data());
+            setupEndpoint(obj, ep.key(), epObj->clusters(), epObj->colorCapabilities());
+        }
+
+        updateMultiple(obj);
     }
 
     if (count)
@@ -348,6 +381,9 @@ QJsonArray DeviceList::serialize(void)
 
                     epJson.insert("clusters", clusters);
                 }
+
+                if (ep->colorCapabilities())
+                    epJson.insert("colorCapabilities", ep->colorCapabilities());
 
                 endpoints.append(epJson);
             }

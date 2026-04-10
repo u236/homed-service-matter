@@ -148,7 +148,6 @@ private:
 
     DeviceList *m_devices;
     QMetaEnum m_events;
-    QMap <quint64, QList <AttributePath>> m_subscribedPaths;
 
     QString m_wifiSSID;
     QString m_wifiPassword;
@@ -175,6 +174,8 @@ private:
     QMap <quint64, quint32> m_shareIterations;
 
     void handleDeviceUnreachable(DeviceObject *device);
+    QList <AttributePath> buildSubscribePaths(DeviceObject *device);
+    void subscribeDevice(DeviceObject *device, SessionInfo *session);
     void sendBleMessage(quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator);
     void sendEncryptedBle(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator);
     void sendCommissioningMessage(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId);

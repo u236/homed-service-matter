@@ -15,15 +15,19 @@ class EndpointObject : public AbstractEndpointObject
 
 public:
 
-    EndpointObject(quint8 id, const Device &device) : AbstractEndpointObject(id, device) {}
+    EndpointObject(quint8 id, const Device &device) : AbstractEndpointObject(id, device), m_colorCapabilities(0) {}
 
     inline QMap <QString, QVariant> &status(void) { return m_status; }
     inline QList <quint32> &clusters(void) { return m_clusters; }
+
+    inline quint16 colorCapabilities(void) { return m_colorCapabilities; }
+    inline void setColorCapabilities(quint16 value) { m_colorCapabilities = value; }
 
 private:
 
     QMap <QString, QVariant> m_status;
     QList <quint32> m_clusters;
+    quint16 m_colorCapabilities;
 
 };
 
