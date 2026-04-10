@@ -15,19 +15,15 @@ class EndpointObject : public AbstractEndpointObject
 
 public:
 
-    EndpointObject(quint8 id, const Device &device) : AbstractEndpointObject(id, device), m_colorCapabilities(0) {}
+    EndpointObject(quint8 id, const Device &device) : AbstractEndpointObject(id, device) {}
 
     inline QMap <QString, QVariant> &status(void) { return m_status; }
     inline QList <quint32> &clusters(void) { return m_clusters; }
-
-    inline quint16 colorCapabilities(void) { return m_colorCapabilities; }
-    inline void setColorCapabilities(quint16 value) { m_colorCapabilities = value; }
 
 private:
 
     QMap <QString, QVariant> m_status;
     QList <quint32> m_clusters;
-    quint16 m_colorCapabilities;
 
 };
 
@@ -104,7 +100,7 @@ public:
 
     void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC, const QByteArray &controllerRCAC);
 
-    void setupEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters, quint16 colorCapabilities = 0);
+    void setupEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters, quint16 colorCapabilities = 0, quint16 colorTempMin = 0, quint16 colorTempMax = 0);
     void updateMultiple(DeviceObject *device);
 
     Device byName(const QString &name, int *index = nullptr);

@@ -42,7 +42,7 @@ quint64 DeviceList::generateNodeId(void)
     return nodeId;
 }
 
-void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters, quint16 colorCapabilities)
+void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters, quint16 colorCapabilities, quint16 colorTempMin, quint16 colorTempMax)
 {
     Device holder;
 
@@ -68,7 +68,17 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QL
 
     EndpointObject *ep = reinterpret_cast <EndpointObject*> (endpoint.data());
     ep->clusters() = clusters;
-    ep->setColorCapabilities(colorCapabilities);
+
+    if (colorCapabilities)
+        ep->meta().insert("colorCapabilities", colorCapabilities);
+
+    if (colorTempMin && colorTempMax)
+    {
+        ep->meta().insert("colorTempMin", colorTempMin);
+        ep->meta().insert("colorTempMax", colorTempMax);
+    }
+
+    quint16 caps = static_cast <quint16> (ep->meta().value("colorCapabilities").toInt());
 
     auto addExpose = [&](ExposeObject *obj, const QString &name)
     {
@@ -89,13 +99,18 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QL
             if (clusters.contains(Clusters::LevelControl::Id))
                 options.append("level");
 
-            if (colorCapabilities & 0x0009)
+            if (caps & 0x0009)
                 options.append("color");
 
-            if (colorCapabilities & 0x0010)
+            if (caps & 0x0010)
+            {
                 options.append("colorTemperature");
 
-            if ((colorCapabilities & 0x0019) == 0x0019)
+                if (ep->meta().contains("colorTempMin") && ep->meta().contains("colorTempMax"))
+                    device->options().insert(QString("colorTemperature_%1").arg(endpointId), QMap <QString, QVariant> {{"min", ep->meta().value("colorTempMin")}, {"max", ep->meta().value("colorTempMax")}});
+            }
+
+            if ((caps & 0x0019) == 0x0019)
                 options.append("colorMode");
 
             addExpose(new LightObject, "light");
@@ -285,7 +300,7 @@ Device DeviceList::parse(const QJsonObject &json)
         for (auto ci = clusters.begin(); ci != clusters.end(); ci++)
             ep->clusters().append(static_cast <quint32> (ci->toVariant().toULongLong()));
 
-        ep->setColorCapabilities(static_cast <quint16> (epJson.value("colorCapabilities").toInt()));
+        ep->meta().insert(epJson.value("meta").toObject().toVariantMap());
 
         obj->endpoints().insert(endpointId, endpoint);
     }
@@ -319,7 +334,7 @@ void DeviceList::unserialize(const QJsonArray &devices)
         for (auto ep = obj->endpoints().begin(); ep != obj->endpoints().end(); ep++)
         {
             EndpointObject *epObj = reinterpret_cast <EndpointObject*> (ep.value().data());
-            setupEndpoint(obj, ep.key(), epObj->clusters(), epObj->colorCapabilities());
+            setupEndpoint(obj, ep.key(), epObj->clusters(), static_cast <quint16> (epObj->meta().value("colorCapabilities").toInt()));
         }
 
         updateMultiple(obj);
@@ -382,8 +397,8 @@ QJsonArray DeviceList::serialize(void)
                     epJson.insert("clusters", clusters);
                 }
 
-                if (ep->colorCapabilities())
-                    epJson.insert("colorCapabilities", ep->colorCapabilities());
+                if (!ep->meta().isEmpty())
+                    epJson.insert("meta", QJsonObject::fromVariantMap(ep->meta()));
 
                 endpoints.append(epJson);
             }

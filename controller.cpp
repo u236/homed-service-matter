@@ -153,6 +153,25 @@ void Controller::mqttReceived(const QByteArray &message, const QMqttTopicName &t
                 break;
             }
 
+            case Command::discoverDevice:
+            {
+                Device device = m_matter->devices()->byName(json.value("device").toString());
+
+                if (device.isNull())
+                {
+                    logWarning << "Device" << json.value("device").toString() << "discovery failed, device not found";
+                    break;
+                }
+
+                DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
+
+                publishExposes(device.data(), true);
+                obj->endpoints().clear();
+                m_matter->devices()->store(true);
+                m_matter->discoverDevice(obj);
+                break;
+            }
+
             case Command::connectDevice:
             {
                 quint32 passcode;

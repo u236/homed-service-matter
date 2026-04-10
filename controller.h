@@ -20,7 +20,8 @@ public:
         shareDevice,
         updateDevice,
         removeDevice,
-        getProperties
+        getProperties,
+        discoverDevice
     };
 
     Controller(const QString &configFile);

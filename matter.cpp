@@ -190,7 +190,7 @@ QList <AttributePath> Matter::buildSubscribePaths(DeviceObject *device)
 
         EndpointObject *ep = reinterpret_cast <EndpointObject*> (it.value().data());
         const QList <quint32> &clusters = ep->clusters();
-        quint16 caps = ep->colorCapabilities();
+        quint16 caps = static_cast <quint16> (ep->meta().value("colorCapabilities").toInt());
 
         if (clusters.contains(Clusters::OnOff::Id))
             paths.append(AttributePath(epId, Clusters::OnOff::Id, Clusters::OnOff::Attributes::OnOff));
@@ -761,15 +761,18 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         {
                             serverPaths.append(AttributePath(ep, Clusters::Descriptor::Id, Clusters::Descriptor::Attributes::ServerList));
                             serverPaths.append(AttributePath(ep, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorCapabilities));
+                            serverPaths.append(AttributePath(ep, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTempPhysicalMinMireds));
+                            serverPaths.append(AttributePath(ep, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTempPhysicalMaxMireds));
                         }
 
                         QByteArray serverPayload = InteractionModel::encodeReadRequest(serverPaths);
                         sendEncrypted(reportSession, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), serverPayload, m_exchangeCounter++, true);
                     }
 
-                    // step 2 response: ServerList + ColorCapabilities — create exposes and subscribe
+                    // step 2 response: ServerList + ColorCapabilities + ColorTempPhysicalMin/Max — create exposes and subscribe
                     QMap <quint8, QList <quint32>> endpointClusters;
                     QMap <quint8, quint16> colorCapabilities;
+                    QMap <quint8, quint16> colorTempMin, colorTempMax;
 
                     for (const AttributeReport &report : reports)
                     {
@@ -790,13 +793,29 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             colorCapabilities[report.path.endpointId] = report.value.toUInt();
                             logDebug(m_debug) << "ColorCapabilities for ep" << report.path.endpointId << ":" << QString::number(report.value.toUInt(), 16);
                         }
+                        else if (report.path.clusterId == Clusters::ColorControl::Id && report.path.attributeId == Clusters::ColorControl::Attributes::ColorTempPhysicalMinMireds)
+                        {
+                            colorTempMin[report.path.endpointId] = static_cast <quint16> (report.value.toUInt());
+                        }
+                        else if (report.path.clusterId == Clusters::ColorControl::Id && report.path.attributeId == Clusters::ColorControl::Attributes::ColorTempPhysicalMaxMireds)
+                        {
+                            colorTempMax[report.path.endpointId] = static_cast <quint16> (report.value.toUInt());
+                        }
                     }
 
                     // create endpoints and exposes
                     for (auto it = endpointClusters.begin(); it != endpointClusters.end(); it++)
                     {
-                        if (it.key() > 0)
-                            m_devices->setupEndpoint(reportDevice, it.key(), it.value(), colorCapabilities.value(it.key(), 0));
+                        if (it.key() == 0)
+                            continue;
+
+                        quint16 minMireds = colorTempMin.value(it.key(), 0);
+                        quint16 maxMireds = colorTempMax.value(it.key(), 0);
+
+                        if (minMireds && maxMireds)
+                            logInfo << reportDevice << "endpoint" << it.key() << "color temperature range:" << minMireds << "..." << maxMireds << "mireds";
+
+                        m_devices->setupEndpoint(reportDevice, it.key(), it.value(), colorCapabilities.value(it.key(), 0), minMireds, maxMireds);
                     }
 
                     m_devices->updateMultiple(reportDevice);
