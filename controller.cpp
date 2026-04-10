@@ -1,4 +1,3 @@
-#include <QDateTime>
 #include "controller.h"
 #include "expose.h"
 #include "logger.h"

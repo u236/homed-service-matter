@@ -1,21 +1,16 @@
+// NOT REWIEWED
+
 #ifndef MATTER_H
 #define MATTER_H
 
-#include <QObject>
-#include <QUdpSocket>
-#include <QTimer>
-#include <QMap>
-#include <QMetaEnum>
 #include "device.h"
 #include "message.h"
 #include "mrp.h"
 #include "mdns.h"
 #include "pase.h"
 #include "case.h"
-#include "session.h"
 #include "interaction.h"
 #include "ble.h"
-#include "btp.h"
 
 class Matter : public QObject
 {

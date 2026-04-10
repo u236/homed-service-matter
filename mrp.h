@@ -1,11 +1,10 @@
+// NOT REWIEWED
+
 #ifndef MRP_H
 #define MRP_H
 
-#include <QObject>
 #include <QTimer>
-#include <QMap>
 #include <QHostAddress>
-#include "message.h"
 
 /*
     Message Reliability Protocol (MRP) — spec section 4.11

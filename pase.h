@@ -1,11 +1,10 @@
+// NOT REWIEWED
+
 #ifndef PASE_H
 #define PASE_H
 
-#include <QObject>
-#include <QHostAddress>
 #include <QTimer>
 #include "crypto.h"
-#include "tlv.h"
 
 /*
     PASE — Password Authenticated Session Establishment (Matter spec 4.13)

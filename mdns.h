@@ -1,11 +1,10 @@
+// NOT REWIEWED
+
 #ifndef MDNS_H
 #define MDNS_H
 
-#include <QObject>
 #include <QUdpSocket>
-#include <QHostAddress>
 #include <QTimer>
-#include <QMap>
 
 /*
     mDNS/DNS-SD for Matter device discovery — spec section 4.3

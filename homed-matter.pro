@@ -5,7 +5,6 @@ include(../homed-common/homed-parser.pri)
 
 HEADERS += \
     ble.h \
-    btp.h \
     case.h \
     clusters.h \
     controller.h \
@@ -16,13 +15,11 @@ HEADERS += \
     message.h \
     mrp.h \
     pase.h \
-    session.h \
     matter.h \
     tlv.h
 
 SOURCES += \
     ble.cpp \
-    btp.cpp \
     case.cpp \
     controller.cpp \
     crypto.cpp \
@@ -32,7 +29,6 @@ SOURCES += \
     message.cpp \
     mrp.cpp \
     pase.cpp \
-    session.cpp \
     matter.cpp \
     tlv.cpp
 

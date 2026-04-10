@@ -1,13 +1,11 @@
-#include "crypto.h"
+// NOT REWIEWED
 
-#include <openssl/rand.h>
-#include <openssl/kdf.h>
-#include <openssl/err.h>
-#include <openssl/x509.h>
-#include <openssl/x509v3.h>
-#include <openssl/ecdsa.h>
-#include "tlv.h"
+
+#include <QRandomGenerator>
 #include <QtEndian>
+#include <openssl/x509v3.h>
+#include "crypto.h"
+#include "tlv.h"
 
 EC_GROUP *ECPoint::s_group = nullptr;
 
@@ -645,7 +643,14 @@ QByteArray Crypto::x509DerToMatterTLV(const QByteArray &derCert)
 QByteArray Crypto::randomBytes(quint32 length)
 {
     QByteArray result(length, 0);
-    RAND_bytes(reinterpret_cast <unsigned char*> (result.data()), length);
+    QRandomGenerator::system()->generate(reinterpret_cast <quint32*> (result.data()), reinterpret_cast <quint32*> (result.data() + (length & ~3u)));
+
+    if (length & 3u)
+    {
+        quint32 tail = QRandomGenerator::system()->generate();
+        memcpy(result.data() + (length & ~3u), &tail, length & 3u);
+    }
+
     return result;
 }
 

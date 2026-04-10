@@ -1,12 +1,11 @@
+// NOT REWIEWED
+
 #ifndef CRYPTO_H
 #define CRYPTO_H
 
-#include <QByteArray>
-
-#include <openssl/bn.h>
 #include <openssl/ec.h>
-#include <openssl/evp.h>
 #include <openssl/hmac.h>
+#include <QByteArray>
 
 /*
     Crypto utilities for Matter protocol using OpenSSL:

@@ -1,8 +1,9 @@
+// NOT REWIEWED
+
 #include "controller.h"
 #include "device.h"
 #include "expose.h"
 #include "clusters.h"
-#include "crypto.h"
 #include "logger.h"
 
 void DeviceObject::updateEndpoint(quint8 endpointId, const QString &property, const QVariant &value)

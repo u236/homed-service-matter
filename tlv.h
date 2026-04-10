@@ -1,8 +1,8 @@
+// NOT REWIEWED
+
 #ifndef TLV_H
 #define TLV_H
 
-#include <QByteArray>
-#include <QList>
 #include <QVariant>
 
 namespace MatterTLV

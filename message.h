@@ -1,7 +1,8 @@
+// NOT REWIEWED
+
 #ifndef MESSAGE_H
 #define MESSAGE_H
 
-#include <QByteArray>
 #include <QHostAddress>
 
 /*

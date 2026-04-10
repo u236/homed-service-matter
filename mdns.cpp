@@ -1,7 +1,8 @@
-#include "mdns.h"
-#include "logger.h"
-#include <QNetworkInterface>
+// NOT REWIEWED
+
 #include <QtEndian>
+#include "logger.h"
+#include "mdns.h"
 
 #define MATTER_COMMISSION_SERVICE   "_matterc._udp.local"
 #define MATTER_OPERATIVE_SERVICE    "_matter._tcp.local"

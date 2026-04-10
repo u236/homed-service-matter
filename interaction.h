@@ -1,11 +1,9 @@
+// NOT REWIEWED
+
 #ifndef INTERACTION_H
 #define INTERACTION_H
 
-#include <QObject>
-#include <QMap>
-#include <QVariant>
 #include "tlv.h"
-#include "clusters.h"
 
 /*
     Matter Interaction Model (spec section 8)
