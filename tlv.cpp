@@ -1,3 +1,4 @@
+#include <QtEndian>
 #include "tlv.h"
 
 using namespace MatterTLV;
@@ -122,20 +123,20 @@ void Encoder::encodeFloat(int tag, float value)
 {
     encodeControl(Type::Float, tag);
 
-    const char *bytes = reinterpret_cast <const char*> (&value);
-
-    for (int i = 0; i < 4; i++)
-        m_data.append(bytes[i]);
+    quint32 bits;
+    memcpy(&bits, &value, 4);
+    bits = qToLittleEndian(bits);
+    m_data.append(reinterpret_cast <const char*> (&bits), 4);
 }
 
 void Encoder::encodeDouble(int tag, double value)
 {
     encodeControl(Type::Double, tag);
 
-    const char *bytes = reinterpret_cast <const char*> (&value);
-
-    for (int i = 0; i < 8; i++)
-        m_data.append(bytes[i]);
+    quint64 bits;
+    memcpy(&bits, &value, 8);
+    bits = qToLittleEndian(bits);
+    m_data.append(reinterpret_cast <const char*> (&bits), 8);
 }
 
 void Encoder::encodeUTF8String(int tag, const QString &value)
@@ -290,16 +291,18 @@ Element Decoder::decode(void)
         case 0x0A: // Float
         {
             QByteArray bytes = readBytes(4);
+            quint32 raw = qFromLittleEndian <quint32> (bytes.constData());
             float value;
-            memcpy(&value, bytes.constData(), 4);
+            memcpy(&value, &raw, 4);
             return Element(Type::Float, tag, value);
         }
 
         case 0x0B: // Double
         {
             QByteArray bytes = readBytes(8);
+            quint64 raw = qFromLittleEndian <quint64> (bytes.constData());
             double value;
-            memcpy(&value, bytes.constData(), 8);
+            memcpy(&value, &raw, 8);
             return Element(Type::Double, tag, value);
         }
 

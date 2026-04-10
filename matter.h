@@ -41,8 +41,7 @@ public:
 
     Matter(QSettings *config, QObject *parent);
     void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC = QByteArray(), const QByteArray &controllerRCAC = QByteArray());
-    inline void setDebug(bool value) { m_debug = value; m_mrp->setDebug(value); }
-    inline void setWiFi(const QString &ssid, const QString &password) { m_wifiSSID = ssid; m_wifiPassword = password; }
+
     inline QByteArray fabricKey(void) { return m_fabricKey; }
     inline quint64 rootCAId(void) { return m_rootCAId; }
     inline QByteArray ipk(void) { return m_ipk; }
@@ -181,7 +180,7 @@ private:
     QMap <quint64, quint32> m_shareIterations;
 
     void handleDeviceUnreachable(DeviceObject *device);
-    void sendBleMessage(quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator, quint32 ackCounter = 0);
+    void sendBleMessage(quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator);
     void sendEncryptedBle(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator);
     void sendCommissioningMessage(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId);
     void sendRawDatagram(const QByteArray &data, const QHostAddress &address, quint16 port);
@@ -235,11 +234,10 @@ public:
 
 signals:
 
+    void updateAvailability(DeviceObject *device);
     void deviceEvent(DeviceObject *device, Matter::Event event, const QJsonObject &json = QJsonObject());
-    void deviceOnline(DeviceObject *device);
-    void deviceOffline(DeviceObject *device);
-    void statusUpdated(const QJsonObject &json);
     void deviceShared(DeviceObject *device, const QString &manualCode, const QString &qrCode, quint16 timeout);
+    void statusUpdated(const QJsonObject &json);
 
 };
 

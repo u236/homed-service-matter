@@ -4,7 +4,6 @@
 #define SERVICE_VERSION             "0.0.6"
 #define UPDATE_PROPERTIES_DELAY     1000
 
-#include <QMetaEnum>
 #include "homed.h"
 #include "matter.h"
 
@@ -17,11 +16,11 @@ public:
     enum class Command
     {
         restartService,
+        connectDevice,
+        shareDevice,
         updateDevice,
         removeDevice,
-        getProperties,
-        connectDevice,
-        shareDevice
+        getProperties
     };
 
     Controller(const QString &configFile);
@@ -51,12 +50,10 @@ private slots:
     void deviceUpdated(DeviceObject *device);
     void endpointUpdated(DeviceObject *device, quint8 endpointId);
 
-    void statusUpdated(const QJsonObject &json);
-
     void deviceEvent(DeviceObject *device, Matter::Event event, const QJsonObject &json);
-    void deviceOnline(DeviceObject *device);
-    void deviceOffline(DeviceObject *device);
     void deviceShared(DeviceObject *device, const QString &manualCode, const QString &qrCode, quint16 timeout);
+
+    void statusUpdated(const QJsonObject &json);
 
 };
 

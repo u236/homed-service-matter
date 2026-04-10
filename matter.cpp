@@ -11,10 +11,26 @@ using namespace MatterProtocol;
 
 Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), m_mrp(new MRP(this)), m_mdns(new MDNS(this)), m_ble(new BLE(this)), m_btp(new BTP(this)), m_sessions(new SessionManager(this)), m_searchTimer(new QTimer(this)), m_reconnectTimer(new QTimer(this)), m_pingTimer(new QTimer(this)), m_port(5540), m_debug(false), m_searching(false), m_searchShortDiscriminator(false), m_searchPasscode(0), m_searchDiscriminator(0), m_messageCounter(0), m_exchangeCounter(0), m_sessionCounter(1), m_fabricId(1), m_nodeId(1), m_devices(new DeviceList(config, this)), m_events(QMetaEnum::fromType <Event> ()), m_bleCommissioning(false)
 {
+    QByteArray counterBytes = Crypto::randomBytes(sizeof(m_messageCounter));
+
+    // start message counter from random value to avoid replay detection after restart
+    memcpy(&m_messageCounter, counterBytes.constData(), sizeof(m_messageCounter));
+
+    m_debug = config->value("debug/matter", false).toBool();
+    m_mrp->setDebug(m_debug); // TODO: separate config parameters
+
+    m_wifiSSID = config->value("wifi/ssid").toString();
+    m_wifiPassword = config->value("wifi/password").toString();
+
+    // move to devices class
+    m_devices->setNames(config->value("mqtt/names", false).toBool());
+    //
+
     connect(m_udp, &QUdpSocket::readyRead, this, &Matter::readyRead);
     connect(m_searchTimer, &QTimer::timeout, this, &Matter::searchTimeout);
     connect(m_reconnectTimer, &QTimer::timeout, this, &Matter::reconnectTimeout);
     connect(m_pingTimer, &QTimer::timeout, this, &Matter::pingTimeout);
+
     connect(m_mrp, &MRP::retransmit, this, &Matter::mrpRetransmit);
     connect(m_mrp, &MRP::retransmitFailed, this, &Matter::mrpRetransmitFailed);
     connect(m_mrp, &MRP::sendStandaloneAck, this, &Matter::mrpSendStandaloneAck);
@@ -28,6 +44,8 @@ Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new 
     connect(m_btp, &BTP::messageReceived, this, &Matter::btpMessageReceived);
     connect(m_btp, &BTP::writeData, this, &Matter::btpWriteData);
 
+    connect(m_devices, &DeviceList::statusUpdated, this, &Matter::statusUpdated);
+
     m_searchTimer->setSingleShot(true);
     m_reconnectTimer->setSingleShot(true);
     m_pingTimer->start(10000);
@@ -39,14 +57,30 @@ Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new 
     m_pendingCommissionDevice = nullptr;
     m_pendingRemoveDevice = nullptr;
 
-    // start message counter from random value to avoid replay detection after restart
-    QByteArray counterBytes = Crypto::randomBytes(4);
-    memcpy(&m_messageCounter, counterBytes.constData(), 4);
-
     if (!m_udp->bind(QHostAddress::Any, m_port))
+    {
         logWarning << "Failed to bind UDP port" << m_port;
+        return;
+    }
+
+    logInfo << "Matter controller listening on port" << m_port;
+
+    if (m_devices->fabricKey().isEmpty())
+    {
+        QByteArray fabricKey = Crypto::randomBytes(32), ipk = Crypto::randomBytes(16), operationalKey = Crypto::randomBytes(32), rcacIdBytes = Crypto::randomBytes(8);
+        quint64 rootCAId;
+
+        logInfo << "Generated new fabric credentials";
+        memcpy(&rootCAId, rcacIdBytes.constData(), 8);
+
+        setFabricCredentials(fabricKey, rootCAId, ipk, operationalKey);
+        m_devices->setFabricCredentials(fabricKey, rootCAId, ipk, operationalKey, m_controllerNOC, m_controllerRCAC);
+        m_devices->store(true);
+    }
     else
-        logInfo << "Matter controller listening on port" << m_port;
+        setFabricCredentials(m_devices->fabricKey(), m_devices->rootCAId(), m_devices->ipk(), m_devices->operationalKey(), m_devices->controllerNOC(), m_devices->controllerRCAC());
+
+    m_devices->init();
 }
 
 void Matter::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC, const QByteArray &controllerRCAC)
@@ -1800,7 +1834,7 @@ void Matter::handleDeviceUnreachable(DeviceObject *device)
     {
         logWarning << device << "is unreachable, marking offline";
         device->setAvailability(Availability::Offline);
-        emit deviceOffline(device);
+        emit updateAvailability(device);
     }
 
     connectDevice(device);
@@ -1944,7 +1978,7 @@ void Matter::mdnsServiceFound(const MatterService &service)
 
 // --- PASE signal handlers ---
 
-void Matter::sendBleMessage(quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator, quint32 ackCounter)
+void Matter::sendBleMessage(quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator)
 {
     MatterProtocol::MessageHeader msgHeader;
     msgHeader.flags = 0x04; // source node ID present (required for BLE)
@@ -1997,7 +2031,7 @@ void Matter::paseSendPake1(const QByteArray &payload)
     const PendingCommission &commission = m_pendingCommissions.value(sessionId);
 
     if (m_bleCommissioning)
-        sendBleMessage(static_cast <quint8> (SecureChannelOpcode::PASEPake1), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, true, pase->lastPeerMessageCounter());
+        sendBleMessage(static_cast <quint8> (SecureChannelOpcode::PASEPake1), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, true);
     else
         sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::PASEPake1), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, commission.address, commission.port, true, pase->lastPeerMessageCounter());
 }
@@ -2017,7 +2051,7 @@ void Matter::paseSendPake3(const QByteArray &payload)
     const PendingCommission &commission = m_pendingCommissions.value(sessionId);
 
     if (m_bleCommissioning)
-        sendBleMessage(static_cast <quint8> (SecureChannelOpcode::PASEPake3), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, true, pase->lastPeerMessageCounter());
+        sendBleMessage(static_cast <quint8> (SecureChannelOpcode::PASEPake3), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, true);
     else
         sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::PASEPake3), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, commission.address, commission.port, true, pase->lastPeerMessageCounter());
 }
@@ -2152,7 +2186,7 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
     }
 
     m_caseDevice->setAvailability(Availability::Online);
-    emit deviceOnline(m_caseDevice);
+    emit updateAvailability(m_caseDevice);
 
     // re-subscribe after CASE reconnect
     if (!m_caseDevice->endpoints().isEmpty() && m_subscribedPaths.contains(m_caseDevice->nodeId()))

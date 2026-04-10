@@ -465,7 +465,7 @@ static void convertDNToMatterTLV(X509_NAME *name, MatterTLV::Encoder &enc)
         if (matterTag >= 0)
         {
             // force UInt64 encoding (8 bytes) as required by Matter cert spec
-            quint64 id = parseMatterIdFromHex(value);
+            quint64 id = qToLittleEndian(parseMatterIdFromHex(value));
             QByteArray raw;
             raw.append(static_cast <char> (0x27));                              // UnsignedInt 8-byte + context-specific
             raw.append(static_cast <char> (matterTag));
@@ -560,6 +560,7 @@ QByteArray Crypto::x509DerToMatterTLV(const QByteArray &derCert)
         if (ASN1_BIT_STRING_get_bit(ku, 6)) kuBits |= 0x0040; // cRLSign
 
         // Matter spec requires KeyUsage as UInt16
+        kuBits = qToLittleEndian(kuBits);
         QByteArray kuRaw;
         kuRaw.append(static_cast <char> (0x25));             // context tag + UInt16
         kuRaw.append(static_cast <char> (0x02));             // tag 2
