@@ -66,6 +66,9 @@ Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new 
 
     m_devices->init();
 
+    for (int i = 0; i < m_devices->count(); i++)
+        connectDeviceSignals(m_devices->at(i).data());
+
     if (m_devices->fabricKey().isEmpty())
     {
         QByteArray fabricKey = Crypto::randomBytes(32), ipk = Crypto::randomBytes(16), operationalKey = Crypto::randomBytes(32), rcacIdBytes = Crypto::randomBytes(8);
@@ -244,14 +247,172 @@ void Matter::subscribeDevice(DeviceObject *device, SessionInfo *session)
     sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::SubscribeRequest), static_cast <quint16> (ProtocolId::InteractionModel), subPayload, m_exchangeCounter++, true);
 }
 
+void Matter::connectDeviceSignals(DeviceObject *device)
+{
+    connect(device, &DeviceObject::deviceUpdated, this, &Matter::deviceUpdated, Qt::UniqueConnection);
+    connect(device, &DeviceObject::endpointUpdated, this, &Matter::endpointUpdated, Qt::UniqueConnection);
+}
+
+void Matter::connectDevice(const QString &code)
+{
+    quint32 passcode;
+    quint16 discriminator;
+    bool shortDiscriminator;
+
+    if (code.startsWith("MT:"))
+    {
+        if (!parseQRCode(code, passcode, discriminator))
+        {
+            logWarning << "Invalid QR code:" << code;
+            return;
+        }
+
+        shortDiscriminator = false;
+    }
+    else
+    {
+        if (!parseManualCode(code, passcode, discriminator))
+        {
+            logWarning << "Invalid manual code:" << code;
+            return;
+        }
+
+        shortDiscriminator = true;
+    }
+
+    quint64 nodeId = m_devices->generateNodeId();
+    logInfo << "Adding device, passcode:" << passcode << "discriminator:" << discriminator << (shortDiscriminator ? "(short)" : "(full)") << "nodeId:" << QString::number(nodeId, 16);
+    connectDevice(passcode, discriminator, shortDiscriminator, nodeId);
+}
+
+void Matter::discoverDevice(const QString &deviceName)
+{
+    const Device &device = m_devices->byName(deviceName);
+
+    if (device.isNull())
+    {
+        logWarning << "Device" << deviceName << "discovery failed, device not found";
+        return;
+    }
+
+    DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
+
+    emit deviceEvent(obj, Event::aboutToUpdate);
+    obj->endpoints().clear();
+    m_devices->store(true);
+    discoverDevice(obj);
+}
+
+void Matter::shareDevice(const QString &deviceName, quint16 timeout)
+{
+    const Device &device = m_devices->byName(deviceName);
+
+    if (device.isNull() || !device->active())
+    {
+        logWarning << "Device" << deviceName << "share failed, not found or offline";
+        return;
+    }
+
+    if (timeout < 180) timeout = 180;
+    if (timeout > 900) timeout = 900;
+
+    shareDevice(reinterpret_cast <DeviceObject*> (device.data()), timeout);
+}
+
+void Matter::updateDevice(const QString &deviceName, const QString &name, const QString &note, bool active, bool discovery, bool cloud)
+{
+    const Device &device = m_devices->byName(deviceName), &other = m_devices->byName(name);
+
+    if (device.isNull())
+    {
+        logWarning << "Device" << deviceName << "update failed, device not found";
+        return;
+    }
+
+    if (!name.isEmpty() && device != other && !other.isNull())
+    {
+        logWarning << device << "rename failed, name already in use";
+        emit deviceEvent(device.data(), Event::nameDuplicate);
+        return;
+    }
+
+    if (!name.isEmpty() && device->name() != name)
+    {
+        emit deviceEvent(device.data(), Event::aboutToUpdate);
+        device->setName(name);
+    }
+
+    device->setActive(active);
+    device->setDiscovery(discovery);
+    device->setCloud(cloud);
+    device->setNote(note);
+
+    logInfo << device << "successfully updated";
+    emit deviceEvent(device.data(), Event::updated);
+    m_devices->store(true);
+}
+
+void Matter::removeDevice(const QString &deviceName)
+{
+    const Device &device = m_devices->byName(deviceName);
+
+    if (device.isNull())
+    {
+        logWarning << "Device" << deviceName << "remove failed, device not found";
+        return;
+    }
+
+    removeDevice(reinterpret_cast <DeviceObject*> (device.data()));
+}
+
+void Matter::getProperties(const QString &deviceName)
+{
+    const Device &device = m_devices->byName(deviceName);
+
+    if (device.isNull())
+        return;
+
+    for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
+        emit endpointUpdated(reinterpret_cast <DeviceObject*> (device.data()), it.key());
+}
+
+void Matter::deviceAction(const QString &deviceName, quint8 endpointId, const QString &name, const QVariant &value)
+{
+    const Device &device = m_devices->byName(deviceName);
+
+    if (device.isNull() || !device->active())
+        return;
+
+    DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
+
+    if (endpointId)
+    {
+        sendCommand(obj, endpointId, name, value);
+        return;
+    }
+
+    for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
+        sendCommand(obj, it.key(), name, value);
+}
+
 void Matter::removeDevice(DeviceObject *device)
 {
     SessionInfo *session = m_sessions->findByPeerNodeId(device->nodeId());
 
     if (!session || !session->active)
     {
-        logWarning << device << "no active session";
-        emit deviceEvent(device, Event::removed);
+        int index = -1;
+        m_devices->byName(device->name(), &index);
+
+        logWarning << device << "no active session, removing forcefully";
+        emit deviceEvent(device, Event::removed, {{"success", false}});
+
+        if (index >= 0)
+        {
+            m_devices->removeAt(index);
+            m_devices->store(true);
+        }
+
         return;
     }
 
@@ -270,7 +431,7 @@ void Matter::removeDevice(DeviceObject *device)
     session->active = false;
 }
 
-void Matter::connectDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator, quint64 nodeId, bool mdnsOnly)
+void Matter::connectDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator, quint64 nodeId)
 {
     m_searching = true;
     m_searchPasscode = passcode;
@@ -284,7 +445,7 @@ void Matter::connectDevice(quint32 passcode, quint16 discriminator, bool shortDi
 
     m_mdns->browse();
 
-    if (!mdnsOnly && m_ble->available() && !m_wifiSSID.isEmpty())
+    if (m_ble->available() && !m_wifiSSID.isEmpty())
     {
         logInfo << "Scanning BLE and mDNS in parallel...";
         m_ble->scan();
@@ -1157,7 +1318,17 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             if (field.tag == 0) status = field.value.toUInt();
                         }
 
+                        int index = -1;
+                        m_devices->byName(m_pendingRemoveDevice->name(), &index);
+
                         emit deviceEvent(m_pendingRemoveDevice, Event::removed, {{"success", status == 0}});
+
+                        if (index >= 0)
+                        {
+                            m_devices->removeAt(index);
+                            m_devices->store(true);
+                        }
+
                         m_pendingRemoveDevice = nullptr;
                     }
                 }
@@ -1202,7 +1373,9 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                 {
                     if (response.path.clusterId == Clusters::GeneralCommissioning::Id && response.path.commandId == Clusters::GeneralCommissioning::Commands::CommissioningCompleteResponse)
                     {
-                        logInfo << m_pendingCommissionDevice << "commissioning complete";
+                        logInfo << m_pendingCommissionDevice << "commissioned successfully";
+                        m_devices->append(Device(m_pendingCommissionDevice));
+                        connectDeviceSignals(m_pendingCommissionDevice);
                         emit deviceEvent(m_pendingCommissionDevice, Event::added);
                         discoverDevice(m_pendingCommissionDevice);
                         m_pendingCommissionDevice = nullptr;
@@ -1464,9 +1637,12 @@ void Matter::continueCommissioning(PendingCommission &commission)
 
         case CommissioningState::Done:
         {
+            logInfo << commission.device << "commissioned successfully";
             logDebug(m_debug) << "CommissioningComplete success, starting CASE...";
             session->peerNodeId = commission.device->nodeId();
             session->active = false;
+            m_devices->append(Device(commission.device));
+            connectDeviceSignals(commission.device);
             emit deviceEvent(commission.device, Event::added);
 
             connectDevice(commission.device);

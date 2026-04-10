@@ -1,7 +1,7 @@
 #ifndef CONTROLLER_H
 #define CONTROLLER_H
 
-#define SERVICE_VERSION             "0.0.6"
+#define SERVICE_VERSION             "0.0.7"
 #define UPDATE_PROPERTIES_DELAY     1000
 
 #include "homed.h"
@@ -17,11 +17,11 @@ public:
     {
         restartService,
         connectDevice,
+        discoverDevice,
         shareDevice,
         updateDevice,
         removeDevice,
-        getProperties,
-        discoverDevice
+        getProperties
     };
 
     Controller(const QString &configFile);

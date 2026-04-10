@@ -26,7 +26,7 @@ public:
         deviceNotFound,
         connectFailed,
         nameDuplicate,
-        aboutToRename,
+        aboutToUpdate,
         added,
         updated,
         removed
@@ -46,13 +46,21 @@ public:
     inline DeviceList *devices(void) { return m_devices; }
     inline const char *eventName(Event event) { return m_events.valueToKey(static_cast <int> (event)); }
 
-    void connectDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator = false, quint64 nodeId = 0, bool mdnsOnly = false);
+    void connectDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator = false, quint64 nodeId = 0);
     void connectDevice(DeviceObject *device);
     void discoverDevice(DeviceObject *device);
     void removeDevice(DeviceObject *device);
     void shareDevice(DeviceObject *device, quint16 timeout = 300);
     void sendCommand(DeviceObject *device, quint8 endpointId, const QString &name, const QVariant &value);
     void readAttributes(DeviceObject *device, const QList <AttributePath> &paths);
+
+    void connectDevice(const QString &code);
+    void discoverDevice(const QString &deviceName);
+    void shareDevice(const QString &deviceName, quint16 timeout);
+    void updateDevice(const QString &deviceName, const QString &name, const QString &note, bool active, bool discovery, bool cloud);
+    void removeDevice(const QString &deviceName);
+    void getProperties(const QString &deviceName);
+    void deviceAction(const QString &deviceName, quint8 endpointId, const QString &name, const QVariant &value);
 
     static QString generateManualCode(quint32 passcode, quint16 discriminator);
     static QString generateQRCode(quint32 passcode, quint16 discriminator);
@@ -174,6 +182,7 @@ private:
     QMap <quint64, quint32> m_shareIterations;
 
     void handleDeviceUnreachable(DeviceObject *device);
+    void connectDeviceSignals(DeviceObject *device);
     QList <AttributePath> buildSubscribePaths(DeviceObject *device);
     void subscribeDevice(DeviceObject *device, SessionInfo *session);
     void sendBleMessage(quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator);
@@ -233,6 +242,8 @@ signals:
     void updateAvailability(DeviceObject *device);
     void deviceEvent(DeviceObject *device, Matter::Event event, const QJsonObject &json = QJsonObject());
     void deviceShared(DeviceObject *device, const QString &manualCode, const QString &qrCode, quint16 timeout);
+    void deviceUpdated(DeviceObject *device);
+    void endpointUpdated(DeviceObject *device, quint8 endpointId);
     void statusUpdated(const QJsonObject &json);
 
 };
