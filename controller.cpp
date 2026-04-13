@@ -16,7 +16,6 @@ Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, confi
     connect(m_matter, &Matter::deviceShared, this, &Controller::deviceShared); // TODO: do we need this?
     connect(m_matter, &Matter::deviceUpdated, this, &Controller::deviceUpdated);
     connect(m_matter, &Matter::endpointUpdated, this, &Controller::endpointUpdated);
-    connect(m_matter, &Matter::statusUpdated, this, &Controller::statusUpdated);
 
     for (int i = 0; i < m_matter->devices()->count(); i++)
         m_matter->connectDevice(m_matter->devices()->at(i).data()); // TODO: maybe add m_matter->init() for connect to devices
@@ -58,7 +57,7 @@ void Controller::mqttConnected(void)
         updateAvailability(m_matter->devices()->at(i).data());
 
     m_matter->devices()->store();
-    mqttPublishStatus();
+    mqttPublishService();
 }
 
 void Controller::mqttReceived(const QByteArray &message, const QMqttTopicName &topic)
@@ -209,9 +208,4 @@ void Controller::deviceShared(DeviceObject *device, const QString &manualCode, c
     QString topic = mqttTopic("device/%1/%2").arg(serviceTopic(), m_matter->devices()->names() ? device->name() : device->address());
     mqttPublish(topic, {{"status", "online"}, {"share", QJsonObject {{"manualCode", manualCode}, {"qrCode", qrCode}, {"expire", QDateTime::currentSecsSinceEpoch() + timeout}}}}, true); // TODO: check message format
     QTimer::singleShot(timeout * 1000, this, [this, topic, device]() { mqttPublish(topic, {{"status", device->availability() == Availability::Online ? "online" : "offline"}}, true); });
-}
-
-void Controller::statusUpdated(const QJsonObject &json)
-{
-    mqttPublish(mqttTopic("status/%1").arg(serviceTopic()), json, true);
 }

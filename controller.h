@@ -1,7 +1,7 @@
 #ifndef CONTROLLER_H
 #define CONTROLLER_H
 
-#define SERVICE_VERSION             "0.0.7"
+#define SERVICE_VERSION             "0.0.8"
 #define UPDATE_PROPERTIES_DELAY     1000
 
 #include "homed.h"
@@ -53,8 +53,6 @@ private slots:
 
     void deviceEvent(DeviceObject *device, Matter::Event event, const QJsonObject &json);
     void deviceShared(DeviceObject *device, const QString &manualCode, const QString &qrCode, quint16 timeout);
-
-    void statusUpdated(const QJsonObject &json);
 
 };
 

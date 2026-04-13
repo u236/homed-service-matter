@@ -43,8 +43,6 @@ Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new 
     connect(m_btp, &BTP::messageReceived, this, &Matter::btpMessageReceived);
     connect(m_btp, &BTP::writeData, this, &Matter::btpWriteData);
 
-    connect(m_devices, &DeviceList::statusUpdated, this, &Matter::statusUpdated);
-
     m_searchTimer->setSingleShot(true);
     m_reconnectTimer->setSingleShot(true);
     m_pingTimer->start(10000);

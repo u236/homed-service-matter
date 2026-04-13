@@ -244,7 +244,6 @@ signals:
     void deviceShared(DeviceObject *device, const QString &manualCode, const QString &qrCode, quint16 timeout);
     void deviceUpdated(DeviceObject *device);
     void endpointUpdated(DeviceObject *device, quint8 endpointId);
-    void statusUpdated(const QJsonObject &json);
 
 };
 
