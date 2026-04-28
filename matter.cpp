@@ -237,6 +237,9 @@ QList <AttributePath> Matter::buildSubscribePaths(DeviceObject *device)
                 paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorMode));
         }
 
+        if (clusters.contains(Clusters::PowerSource::Id))
+            paths.append(AttributePath(epId, Clusters::PowerSource::Id, Clusters::PowerSource::Attributes::BatPercentRemaining));
+
         if (clusters.contains(Clusters::TemperatureMeasurement::Id))
             paths.append(AttributePath(epId, Clusters::TemperatureMeasurement::Id, Clusters::TemperatureMeasurement::Attributes::MeasuredValue));
 
@@ -832,6 +835,8 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                                     dev->updateEndpoint(report.path.endpointId, "colorTemperature", report.value.toUInt());
                                 else if (report.path.clusterId == Clusters::ColorControl::Id && report.path.attributeId == Clusters::ColorControl::Attributes::ColorMode)
                                     dev->updateEndpoint(report.path.endpointId, "colorMode", report.value.toUInt() != 2);
+                                else if (report.path.clusterId == Clusters::PowerSource::Id && report.path.attributeId == Clusters::PowerSource::Attributes::BatPercentRemaining)
+                                    dev->updateEndpoint(report.path.endpointId, "battery", report.value.toDouble() / 2.0);
                                 else if (report.path.clusterId == Clusters::TemperatureMeasurement::Id && report.path.attributeId == Clusters::TemperatureMeasurement::Attributes::MeasuredValue)
                                     dev->updateEndpoint(report.path.endpointId, "temperature", report.value.toDouble() / 100.0);
                                 else if (report.path.clusterId == Clusters::RelativeHumidityMeasurement::Id && report.path.attributeId == Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue)
@@ -1114,6 +1119,14 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
             }
 
             logInfo << "Subscription established, id:" << subscriptionId << "maxInterval:" << maxInterval;
+
+            SessionInfo *subSession = m_sessions->findByLocalId(msgHeader.sessionId);
+            if (subSession)
+            {
+                Device device = m_devices->byNodeId(subSession->peerNodeId);
+                if (!device.isNull())
+                    reinterpret_cast <DeviceObject*> (device.data())->setSubMaxInterval(maxInterval);
+            }
             break;
         }
 
@@ -1844,6 +1857,19 @@ void Matter::readyRead(void)
 
             logDebug(m_debug) << "Decrypted message from session" << msgHeader.sessionId << "counter:" << msgHeader.messageCounter << "size:" << payload.size();
             session->lastSeen = QDateTime::currentMSecsSinceEpoch();
+
+            // device sent something — if previously marked offline (by subscription timeout), bring back online
+            Device backDevice = m_devices->byNodeId(session->peerNodeId);
+            if (!backDevice.isNull())
+            {
+                DeviceObject *bd = reinterpret_cast <DeviceObject*> (backDevice.data());
+                if (bd->availability() == Availability::Offline)
+                {
+                    logInfo << bd << "is back online";
+                    bd->setAvailability(Availability::Online);
+                    emit updateAvailability(bd);
+                }
+            }
         }
         else
         {
@@ -2064,7 +2090,27 @@ void Matter::pingTimeout(void)
             continue;
         }
 
-        if (session->lastSeen && now - session->lastSeen > 60000)
+        if (!session->lastSeen)
+            continue;
+
+        quint16 maxInt = device->subMaxInterval();
+
+        if (maxInt)
+        {
+            // device with active subscription — Matter guarantees report (or keepalive) every maxInterval seconds.
+            // if we miss that window, device is gone. don't ping (saves battery), don't tear down session
+            // (let device come back via incoming report when it wakes).
+            if (now - session->lastSeen > (maxInt + 30) * 1000)
+            {
+                logWarning << device << "no subscription reports for" << maxInt << "+30s, marking offline";
+                device->setAvailability(Availability::Offline);
+                emit updateAvailability(device);
+            }
+            continue;
+        }
+
+        // no subscription yet — fall back to legacy 60s read-as-ping
+        if (now - session->lastSeen > 60000)
         {
             QList <AttributePath> paths = {AttributePath(0, Clusters::BasicInformation::Id, Clusters::BasicInformation::Attributes::DataModelRevision)};
             QByteArray payload = InteractionModel::encodeReadRequest(paths);

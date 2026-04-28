@@ -207,6 +207,18 @@ namespace Clusters
         }
     }
 
+    namespace PowerSource // 0x002F
+    {
+        const quint32 Id = 0x002F;
+
+        namespace Attributes
+        {
+            const quint32 BatVoltage          = 0x000B;
+            const quint32 BatPercentRemaining = 0x000C;
+            const quint32 BatChargeLevel      = 0x000E;
+        }
+    }
+
     namespace TemperatureMeasurement // 0x0402
     {
         const quint32 Id = 0x0402;

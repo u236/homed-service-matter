@@ -122,6 +122,9 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QL
         }
     }
 
+    if (clusters.contains(Clusters::PowerSource::Id))
+        addExpose(new SensorObject("battery"), "battery");
+
     if (clusters.contains(Clusters::TemperatureMeasurement::Id))
         addExpose(new SensorObject("temperature"), "temperature");
 
