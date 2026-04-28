@@ -53,6 +53,11 @@ namespace Clusters
     {
         const quint32 Id = 0x0031;
 
+        namespace Attributes
+        {
+            const quint32 FeatureMap                 = 0xFFFC;
+        }
+
         namespace Commands
         {
             const quint32 AddOrUpdateWiFiNetwork     = 0x0002;

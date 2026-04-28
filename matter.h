@@ -72,6 +72,7 @@ private:
     {
         Idle,
         PASE,
+        ReadNetworkType,
         AddWiFiNetwork,
         AddThreadNetwork,
         ConnectNetwork,
@@ -106,8 +107,10 @@ private:
         QByteArray devicePublicKey;
         QByteArray rcacTLV;
         QByteArray nocTLV;
+        quint32 networkFeatureMap;
+        bool useThread;
 
-        PendingCommission(void) : pase(nullptr), port(0), exchangeId(0), localSessionId(0), passcode(0), assignedNodeId(0), state(CommissioningState::Idle), device(nullptr), lastPeerCounter(0), timedInvokePending(false) {}
+        PendingCommission(void) : pase(nullptr), port(0), exchangeId(0), localSessionId(0), passcode(0), assignedNodeId(0), state(CommissioningState::Idle), device(nullptr), lastPeerCounter(0), timedInvokePending(false), networkFeatureMap(0), useThread(false) {}
     };
 
     QUdpSocket *m_udp;

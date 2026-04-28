@@ -887,6 +887,11 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             }
                         }
                     }
+
+                    if (commission.state == CommissioningState::ReadNetworkType && report.path.clusterId == Clusters::NetworkCommissioning::Id && report.path.attributeId == Clusters::NetworkCommissioning::Attributes::FeatureMap)
+                    {
+                        commission.networkFeatureMap = report.value.toUInt();
+                    }
                 }
             }
 
@@ -1045,6 +1050,37 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                     continueCommissioning(it.value());
                     break;
                 }
+
+                if (it.value().state == CommissioningState::ReadNetworkType)
+                {
+                    quint32 features = it.value().networkFeatureMap;
+                    bool hasWiFi   = features & 0x01;
+                    bool hasThread = features & 0x02;
+                    bool hasEth    = features & 0x04;
+
+                    logInfo << "Device NetworkCommissioning features:" << QString("WiFi=%1 Thread=%2 Ethernet=%3").arg(hasWiFi).arg(hasThread).arg(hasEth);
+
+                    if (hasThread && !m_threadDataset.isEmpty())
+                    {
+                        logInfo << "Sending Thread Operational Dataset over BLE...";
+                        it.value().useThread = true;
+                        it.value().state = CommissioningState::AddThreadNetwork;
+                    }
+                    else if (hasWiFi && !m_wifiSSID.isEmpty())
+                    {
+                        logInfo << "Sending WiFi credentials over BLE...";
+                        it.value().useThread = false;
+                        it.value().state = CommissioningState::AddWiFiNetwork;
+                    }
+                    else
+                    {
+                        logWarning << "No matching credentials for device features (WiFi=" << hasWiFi << "Thread=" << hasThread << "Ethernet=" << hasEth << "), commissioning will fail";
+                        break;
+                    }
+
+                    continueCommissioning(it.value());
+                    break;
+                }
             }
 
             break;
@@ -1168,7 +1204,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             break;
                         }
 
-                        logInfo << commission.device << (m_threadDataset.isEmpty() ? "connected to WiFi, starting CASE..." : "joined Thread mesh, starting CASE...");
+                        logInfo << commission.device << (commission.useThread ? "joined Thread mesh, starting CASE..." : "connected to WiFi, starting CASE...");
                         m_bleCommissioning = false;
                         m_ble->disconnectDevice();
                         m_caseNeedsCommissioningComplete = true;
@@ -1303,20 +1339,9 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                         if (m_bleCommissioning)
                         {
-                            // BLE path: push network credentials (device will advertise _matter._tcp once joined)
+                            // BLE path: ask the device which network type it supports, then push matching credentials
                             emit deviceEvent(commission.device, Event::networkSetup);
-
-                            if (!m_threadDataset.isEmpty())
-                            {
-                                logInfo << "Sending Thread Operational Dataset over BLE...";
-                                commission.state = CommissioningState::AddThreadNetwork;
-                            }
-                            else
-                            {
-                                logInfo << "Sending WiFi credentials over BLE...";
-                                commission.state = CommissioningState::AddWiFiNetwork;
-                            }
-
+                            commission.state = CommissioningState::ReadNetworkType;
                             continueCommissioning(commission);
                         }
                         else
@@ -1489,6 +1514,16 @@ void Matter::continueCommissioning(PendingCommission &commission)
 
     switch (commission.state)
     {
+        case CommissioningState::ReadNetworkType:
+        {
+            logInfo << "Reading NetworkCommissioning FeatureMap...";
+
+            QList <AttributePath> paths = {AttributePath(0, Clusters::NetworkCommissioning::Id, Clusters::NetworkCommissioning::Attributes::FeatureMap)};
+            QByteArray payload = InteractionModel::encodeReadRequest(paths);
+            sendEncryptedBle(session, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            break;
+        }
+
         case CommissioningState::AddWiFiNetwork:
         {
             logInfo << "Sending AddOrUpdateWiFiNetwork...";
@@ -1524,7 +1559,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
         {
             logInfo << "Sending ConnectNetwork...";
 
-            QByteArray networkId = m_threadDataset.isEmpty() ? m_wifiSSID.toUtf8() : m_threadExtPanId;
+            QByteArray networkId = commission.useThread ? m_threadExtPanId : m_wifiSSID.toUtf8();
 
             MatterTLV::Encoder fields;
             fields.openStructure();
