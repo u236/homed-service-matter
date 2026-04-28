@@ -64,6 +64,7 @@ public:
 
     static QString generateManualCode(quint32 passcode, quint16 discriminator);
     static QString generateQRCode(quint32 passcode, quint16 discriminator);
+    static QByteArray extractThreadExtPanId(const QByteArray &dataset);
 
 private:
 
@@ -72,6 +73,7 @@ private:
         Idle,
         PASE,
         AddWiFiNetwork,
+        AddThreadNetwork,
         ConnectNetwork,
         ArmFailSafe,
         SetRegulatoryConfig,
@@ -159,6 +161,8 @@ private:
 
     QString m_wifiSSID;
     QString m_wifiPassword;
+    QByteArray m_threadDataset;
+    QByteArray m_threadExtPanId;
     bool m_bleCommissioning;
 
     QMap <quint16, PendingCommission> m_pendingCommissions;

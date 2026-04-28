@@ -99,7 +99,7 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QL
             if (clusters.contains(Clusters::LevelControl::Id))
                 options.append("level");
 
-            if (caps & 0x0009)
+            if (caps & 0x0001)
                 options.append("color");
 
             if (caps & 0x0010)
@@ -110,7 +110,7 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QL
                     device->options().insert(QString("colorTemperature_%1").arg(endpointId), QMap <QString, QVariant> {{"min", ep->meta().value("colorTempMin")}, {"max", ep->meta().value("colorTempMax")}});
             }
 
-            if ((caps & 0x0019) == 0x0019)
+            if ((caps & 0x0011) == 0x0011)
                 options.append("colorMode");
 
             addExpose(new LightObject, "light");

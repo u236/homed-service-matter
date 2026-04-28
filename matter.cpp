@@ -1,5 +1,6 @@
 // NOT REWIEWED
 
+#include <QProcess>
 #include <QtEndian>
 #include "matter.h"
 #include "color.h"
@@ -20,6 +21,28 @@ Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new 
 
     m_wifiSSID = config->value("wifi/ssid").toString();
     m_wifiPassword = config->value("wifi/password").toString();
+
+    QString borderRouter = config->value("thread/borderRouter").toString();
+
+    if (!borderRouter.isEmpty())
+    {
+        QProcess curl;
+        curl.start("curl", {"-fsS", "-H", "Accept: text/plain", "--max-time", "5", borderRouter + "/node/dataset/active"});
+        curl.waitForFinished(6000);
+
+        if (curl.exitStatus() == QProcess::NormalExit && curl.exitCode() == 0)
+        {
+            m_threadDataset = QByteArray::fromHex(curl.readAllStandardOutput().trimmed());
+            m_threadExtPanId = extractThreadExtPanId(m_threadDataset);
+
+            if (m_threadExtPanId.isEmpty())
+                logWarning << "Failed to extract Extended PAN ID from Thread dataset fetched from" << borderRouter;
+            else
+                logInfo << "Thread dataset fetched from" << borderRouter << ", ExtPanId:" << m_threadExtPanId.toHex();
+        }
+        else
+            logWarning << "Failed to fetch Thread dataset from" << borderRouter << ":" << curl.readAllStandardError().trimmed();
+    }
 
     // move to devices class
     m_devices->setNames(config->value("mqtt/names", false).toBool());
@@ -1109,9 +1132,9 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                 {
                     PendingCommission &commission = it.value();
 
-                    if (commission.state == CommissioningState::AddWiFiNetwork && response.path.clusterId == Clusters::NetworkCommissioning::Id && response.path.commandId == Clusters::NetworkCommissioning::Commands::NetworkConfigResponse)
+                    if ((commission.state == CommissioningState::AddWiFiNetwork || commission.state == CommissioningState::AddThreadNetwork) && response.path.clusterId == Clusters::NetworkCommissioning::Id && response.path.commandId == Clusters::NetworkCommissioning::Commands::NetworkConfigResponse)
                     {
-                        logInfo << "WiFi network added, connecting...";
+                        logInfo << "Network credentials added, connecting...";
                         commission.state = CommissioningState::ConnectNetwork;
                         continueCommissioning(commission);
                         break;
@@ -1132,7 +1155,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             break;
                         }
 
-                        logInfo << commission.device << "connected to WiFi, starting CASE...";
+                        logInfo << commission.device << (m_threadDataset.isEmpty() ? "connected to WiFi, starting CASE..." : "joined Thread mesh, starting CASE...");
                         m_bleCommissioning = false;
                         m_ble->disconnectDevice();
                         m_caseNeedsCommissioningComplete = true;
@@ -1267,10 +1290,20 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                         if (m_bleCommissioning)
                         {
-                            // BLE path: send WiFi credentials now (device has NOC, will advertise _matter._tcp after WiFi)
-                            logInfo << "Sending WiFi credentials over BLE...";
+                            // BLE path: push network credentials (device will advertise _matter._tcp once joined)
                             emit deviceEvent(commission.device, Event::networkSetup);
-                            commission.state = CommissioningState::AddWiFiNetwork;
+
+                            if (!m_threadDataset.isEmpty())
+                            {
+                                logInfo << "Sending Thread Operational Dataset over BLE...";
+                                commission.state = CommissioningState::AddThreadNetwork;
+                            }
+                            else
+                            {
+                                logInfo << "Sending WiFi credentials over BLE...";
+                                commission.state = CommissioningState::AddWiFiNetwork;
+                            }
+
                             continueCommissioning(commission);
                         }
                         else
@@ -1459,13 +1492,30 @@ void Matter::continueCommissioning(PendingCommission &commission)
             break;
         }
 
+        case CommissioningState::AddThreadNetwork:
+        {
+            logInfo << "Sending AddOrUpdateThreadNetwork...";
+
+            MatterTLV::Encoder fields;
+            fields.openStructure();
+            fields.encodeByteString(0, m_threadDataset);
+            fields.encodeUnsignedInt(1, 1); // breadcrumb
+            fields.closeContainer();
+
+            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::NetworkCommissioning::Id, Clusters::NetworkCommissioning::Commands::AddOrUpdateThreadNetwork), fields);
+            sendEncryptedBle(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            break;
+        }
+
         case CommissioningState::ConnectNetwork:
         {
             logInfo << "Sending ConnectNetwork...";
 
+            QByteArray networkId = m_threadDataset.isEmpty() ? m_wifiSSID.toUtf8() : m_threadExtPanId;
+
             MatterTLV::Encoder fields;
             fields.openStructure();
-            fields.encodeByteString(0, m_wifiSSID.toUtf8());
+            fields.encodeByteString(0, networkId);
             fields.encodeUnsignedInt(1, 1); // breadcrumb
             fields.closeContainer();
 
@@ -2602,6 +2652,37 @@ QString Matter::generateQRCode(quint32 passcode, quint16 discriminator)
     memcpy(data.data() + 8, &highLE, 3);
 
     return "MT:" + base38Encode(data);
+}
+
+QByteArray Matter::extractThreadExtPanId(const QByteArray &dataset)
+{
+    // Thread MeshCoP TLV: <type:1><length:1, or 0xff + 2-byte length><value>; type 2 = ExtendedPanId
+    int i = 0;
+
+    while (i + 1 < dataset.size())
+    {
+        quint8 type = static_cast <quint8> (dataset[i++]);
+        quint16 length = static_cast <quint8> (dataset[i++]);
+
+        if (length == 0xFF)
+        {
+            if (i + 2 > dataset.size())
+                return QByteArray();
+
+            length = (static_cast <quint8> (dataset[i]) << 8) | static_cast <quint8> (dataset[i + 1]);
+            i += 2;
+        }
+
+        if (i + length > dataset.size())
+            return QByteArray();
+
+        if (type == 2 && length == 8)
+            return dataset.mid(i, 8);
+
+        i += length;
+    }
+
+    return QByteArray();
 }
 
 void Matter::shareDevice(DeviceObject *device, quint16 timeout)
