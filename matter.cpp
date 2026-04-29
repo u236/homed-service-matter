@@ -497,8 +497,8 @@ void Matter::sendCommand(DeviceObject *device, quint8 endpointId, const QString 
 
     if (!session)
     {
-        logWarning << device << "no active session";
-        handleDeviceUnreachable(device);
+        logWarning << device << "no active session, starting CASE";
+        connectDevice(device);
         return;
     }
 
@@ -552,8 +552,8 @@ void Matter::readAttributes(DeviceObject *device, const QList <AttributePath> &p
 
     if (!session)
     {
-        logWarning << device << "no active session";
-        handleDeviceUnreachable(device);
+        logWarning << device << "no active session, starting CASE";
+        connectDevice(device);
         return;
     }
 
@@ -2317,9 +2317,16 @@ void Matter::handleDeviceUnreachable(DeviceObject *device)
         emit updateAvailability(device);
     }
 
-    // schedule the same 10-15s retry as caseFailed — let scheduleReconnect drive it instead of hammering connectDevice synchronously
-    qint64 jitterMs = QRandomGenerator::global()->bounded(5000);
-    device->setNextReconnectAt(QDateTime::currentMSecsSinceEpoch() + 10000 + jitterMs);
+    // schedule a retry only if there isn't already one pending, otherwise repeated unreachable triggers (ping, MRP)
+    // would keep pushing the deadline forward and CASE would never fire
+    qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+    if (device->nextReconnectAt() == 0 || device->nextReconnectAt() < now)
+    {
+        qint64 jitterMs = QRandomGenerator::global()->bounded(5000);
+        device->setNextReconnectAt(now + 10000 + jitterMs);
+    }
+
     scheduleReconnect();
 }
 
