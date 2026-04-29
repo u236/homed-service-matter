@@ -39,6 +39,12 @@ void Controller::publishProperties(const Device &device)
         endpointUpdated(device.data(), it.key());
 }
 
+void Controller::quit(void)
+{
+    delete m_matter;
+    HOMEd::quit();
+}
+
 void Controller::mqttConnected(void)
 {
     mqttSubscribe(mqttTopic("command/%1").arg(serviceTopic()));

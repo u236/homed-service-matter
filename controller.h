@@ -40,6 +40,10 @@ private:
     void publishExposes(DeviceObject *device, bool remove = false);
     void publishProperties(const Device &device);
 
+public slots:
+
+    void quit(void) override;
+
 private slots:
 
     void mqttConnected(void) override;

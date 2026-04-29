@@ -35,6 +35,8 @@ public:
     Q_ENUM(Event)
 
     Matter(QSettings *config, QObject *parent);
+    ~Matter(void);
+
     void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC = QByteArray(), const QByteArray &controllerRCAC = QByteArray());
 
     inline QByteArray fabricKey(void) { return m_fabricKey; }

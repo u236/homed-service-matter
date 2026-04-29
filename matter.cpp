@@ -105,6 +105,11 @@ Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new 
         setFabricCredentials(m_devices->fabricKey(), m_devices->rootCAId(), m_devices->ipk(), m_devices->operationalKey(), m_devices->controllerNOC(), m_devices->controllerRCAC());
 }
 
+Matter::~Matter(void)
+{
+    delete m_devices;
+}
+
 void Matter::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC, const QByteArray &controllerRCAC)
 {
     m_fabricKey = fabricKey;
