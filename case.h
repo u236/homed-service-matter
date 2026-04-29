@@ -176,7 +176,7 @@ signals:
     void sendSigma1(const QByteArray &tlvPayload, quint16 localSessionId);
     void sendSigma3(const QByteArray &tlvPayload);
     void established(quint16 localSessionId, quint16 peerSessionId);
-    void failed(const QString &reason, bool transient = false);
+    void failed(const QString &reason);
 
 };
 

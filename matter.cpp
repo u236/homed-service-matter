@@ -2161,9 +2161,13 @@ void Matter::scheduleReconnect(void)
     }
 
     if (nearest == -1)
+    {
+        logDebug(m_debug) << "scheduleReconnect: no eligible offline devices";
         return;
+    }
 
     qint64 delay = qMax <qint64> (0, nearest - now);
+    logDebug(m_debug) << "scheduleReconnect: timer set for" << delay << "ms";
     m_reconnectTimer->start(static_cast <int> (delay));
 }
 
@@ -2174,6 +2178,7 @@ void Matter::reconnectTimeout(void)
 
     qint64 now = QDateTime::currentMSecsSinceEpoch();
     bool hasOffline = false;
+    logDebug(m_debug) << "reconnectTimeout fired";
 
     for (int i = 0; i < m_devices->count(); i++)
     {
@@ -2289,8 +2294,10 @@ void Matter::handleDeviceUnreachable(DeviceObject *device)
         emit updateAvailability(device);
     }
 
-    connectDevice(device);
-    recordReconnectFailure(device);
+    // schedule the same 10-15s retry as caseFailed — let scheduleReconnect drive it instead of hammering connectDevice synchronously
+    qint64 jitterMs = QRandomGenerator::global()->bounded(5000);
+    device->setNextReconnectAt(QDateTime::currentMSecsSinceEpoch() + 10000 + jitterMs);
+    scheduleReconnect();
 }
 
 void Matter::mrpRetransmitFailed(quint32 messageCounter, quint16 exchangeId, const QHostAddress &address, quint16 port)
@@ -2300,15 +2307,13 @@ void Matter::mrpRetransmitFailed(quint32 messageCounter, quint16 exchangeId, con
     // check if this is a pending CASE handshake failure — match by exchangeId so the right CASESession gets the failure
     if (m_pendingCASEs.contains(exchangeId))
     {
-        // we can't call caseFailed directly without sender — handle inline
         PendingCASE pending = m_pendingCASEs.take(exchangeId);
         DeviceObject *failedDevice = pending.device;
         pending.session->deleteLater();
 
-        // peer never responded — most likely it was asleep when our Sigma1 went out, not actually dead — retry sooner without bumping backoff
         qint64 jitterMs = QRandomGenerator::global()->bounded(5000);
-        failedDevice->setNextReconnectAt(QDateTime::currentMSecsSinceEpoch() + 5000 + jitterMs);
-        logDebug(m_debug) << failedDevice << "MRP retransmit failed during CASE, retry in 5-10s";
+        failedDevice->setNextReconnectAt(QDateTime::currentMSecsSinceEpoch() + 10000 + jitterMs);
+        logDebug(m_debug) << failedDevice << "MRP retransmit failed during CASE, retry in 10-15s";
         scheduleReconnect();
         return;
     }
@@ -2686,7 +2691,7 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
     m_pendingCASEs.remove(exchangeId);
 }
 
-void Matter::caseFailed(const QString &reason, bool transient)
+void Matter::caseFailed(const QString &reason)
 {
     logWarning << "CASE failed:" << reason;
 
@@ -2711,17 +2716,14 @@ void Matter::caseFailed(const QString &reason, bool transient)
     if (exchangeId)
         m_pendingCASEs.remove(exchangeId);
 
-    if (transient && failedDevice)
+    if (failedDevice)
     {
-        // peer alive but transiently busy — retry in 5-10s without bumping the backoff counter
+        // simple retry policy: 10-15s for every CASE failure regardless of cause — small, predictable, recovers from sleeps fast,
+        // and at home scale (a handful of devices) the network cost of a stuck Sigma1 every ~12s is negligible
         qint64 jitterMs = QRandomGenerator::global()->bounded(5000);
-        failedDevice->setNextReconnectAt(QDateTime::currentMSecsSinceEpoch() + 5000 + jitterMs);
-        logDebug(m_debug) << failedDevice << "transient CASE failure, retry in 5-10s";
+        failedDevice->setNextReconnectAt(QDateTime::currentMSecsSinceEpoch() + 10000 + jitterMs);
+        logDebug(m_debug) << failedDevice << "CASE retry in 10-15s";
         scheduleReconnect();
-    }
-    else
-    {
-        recordReconnectFailure(failedDevice);
     }
 }
 

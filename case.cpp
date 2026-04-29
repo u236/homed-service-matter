@@ -340,12 +340,7 @@ void CASESession::handleStatusReport(const QByteArray &payload)
     {
         m_state = State::Failed;
         logWarning << "CASE: failed with general code:" << generalCode << "protocol code:" << protocolCode;
-        // transient cases: peer alive but answer doesn't establish a session — retry sooner without bumping backoff
-        //   - general=8 protocol=4 = SecureChannel Busy
-        //   - general=0 protocol=0 in non-WaitingStatusReport state = stray success StatusReport (likely a late retransmit from a previous CASE)
-        bool transient = (generalCode == 8 && protocolId == 0 && protocolCode == 4)
-                      || (generalCode == 0 && protocolCode == 0);
-        emit failed(QString("CASE StatusReport error: general=%1 protocol=%2").arg(generalCode).arg(protocolCode), transient);
+        emit failed(QString("CASE StatusReport error: general=%1 protocol=%2").arg(generalCode).arg(protocolCode));
     }
 }
 
@@ -355,7 +350,6 @@ void CASESession::timeout(void)
     {
         m_state = State::Failed;
         logWarning << "CASE: session timeout";
-        // peer might be alive but stuck mid-handshake (e.g. ACK'd Sigma1 then never sent Sigma2) — retry sooner without bumping backoff
-        emit failed("CASE timeout", true);
+        emit failed("CASE timeout");
     }
 }
