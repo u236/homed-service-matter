@@ -41,14 +41,13 @@ struct SessionInfo
     quint32 localMessageCounter;
 
     bool active;
-    qint64 lastSeen;
 
     // peer-announced MRP timeouts from SessionParameters TLV in Sigma1/Sigma2 (Matter §4.11.2.2.1, milliseconds)
     quint32 idleInterval;
     quint32 activeInterval;
     quint16 activeThreshold;
 
-    SessionInfo(void) : localSessionId(0), peerSessionId(0), peerPort(0), peerNodeId(0), localMessageCounter(0), active(false), lastSeen(0), idleInterval(500), activeInterval(300), activeThreshold(4000) {}
+    SessionInfo(void) : localSessionId(0), peerSessionId(0), peerPort(0), peerNodeId(0), localMessageCounter(0), active(false), idleInterval(500), activeInterval(300), activeThreshold(4000) {}
 };
 
 class SessionManager : public QObject

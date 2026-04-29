@@ -2,14 +2,15 @@
 #include "expose.h"
 #include "logger.h"
 
-Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, configFile), m_timer(new QTimer(this)), m_matter(new Matter(getConfig(), this)), m_commands(QMetaEnum::fromType <Command> ())
+Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, configFile), m_deviceDataTimer(new QTimer(this)), m_propertiesTimer(new QTimer(this)), m_matter(new Matter(getConfig(), this)), m_commands(QMetaEnum::fromType <Command> ())
 {
     m_haPrefix = getConfig()->value("homeassistant/prefix", "homeassistant").toString();
     m_haStatus = getConfig()->value("homeassistant/status", "homeassistant/status").toString();
     m_haEnabled = getConfig()->value("homeassistant/enabled", false).toBool();
     m_haUpdate = getConfig()->value("homeassistant/update", false).toBool();
 
-    connect(m_timer, &QTimer::timeout, this, &Controller::updateProperties);
+    connect(m_deviceDataTimer, &QTimer::timeout, this, &Controller::updateDeviceData);
+    connect(m_propertiesTimer, &QTimer::timeout, this, &Controller::updateProperties);
 
     connect(m_matter, &Matter::updateAvailability, this, &Controller::updateAvailability);
     connect(m_matter, &Matter::deviceEvent, this, &Controller::deviceEvent);
@@ -20,7 +21,8 @@ Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, confi
     for (int i = 0; i < m_matter->devices()->count(); i++)
         m_matter->connectDevice(m_matter->devices()->at(i).data()); // TODO: maybe add m_matter->init() for connect to devices
 
-    m_timer->setSingleShot(true);
+    m_deviceDataTimer->start(UPDATE_DEVICE_DATA_INTERVAL);
+    m_propertiesTimer->setSingleShot(true);
 }
 
 void Controller::publishExposes(DeviceObject *device, bool remove)
@@ -30,7 +32,7 @@ void Controller::publishExposes(DeviceObject *device, bool remove)
     if (remove)
         return;
 
-    m_timer->start(UPDATE_PROPERTIES_DELAY);
+    m_propertiesTimer->start(UPDATE_PROPERTIES_DELAY);
 }
 
 void Controller::publishProperties(const Device &device)
@@ -123,14 +125,14 @@ void Controller::mqttReceived(const QByteArray &message, const QMqttTopicName &t
         if (message != "online")
             return;
 
-        m_timer->start(UPDATE_PROPERTIES_DELAY);
+        m_propertiesTimer->start(UPDATE_PROPERTIES_DELAY);
     }
 }
 
 void Controller::updateAvailability(DeviceObject *device)
 {
     QString status = device->availability() == Availability::Online ? "online" : "offline";
-    mqttPublish(mqttTopic("device/%1/%2").arg(serviceTopic(), m_matter->devices()->names() ? device->name() : device->address()), {{"status", status}}, true);
+    mqttPublish(mqttTopic("device/%1/%2").arg(serviceTopic(), m_matter->devices()->names() ? device->name() : device->address()), {{"lastSeen", device->lastSeen()}, {"status", status}}, true);
     logInfo << device << "is" << status;
 }
 
@@ -138,6 +140,20 @@ void Controller::updateProperties(void)
 {
     for (int i = 0; i < m_matter->devices()->count(); i++)
         publishProperties(m_matter->devices()->at(i));
+}
+
+void Controller::updateDeviceData(void)
+{
+    for (int i = 0; i < m_matter->devices()->count(); i++)
+    {
+        const Device &device = m_matter->devices()->at(i);
+
+        if (m_lastSeen.value(device->nodeId()) == device->lastSeen())
+            continue;
+
+        mqttPublish(mqttTopic("device/%1/%2").arg(serviceTopic(), m_matter->devices()->names() ? device->name() : device->address()), {{"lastSeen", device->lastSeen()}, {"status", device->availability() == Availability::Online ? "online" : "offline"}}, true);
+        m_lastSeen.insert(device->nodeId(), device->lastSeen());
+    }
 }
 
 void Controller::deviceUpdated(DeviceObject *device)
@@ -194,7 +210,7 @@ void Controller::deviceEvent(DeviceObject *device, Matter::Event event, const QJ
         case Matter::Event::updated:
 
             if (device->availability() != Availability::Unknown)
-                mqttPublish(mqttTopic("device/%1/%2").arg(serviceTopic(), m_matter->devices()->names() ? device->name() : device->address()), {{"status", device->availability() == Availability::Online ? "online" : "offline"}}, true);
+                mqttPublish(mqttTopic("device/%1/%2").arg(serviceTopic(), m_matter->devices()->names() ? device->name() : device->address()), {{"lastSeen", device->lastSeen()}, {"status", device->availability() == Availability::Online ? "online" : "offline"}}, true);
 
             break;
 

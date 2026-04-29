@@ -89,6 +89,47 @@ Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new 
     for (int i = 0; i < m_devices->count(); i++)
         connectDeviceSignals(m_devices->at(i).data());
 
+    // restore persisted secure sessions ONLY for battery-powered devices: for them CASE on restart wakes the radio
+    // (battery hit) and waits tens of seconds on slow MRP intervals; mains devices fall through to normal CASE +
+    // resumption which is ~200ms anyway, with no risk of stale-session MRP timeout
+    for (int i = 0; i < m_devices->count(); i++)
+    {
+        DeviceObject *device = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
+
+        if (!device->hasPersistedSession() || !device->batteryPowered())
+            continue;
+
+        SessionInfo session;
+        session.localSessionId = device->sessionLocalId();
+        session.peerSessionId = device->sessionPeerId();
+        session.i2rKey = device->sessionI2RKey();
+        session.r2iKey = device->sessionR2IKey();
+        session.attestationChallenge = device->sessionAttestation();
+        session.peerNodeId = device->nodeId();
+        session.peerAddress = device->networkAddress();
+        session.peerPort = device->networkPort();
+        // safety margin: counter must be strictly monotonic across restarts; bump past anything that may have been used
+        // since the last persist. 10000 is overkill for our tx rate but cheap (32-bit space ~4B values).
+        session.localMessageCounter = device->sessionLocalCounter() + 10000;
+        session.idleInterval = device->sessionIdleInterval();
+        session.activeInterval = device->sessionActiveInterval();
+        session.activeThreshold = device->sessionActiveThreshold();
+        session.active = true;
+
+        m_sessions->addSession(session);
+
+        // bump counter so a new CASE (if needed later) won't collide with the restored localSessionId
+        if (m_sessionCounter <= session.localSessionId)
+            m_sessionCounter = session.localSessionId + 1;
+
+        logInfo << device << "restored secure session, local:" << session.localSessionId << "peer:" << session.peerSessionId << "counter from:" << session.localMessageCounter;
+
+        // peer's subscription state may have timed out while we were down (max interval passed without our acks),
+        // re-subscribe to be safe — if the old subscription still exists peer will replace it
+        if (!device->endpoints().isEmpty())
+            subscribeDevice(device, m_sessions->findByLocalId(session.localSessionId));
+    }
+
     if (m_devices->fabricKey().isEmpty())
     {
         QByteArray fabricKey = Crypto::randomBytes(32), ipk = Crypto::randomBytes(16), operationalKey = Crypto::randomBytes(32), rcacIdBytes = Crypto::randomBytes(8);
@@ -1921,16 +1962,16 @@ void Matter::readyRead(void)
             }
 
             logDebug(m_debug) << "Decrypted message from session" << msgHeader.sessionId << "counter:" << msgHeader.messageCounter << "size:" << payload.size();
-            session->lastSeen = QDateTime::currentMSecsSinceEpoch();
 
-            // device sent something — if previously marked offline (by subscription timeout), bring back online
+            // device sent something — refresh lastSeen and bring online if not already (covers both Offline → Online and
+            // Unknown → Online for sessions restored from disk that hadn't seen any traffic yet)
             Device backDevice = m_devices->byNodeId(session->peerNodeId);
             if (!backDevice.isNull())
             {
                 DeviceObject *bd = reinterpret_cast <DeviceObject*> (backDevice.data());
-                if (bd->availability() == Availability::Offline)
+                bd->updateLastSeen();
+                if (bd->availability() != Availability::Online)
                 {
-                    logInfo << bd << "is back online";
                     bd->setAvailability(Availability::Online);
                     resetReconnectBackoff(bd);
                     emit updateAvailability(bd);
@@ -2092,7 +2133,6 @@ void Matter::btpMessageReceived(const QByteArray &message)
             return;
 
         payload = decrypted.mid(payloadOffset);
-        session->lastSeen = QDateTime::currentMSecsSinceEpoch();
     }
     else
     {
@@ -2112,31 +2152,11 @@ void Matter::btpWriteData(const QByteArray &data)
     m_ble->write(data);
 }
 
-void Matter::recordReconnectFailure(DeviceObject *device)
-{
-    if (!device)
-        return;
-
-    quint8 failures = device->reconnectFailures() + 1;
-    device->setReconnectFailures(failures);
-
-    // exponential backoff capped at 5 min: 30, 60, 120, 240, 300, 300...; ±5s jitter to avoid phase-lock with sleep cycle
-    quint8 shift = qMin <quint8> (failures - 1, 4);
-    qint64 baseSec = qMin <qint64> (30LL << shift, 300LL);
-    qint64 jitterSec = static_cast <qint64> (QRandomGenerator::global()->bounded(11)) - 5;
-    qint64 delaySec = baseSec + jitterSec;
-
-    device->setNextReconnectAt(QDateTime::currentMSecsSinceEpoch() + delaySec * 1000);
-    logDebug(m_debug) << device << "reconnect scheduled in" << delaySec << "seconds (failure" << failures << ")";
-    scheduleReconnect();
-}
-
 void Matter::resetReconnectBackoff(DeviceObject *device)
 {
     if (!device)
         return;
 
-    device->setReconnectFailures(0);
     device->setNextReconnectAt(0);
 }
 
@@ -2153,6 +2173,10 @@ void Matter::scheduleReconnect(void)
         DeviceObject *device = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
 
         if (device->availability() == Availability::Online || device->networkAddress().isNull())
+            continue;
+
+        // already have a session (e.g. restored from disk) — no CASE needed, MRP will signal if it's actually dead
+        if (m_sessions->findByPeerNodeId(device->nodeId()))
             continue;
 
         // skip devices with an in-flight CASE — they'll come back via caseEstablished/Failed
@@ -2206,6 +2230,11 @@ void Matter::reconnectTimeout(void)
         if (device->availability() == Availability::Online || device->networkAddress().isNull())
             continue;
 
+        // already have a session (just restored from disk and waiting for first ack) — don't trigger CASE; we'll only
+        // know it's dead once an MRP retransmit fails, and that path explicitly schedules a reconnect
+        if (m_sessions->findByPeerNodeId(device->nodeId()))
+            continue;
+
         // skip devices that already have a CASE handshake in flight — caseEstablished/caseFailed will trigger the next attempt
         bool inProgress = false;
 
@@ -2236,7 +2265,7 @@ void Matter::pingTimeout(void)
     if (!m_devices)
         return;
 
-    qint64 now = QDateTime::currentMSecsSinceEpoch();
+    qint64 now = QDateTime::currentSecsSinceEpoch();
 
     for (int i = 0; i < m_devices->count(); i++)
     {
@@ -2253,29 +2282,20 @@ void Matter::pingTimeout(void)
             continue;
         }
 
-        if (!session->lastSeen)
+        // mirror current counter to device so the next store() persists a fresh value;
+        // on restart we restore counter+10000 margin to stay strictly monotonic across restarts
+        device->setSessionLocalCounter(session->localMessageCounter);
+
+        if (!device->lastSeen())
             continue;
 
-        // battery-powered devices (PowerSource cluster on any endpoint): trust subscription as keepalive,
-        // don't ping (saves battery), but mark offline if no reports within maxInterval+30s window
-        bool battery = false;
-
-        for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
-        {
-            EndpointObject *ep = reinterpret_cast <EndpointObject*> (it.value().data());
-
-            if (ep->clusters().contains(Clusters::PowerSource::Id))
-            {
-                battery = true;
-                break;
-            }
-        }
-
-        if (battery)
+        // battery-powered devices: trust subscription as keepalive, don't ping (saves battery),
+        // but mark offline if no reports within maxInterval+30s window
+        if (device->batteryPowered())
         {
             quint16 maxInt = device->subMaxInterval();
 
-            if (maxInt && now - session->lastSeen > (maxInt + 30) * 1000)
+            if (maxInt && now - device->lastSeen() > maxInt + 30)
             {
                 logWarning << device << "no subscription reports for" << maxInt << "+30s, marking offline";
                 device->setAvailability(Availability::Offline);
@@ -2285,7 +2305,7 @@ void Matter::pingTimeout(void)
         }
 
         // mains-powered: legacy 60s read-as-ping refreshes lastSeen and detects dead sessions
-        if (now - session->lastSeen > 60000)
+        if (now - device->lastSeen() > 60)
         {
             QList <AttributePath> paths = {AttributePath(0, Clusters::BasicInformation::Id, Clusters::BasicInformation::Attributes::DataModelRevision)};
             QByteArray payload = InteractionModel::encodeReadRequest(paths);
@@ -2313,15 +2333,15 @@ void Matter::handleDeviceUnreachable(DeviceObject *device)
         emit updateAvailability(device);
     }
 
-    // schedule a retry only if there isn't already one pending, otherwise repeated unreachable triggers (ping, MRP)
-    // would keep pushing the deadline forward and CASE would never fire
+    // first failure since last success — nextReconnectAt is 0, go straight to CASE (covers restored-session-dead
+    // case, where we'd otherwise wait 10-15s for nothing). Anything else means we already had a retry scheduled
+    // or in flight; keep the 10-15s spacing so we don't spam a stuck/asleep peer
     qint64 now = QDateTime::currentMSecsSinceEpoch();
 
-    if (device->nextReconnectAt() == 0 || device->nextReconnectAt() < now)
-    {
-        qint64 jitterMs = QRandomGenerator::global()->bounded(5000);
-        device->setNextReconnectAt(now + 10000 + jitterMs);
-    }
+    if (device->nextReconnectAt() == 0)
+        device->setNextReconnectAt(now);
+    else if (device->nextReconnectAt() < now)
+        device->setNextReconnectAt(now + 10000 + QRandomGenerator::global()->bounded(5000));
 
     scheduleReconnect();
 }
@@ -2677,7 +2697,7 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
 
     session.peerAddress = device->networkAddress();
     session.peerPort = device->networkPort();
-    session.lastSeen = QDateTime::currentMSecsSinceEpoch();
+    device->updateLastSeen();
 
     session.idleInterval = caseSes->idleInterval();
     session.activeInterval = caseSes->activeInterval();
@@ -2718,16 +2738,28 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
 
     if (!newResumptionID.isEmpty())
     {
-        bool changed = (newResumptionID != device->resumptionID() || caseSes->sharedSecret() != device->resumptionSharedSecret());
         device->setResumptionID(newResumptionID);
         device->setResumptionSharedSecret(caseSes->sharedSecret());
-
-        if (changed)
-        {
-            logInfo << device << (caseSes->resumed() ? "session resumed" : "full handshake") << ", saving new resumptionID:" << newResumptionID.toHex();
-            m_devices->store(true);
-        }
+        logInfo << device << (caseSes->resumed() ? "session resumed" : "full handshake") << ", saving new resumptionID:" << newResumptionID.toHex();
     }
+
+    // persist secure session ONLY for battery-powered devices: for them CASE on restart means waking the radio
+    // (battery hit) and waiting tens of seconds on slow MRP intervals; for mains devices CASE-with-resumption is
+    // already ~200ms instantaneous and persistence has no upside (just risk of stale session if peer rebooted)
+    if (device->batteryPowered())
+    {
+        device->setSessionLocalId(localSessionId);
+        device->setSessionPeerId(peerSessionId);
+        device->setSessionI2RKey(caseSes->encryptKey());
+        device->setSessionR2IKey(caseSes->decryptKey());
+        device->setSessionAttestation(caseSes->attestationChallenge());
+        device->setSessionLocalCounter(0);
+        device->setSessionIdleInterval(caseSes->idleInterval());
+        device->setSessionActiveInterval(caseSes->activeInterval());
+        device->setSessionActiveThreshold(caseSes->activeThreshold());
+    }
+
+    m_devices->store(true);
 
     device->setAvailability(Availability::Online);
     resetReconnectBackoff(device);

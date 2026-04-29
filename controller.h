@@ -1,8 +1,9 @@
 #ifndef CONTROLLER_H
 #define CONTROLLER_H
 
-#define SERVICE_VERSION             "0.1.0"
-#define UPDATE_PROPERTIES_DELAY     1000
+#define SERVICE_VERSION                 "0.1.1"
+#define UPDATE_DEVICE_DATA_INTERVAL     5000
+#define UPDATE_PROPERTIES_DELAY         1000
 
 #include "homed.h"
 #include "matter.h"
@@ -30,12 +31,14 @@ public:
 
 private:
 
-    QTimer *m_timer;
+    QTimer *m_deviceDataTimer, *m_propertiesTimer;
     Matter *m_matter;
 
     QMetaEnum m_commands;
     QString m_haPrefix, m_haStatus;
     bool m_haEnabled, m_haUpdate;
+
+    QMap <quint64, qint64> m_lastSeen;
 
     void publishExposes(DeviceObject *device, bool remove = false);
     void publishProperties(const Device &device);
@@ -50,6 +53,7 @@ private slots:
     void mqttReceived(const QByteArray &message, const QMqttTopicName &topic) override;
 
     void updateAvailability(DeviceObject *device);
+    void updateDeviceData(void);
     void updateProperties(void);
 
     void deviceUpdated(DeviceObject *device);

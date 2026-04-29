@@ -123,7 +123,10 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QL
     }
 
     if (clusters.contains(Clusters::PowerSource::Id))
+    {
         addExpose(new SensorObject("battery"), "battery");
+        device->setBatteryPowered(true);
+    }
 
     if (clusters.contains(Clusters::TemperatureMeasurement::Id))
         addExpose(new SensorObject("temperature"), "temperature");
@@ -293,11 +296,28 @@ Device DeviceList::parse(const QJsonObject &json)
     else if (obj->networkAddress().protocol() == QAbstractSocket::IPv6Protocol)
         obj->setThread(true);
 
+    if (json.contains("lastSeen"))
+        obj->setLastSeen(json.value("lastSeen").toVariant().toLongLong());
+
     if (json.contains("resumptionID"))
         obj->setResumptionID(QByteArray::fromHex(json.value("resumptionID").toString().toLatin1()));
 
     if (json.contains("resumptionSharedSecret"))
         obj->setResumptionSharedSecret(QByteArray::fromHex(json.value("resumptionSharedSecret").toString().toLatin1()));
+
+    if (json.contains("session"))
+    {
+        QJsonObject session = json.value("session").toObject();
+        obj->setSessionLocalId(static_cast <quint16> (session.value("localId").toInt()));
+        obj->setSessionPeerId(static_cast <quint16> (session.value("peerId").toInt()));
+        obj->setSessionI2RKey(QByteArray::fromHex(session.value("i2rKey").toString().toLatin1()));
+        obj->setSessionR2IKey(QByteArray::fromHex(session.value("r2iKey").toString().toLatin1()));
+        obj->setSessionAttestation(QByteArray::fromHex(session.value("attestation").toString().toLatin1()));
+        obj->setSessionLocalCounter(static_cast <quint32> (session.value("localCounter").toVariant().toULongLong()));
+        obj->setSessionIdleInterval(static_cast <quint32> (session.value("idleInterval").toVariant().toULongLong()));
+        obj->setSessionActiveInterval(static_cast <quint32> (session.value("activeInterval").toVariant().toULongLong()));
+        obj->setSessionActiveThreshold(static_cast <quint16> (session.value("activeThreshold").toInt()));
+    }
 
     QJsonArray endpoints = json.value("endpoints").toArray();
 
@@ -395,11 +415,30 @@ QJsonArray DeviceList::serialize(void)
         if (obj->thread())
             json.insert("thread", true);
 
+        if (obj->lastSeen())
+            json.insert("lastSeen", obj->lastSeen());
+
         if (!obj->resumptionID().isEmpty())
             json.insert("resumptionID", QString::fromLatin1(obj->resumptionID().toHex()));
 
         if (!obj->resumptionSharedSecret().isEmpty())
             json.insert("resumptionSharedSecret", QString::fromLatin1(obj->resumptionSharedSecret().toHex()));
+
+        if (obj->hasPersistedSession())
+        {
+            QJsonObject session = {
+                {"localId", obj->sessionLocalId()},
+                {"peerId", obj->sessionPeerId()},
+                {"i2rKey", QString::fromLatin1(obj->sessionI2RKey().toHex())},
+                {"r2iKey", QString::fromLatin1(obj->sessionR2IKey().toHex())},
+                {"attestation", QString::fromLatin1(obj->sessionAttestation().toHex())},
+                {"localCounter", static_cast <qint64> (obj->sessionLocalCounter())},
+                {"idleInterval", static_cast <qint64> (obj->sessionIdleInterval())},
+                {"activeInterval", static_cast <qint64> (obj->sessionActiveInterval())},
+                {"activeThreshold", obj->sessionActiveThreshold()}
+            };
+            json.insert("session", session);
+        }
 
         if (!obj->endpoints().isEmpty())
         {
