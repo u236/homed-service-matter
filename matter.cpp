@@ -23,12 +23,13 @@ Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new 
     m_wifiSSID = config->value("wifi/ssid").toString();
     m_wifiPassword = config->value("wifi/password").toString();
 
-    QString borderRouter = config->value("thread/borderRouter").toString();
+    QString otbr = config->value("thread/otbr").toString();
 
-    if (!borderRouter.isEmpty())
+    if (!otbr.isEmpty())
     {
+        QString url = QString("http://%1/node/dataset/active").arg(otbr);
         QProcess curl;
-        curl.start("curl", {"-fsS", "-H", "Accept: text/plain", "--max-time", "5", borderRouter + "/node/dataset/active"});
+        curl.start("curl", {"-fsS", "-H", "Accept: text/plain", "--max-time", "5", url});
         curl.waitForFinished(6000);
 
         if (curl.exitStatus() == QProcess::NormalExit && curl.exitCode() == 0)
@@ -37,12 +38,12 @@ Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new 
             m_threadExtPanId = extractThreadExtPanId(m_threadDataset);
 
             if (m_threadExtPanId.isEmpty())
-                logWarning << "Failed to extract Extended PAN ID from Thread dataset fetched from" << borderRouter;
+                logWarning << "Failed to extract Extended PAN ID from Thread dataset fetched from" << otbr;
             else
-                logInfo << "Thread dataset fetched from" << borderRouter << ", ExtPanId:" << m_threadExtPanId.toHex();
+                logInfo << "Thread dataset fetched from" << otbr << ", ExtPanId:" << m_threadExtPanId.toHex();
         }
         else
-            logWarning << "Failed to fetch Thread dataset from" << borderRouter << ":" << curl.readAllStandardError().trimmed();
+            logWarning << "Failed to fetch Thread dataset from" << otbr << ":" << curl.readAllStandardError().trimmed();
     }
 
     // move to devices class
