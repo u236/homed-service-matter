@@ -112,10 +112,16 @@ public:
                const QByteArray &operationalKey, const QByteArray &operationalPubKey,
                quint64 fabricId, quint64 nodeId, quint64 rootCAId,
                const QByteArray &ipk,
-               const QByteArray &nocTLV, const QByteArray &rcacTLV);
+               const QByteArray &nocTLV, const QByteArray &rcacTLV,
+               const QByteArray &resumptionID = QByteArray(), const QByteArray &resumptionSharedSecret = QByteArray());
 
     void handleSigma2(const QByteArray &payload);
+    void handleSigma2Resume(const QByteArray &payload);
     void handleStatusReport(const QByteArray &payload);
+
+    inline bool resumed(void) const { return m_resumed; }
+    inline QByteArray newResumptionID(void) const { return m_newResumptionID; }
+    inline QByteArray sharedSecret(void) const { return m_sharedSecret; }
 
     inline void setLastPeerMessageCounter(quint32 value) { m_lastPeerMessageCounter = value; }
     inline quint32 lastPeerMessageCounter(void) const { return m_lastPeerMessageCounter; }
@@ -152,6 +158,12 @@ private:
     QByteArray m_ephPrivKey, m_ephPubKey;
     QByteArray m_responderEphPubKey;
     QByteArray m_sharedSecret;
+
+    // CASE session resumption (Matter §4.13.3)
+    QByteArray m_resumptionID;            // ID we send in Sigma1 tag 6 (from previous CASE)
+    QByteArray m_resumptionSharedSecret;  // shared secret from previous CASE, used for resume MIC + key derivation
+    QByteArray m_newResumptionID;         // ID extracted from Sigma2 TBE2 tag 4 or Sigma2_Resume tag 1, persisted for next CASE
+    bool m_resumed;
 
     // transcript hash (running SHA-256 of all Sigma messages)
     QByteArray m_sigma1Bytes;

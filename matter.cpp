@@ -187,7 +187,8 @@ void Matter::connectDevice(DeviceObject *device)
                    m_fabricKey, m_fabricPublicKey,
                    m_operationalKey, m_operationalPubKey,
                    m_fabricId, m_nodeId, m_rootCAId,
-                   m_ipk, m_controllerNOC, m_controllerRCAC);
+                   m_ipk, m_controllerNOC, m_controllerRCAC,
+                   device->resumptionID(), device->resumptionSharedSecret());
 }
 
 void Matter::discoverDevice(DeviceObject *device)
@@ -746,6 +747,22 @@ void Matter::handleSecureChannel(const MessageHeader &msgHeader, const ProtocolH
             else
             {
                 logDebug(m_debug) << "Sigma2 from unknown exchange" << protoHeader.exchangeId << ", ignoring";
+            }
+
+            break;
+        }
+
+        case SecureChannelOpcode::CASESigma2Resume:
+        {
+            if (m_pendingCASEs.contains(protoHeader.exchangeId))
+            {
+                CASESession *session = m_pendingCASEs.value(protoHeader.exchangeId).session;
+                session->setLastPeerMessageCounter(msgHeader.messageCounter);
+                session->handleSigma2Resume(payload);
+            }
+            else
+            {
+                logDebug(m_debug) << "Sigma2_Resume from unknown exchange" << protoHeader.exchangeId << ", ignoring";
             }
 
             break;
@@ -2630,6 +2647,14 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
     bool needsCC = pending->needsCommissioningComplete;
     quint16 exchangeId = pending->exchangeId;
 
+    // CASE resumption: ack Sigma2_Resume with SecureChannel StatusReport(success), per CHIP HandleSigma2Resume.
+    // Without this the responder never finalizes the resumed session and our first encrypted message goes unanswered.
+    if (caseSes->resumed())
+    {
+        QByteArray status(8, 0);
+        sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::StatusReport), static_cast <quint16> (ProtocolId::SecureChannel), status, exchangeId, pending->address, pending->port, true, caseSes->lastPeerMessageCounter());
+    }
+
     // register encrypted session
     SessionInfo session;
     session.localSessionId = localSessionId;
@@ -2679,6 +2704,22 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
         sendEncrypted(caseSession, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
     }
 
+    // persist new resumption data so the next CASE can skip the full Sigma1/2/3 handshake (Matter §4.13.3)
+    QByteArray newResumptionID = caseSes->newResumptionID();
+
+    if (!newResumptionID.isEmpty())
+    {
+        bool changed = (newResumptionID != device->resumptionID() || caseSes->sharedSecret() != device->resumptionSharedSecret());
+        device->setResumptionID(newResumptionID);
+        device->setResumptionSharedSecret(caseSes->sharedSecret());
+
+        if (changed)
+        {
+            logInfo << device << (caseSes->resumed() ? "session resumed" : "full handshake") << ", saving new resumptionID:" << newResumptionID.toHex();
+            m_devices->store(true);
+        }
+    }
+
     device->setAvailability(Availability::Online);
     resetReconnectBackoff(device);
     emit updateAvailability(device);
@@ -2715,6 +2756,17 @@ void Matter::caseFailed(const QString &reason)
 
     if (exchangeId)
         m_pendingCASEs.remove(exchangeId);
+
+    // only Sigma2_Resume MIC failure proves our resumption secret is no longer valid; everything else (Busy, timeout,
+    // MRP failure) is transient — peer is still cleaning up the previous session, dropping resumption just forces a
+    // slower full handshake on the next attempt without making the current one succeed
+    if (failedDevice && !failedDevice->resumptionID().isEmpty() && reason.startsWith("Sigma2_Resume MIC"))
+    {
+        logInfo << failedDevice << "clearing resumption data after MIC verification failure - next attempt will be full handshake";
+        failedDevice->setResumptionID(QByteArray());
+        failedDevice->setResumptionSharedSecret(QByteArray());
+        m_devices->store(true);
+    }
 
     if (failedDevice)
     {

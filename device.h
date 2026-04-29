@@ -36,6 +36,12 @@ public:
     DeviceObject(quint64 nodeId, const QString &name) :
         AbstractDeviceObject(name), m_nodeId(nodeId), m_fabricIndex(0), m_vendorId(0), m_productId(0), m_networkPort(5540), m_subMaxInterval(0), m_reconnectFailures(0), m_nextReconnectAt(0) {}
 
+    inline QByteArray resumptionID(void) { return m_resumptionID; }
+    inline void setResumptionID(const QByteArray &value) { m_resumptionID = value; }
+
+    inline QByteArray resumptionSharedSecret(void) { return m_resumptionSharedSecret; }
+    inline void setResumptionSharedSecret(const QByteArray &value) { m_resumptionSharedSecret = value; }
+
     inline quint64 nodeId(void) { return m_nodeId; }
     inline void setNodeId(quint64 value) { m_nodeId = value; }
 
@@ -82,6 +88,8 @@ private:
     quint16 m_subMaxInterval;
     quint8 m_reconnectFailures;
     qint64 m_nextReconnectAt;
+    QByteArray m_resumptionID;
+    QByteArray m_resumptionSharedSecret;
 
 };
 

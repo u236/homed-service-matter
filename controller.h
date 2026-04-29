@@ -1,7 +1,7 @@
 #ifndef CONTROLLER_H
 #define CONTROLLER_H
 
-#define SERVICE_VERSION             "0.0.8"
+#define SERVICE_VERSION             "0.1.0"
 #define UPDATE_PROPERTIES_DELAY     1000
 
 #include "homed.h"

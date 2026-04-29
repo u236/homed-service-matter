@@ -288,6 +288,12 @@ Device DeviceList::parse(const QJsonObject &json)
     if (json.contains("networkPort"))
         obj->setNetworkPort(static_cast <quint16> (json.value("networkPort").toInt()));
 
+    if (json.contains("resumptionID"))
+        obj->setResumptionID(QByteArray::fromHex(json.value("resumptionID").toString().toLatin1()));
+
+    if (json.contains("resumptionSharedSecret"))
+        obj->setResumptionSharedSecret(QByteArray::fromHex(json.value("resumptionSharedSecret").toString().toLatin1()));
+
     QJsonArray endpoints = json.value("endpoints").toArray();
 
     for (auto it = endpoints.begin(); it != endpoints.end(); it++)
@@ -380,6 +386,12 @@ QJsonArray DeviceList::serialize(void)
 
         if (obj->networkPort() != 5540)
             json.insert("networkPort", obj->networkPort());
+
+        if (!obj->resumptionID().isEmpty())
+            json.insert("resumptionID", QString::fromLatin1(obj->resumptionID().toHex()));
+
+        if (!obj->resumptionSharedSecret().isEmpty())
+            json.insert("resumptionSharedSecret", QString::fromLatin1(obj->resumptionSharedSecret().toHex()));
 
         if (!obj->endpoints().isEmpty())
         {
