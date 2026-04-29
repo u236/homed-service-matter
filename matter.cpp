@@ -627,7 +627,7 @@ void Matter::sendEncrypted(SessionInfo *session, quint8 opcode, quint16 protocol
     data.append(encrypted);
 
     sendRawDatagram(data, session->peerAddress, session->peerPort);
-    m_mrp->messageSent(data, session->peerAddress, session->peerPort, msgHeader.messageCounter, exchangeId, true);
+    m_mrp->messageSent(data, session->peerAddress, session->peerPort, msgHeader.messageCounter, exchangeId, true, session->idleInterval);
 }
 
 void Matter::sendEncryptedBle(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator)
@@ -2552,6 +2552,10 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
     session.peerPort = m_caseDevice->networkPort();
     session.lastSeen = QDateTime::currentMSecsSinceEpoch();
 
+    session.idleInterval = m_pendingCASE->idleInterval();
+    session.activeInterval = m_pendingCASE->activeInterval();
+    session.activeThreshold = m_pendingCASE->activeThreshold();
+
     // remove old (dead) session
     SessionInfo *existing = m_sessions->findByPeerNodeId(m_caseDevice->nodeId());
 
@@ -2600,7 +2604,7 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
         connectDevice(m_caseQueue.takeFirst());
 }
 
-void Matter::caseFailed(const QString &reason)
+void Matter::caseFailed(const QString &reason, bool transient)
 {
     logWarning << "CASE failed:" << reason;
 
@@ -2613,7 +2617,18 @@ void Matter::caseFailed(const QString &reason)
     DeviceObject *failedDevice = m_caseDevice;
     m_caseDevice = nullptr;
 
-    recordReconnectFailure(failedDevice);
+    if (transient && failedDevice)
+    {
+        // peer alive but transiently busy — retry in 5-10s without bumping the backoff counter
+        qint64 jitterMs = QRandomGenerator::global()->bounded(5000);
+        failedDevice->setNextReconnectAt(QDateTime::currentMSecsSinceEpoch() + 5000 + jitterMs);
+        logDebug(m_debug) << failedDevice << "transient CASE failure, retry in 5-10s";
+        scheduleReconnect();
+    }
+    else
+    {
+        recordReconnectFailure(failedDevice);
+    }
 
     // connect next queued device
     if (!m_caseQueue.isEmpty())

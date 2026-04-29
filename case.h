@@ -43,7 +43,12 @@ struct SessionInfo
     bool active;
     qint64 lastSeen;
 
-    SessionInfo(void) : localSessionId(0), peerSessionId(0), peerPort(0), peerNodeId(0), localMessageCounter(0), active(false), lastSeen(0) {}
+    // peer-announced MRP timeouts from SessionParameters TLV in Sigma1/Sigma2 (Matter §4.11.2.2.1, milliseconds)
+    quint32 idleInterval;
+    quint32 activeInterval;
+    quint16 activeThreshold;
+
+    SessionInfo(void) : localSessionId(0), peerSessionId(0), peerPort(0), peerNodeId(0), localMessageCounter(0), active(false), lastSeen(0), idleInterval(500), activeInterval(300), activeThreshold(4000) {}
 };
 
 class SessionManager : public QObject
@@ -123,6 +128,10 @@ public:
     inline QByteArray decryptKey(void) const { return m_decryptKey; }
     inline QByteArray attestationChallenge(void) const { return m_attestationChallenge; }
 
+    inline quint32 idleInterval(void) const { return m_idleInterval; }
+    inline quint32 activeInterval(void) const { return m_activeInterval; }
+    inline quint16 activeThreshold(void) const { return m_activeThreshold; }
+
 private:
 
     State m_state;
@@ -150,6 +159,11 @@ private:
     // session keys
     QByteArray m_encryptKey, m_decryptKey, m_attestationChallenge;
 
+    // peer SessionParameters from Sigma2 (defaults per Matter §4.11.2.2.1)
+    quint32 m_idleInterval;
+    quint32 m_activeInterval;
+    quint16 m_activeThreshold;
+
     QByteArray computeDestinationId(void);
     QByteArray transcriptHash(const QByteArray &data = QByteArray());
 
@@ -162,7 +176,7 @@ signals:
     void sendSigma1(const QByteArray &tlvPayload, quint16 localSessionId);
     void sendSigma3(const QByteArray &tlvPayload);
     void established(quint16 localSessionId, quint16 peerSessionId);
-    void failed(const QString &reason);
+    void failed(const QString &reason, bool transient = false);
 
 };
 

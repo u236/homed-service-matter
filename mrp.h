@@ -44,8 +44,9 @@ public:
         quint16 exchangeId;
         quint8 retryCount;
         qint64 nextRetransmit;
+        quint32 baseInterval; // ms; 0 → use MRP_RETRANS_BASE default
 
-        PendingMessage(void) : port(0), messageCounter(0), exchangeId(0), retryCount(0), nextRetransmit(0) {}
+        PendingMessage(void) : port(0), messageCounter(0), exchangeId(0), retryCount(0), nextRetransmit(0), baseInterval(0) {}
     };
 
     struct PendingAck
@@ -65,7 +66,7 @@ public:
 
     inline void setDebug(bool value) { m_debug = value; }
 
-    void messageSent(const QByteArray &data, const QHostAddress &address, quint16 port, quint32 messageCounter, quint16 exchangeId, bool needsAck);
+    void messageSent(const QByteArray &data, const QHostAddress &address, quint16 port, quint32 messageCounter, quint16 exchangeId, bool needsAck, quint32 baseInterval = 0);
     void messageReceived(quint32 messageCounter, quint16 exchangeId, bool hasAck, quint32 ackCounter, const QHostAddress &address, quint16 port, quint16 sessionId, bool needsAck, bool initiator);
     void cancelPendingAck(quint32 messageCounter);
 
@@ -80,7 +81,7 @@ private:
     QList <PendingAck> m_pendingAcks;
     QMap <QString, QList <quint32>> m_peerCounters;
 
-    quint32 retransmitInterval(quint8 retryCount);
+    quint32 retransmitInterval(quint8 retryCount, quint32 baseInterval = 0);
     QString peerKey(const QHostAddress &address);
 
 private slots:

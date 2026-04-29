@@ -74,7 +74,7 @@ QByteArray SessionManager::decrypt(SessionInfo *session, quint8 securityFlags, q
 
 // --- CASE ---
 
-CASESession::CASESession(QObject *parent) : QObject(parent), m_state(State::Idle), m_timer(new QTimer(this)), m_localSessionId(0), m_peerSessionId(0), m_peerNodeId(0), m_fabricId(0), m_nodeId(0), m_rootCAId(0), m_lastPeerMessageCounter(0)
+CASESession::CASESession(QObject *parent) : QObject(parent), m_state(State::Idle), m_timer(new QTimer(this)), m_localSessionId(0), m_peerSessionId(0), m_peerNodeId(0), m_fabricId(0), m_nodeId(0), m_rootCAId(0), m_lastPeerMessageCounter(0), m_idleInterval(500), m_activeInterval(300), m_activeThreshold(4000)
 {
     connect(m_timer, &QTimer::timeout, this, &CASESession::timeout);
     m_timer->setSingleShot(true);
@@ -188,10 +188,23 @@ void CASESession::handleSigma2(const QByteArray &payload)
             case 2: m_peerSessionId = el.value.toUInt(); break;
             case 3: m_responderEphPubKey = el.value.toByteArray(); break;
             case 4: encrypted2 = el.value.toByteArray(); break;
+            case 5:
+                // SessionParameters: peer-announced MRP intervals (Matter §4.11.2.2.1)
+                for (const MatterTLV::Element &p : el.children)
+                {
+                    switch (p.tag)
+                    {
+                        case 1: m_idleInterval = p.value.toUInt(); break;
+                        case 2: m_activeInterval = p.value.toUInt(); break;
+                        case 3: m_activeThreshold = static_cast <quint16> (p.value.toUInt()); break;
+                    }
+                }
+                break;
         }
     }
 
-    logInfo << "CASE: Sigma2 received, peer session:" << m_peerSessionId;
+    logInfo << "CASE: Sigma2 received, peer session:" << m_peerSessionId
+            << "MRP idle/active/threshold:" << m_idleInterval << "/" << m_activeInterval << "/" << m_activeThreshold << "ms";
 
     if (m_responderEphPubKey.length() != 65 || encrypted2.isEmpty())
     {
@@ -327,7 +340,12 @@ void CASESession::handleStatusReport(const QByteArray &payload)
     {
         m_state = State::Failed;
         logWarning << "CASE: failed with general code:" << generalCode << "protocol code:" << protocolCode;
-        emit failed(QString("CASE StatusReport error: general=%1 protocol=%2").arg(generalCode).arg(protocolCode));
+        // transient cases: peer alive but answer doesn't establish a session — retry sooner without bumping backoff
+        //   - general=8 protocol=4 = SecureChannel Busy
+        //   - general=0 protocol=0 in non-WaitingStatusReport state = stray success StatusReport (likely a late retransmit from a previous CASE)
+        bool transient = (generalCode == 8 && protocolId == 0 && protocolCode == 4)
+                      || (generalCode == 0 && protocolCode == 0);
+        emit failed(QString("CASE StatusReport error: general=%1 protocol=%2").arg(generalCode).arg(protocolCode), transient);
     }
 }
 

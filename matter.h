@@ -235,7 +235,7 @@ private slots:
     void caseSendSigma1(const QByteArray &payload, quint16 localSessionId);
     void caseSendSigma3(const QByteArray &payload);
     void caseEstablished(quint16 localSessionId, quint16 peerSessionId);
-    void caseFailed(const QString &reason);
+    void caseFailed(const QString &reason, bool transient = false);
 
     void paseSendPBKDFParamRequest(const QByteArray &payload, quint16 localSessionId);
     void paseSendPake1(const QByteArray &payload);

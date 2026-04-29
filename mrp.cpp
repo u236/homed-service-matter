@@ -13,9 +13,9 @@ MRP::MRP(QObject *parent) : QObject(parent), m_timer(new QTimer(this)), m_debug(
     m_timer->start(50);
 }
 
-quint32 MRP::retransmitInterval(quint8 retryCount)
+quint32 MRP::retransmitInterval(quint8 retryCount, quint32 baseInterval)
 {
-    double interval = MRP_RETRANS_BASE;
+    double interval = baseInterval ? static_cast <double> (baseInterval) : MRP_RETRANS_BASE;
 
     for (quint8 i = 0; i < retryCount; i++)
         interval *= MRP_BACKOFF_MULTIPLIER;
@@ -29,7 +29,7 @@ QString MRP::peerKey(const QHostAddress &address)
     return address.toString();
 }
 
-void MRP::messageSent(const QByteArray &data, const QHostAddress &address, quint16 port, quint32 messageCounter, quint16 exchangeId, bool needsAck)
+void MRP::messageSent(const QByteArray &data, const QHostAddress &address, quint16 port, quint32 messageCounter, quint16 exchangeId, bool needsAck, quint32 baseInterval)
 {
     if (!needsAck)
         return;
@@ -41,7 +41,8 @@ void MRP::messageSent(const QByteArray &data, const QHostAddress &address, quint
     pending.messageCounter = messageCounter;
     pending.exchangeId = exchangeId;
     pending.retryCount = 0;
-    pending.nextRetransmit = QDateTime::currentMSecsSinceEpoch() + retransmitInterval(0);
+    pending.baseInterval = baseInterval;
+    pending.nextRetransmit = QDateTime::currentMSecsSinceEpoch() + retransmitInterval(0, baseInterval);
 
     m_pendingMessages.append(pending);
 }
@@ -145,6 +146,6 @@ void MRP::processTimers(void)
 
         logDebug(m_debug) << "MRP retransmit" << pending.retryCount << "for counter" << pending.messageCounter;
         emit retransmit(pending.data, pending.address, pending.port);
-        pending.nextRetransmit = now + retransmitInterval(pending.retryCount);
+        pending.nextRetransmit = now + retransmitInterval(pending.retryCount, pending.baseInterval);
     }
 }
