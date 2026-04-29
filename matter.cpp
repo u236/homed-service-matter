@@ -1243,6 +1243,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         m_ble->disconnectDevice();
                         m_caseNeedsCommissioningComplete = true;
 
+                        commission.device->setThread(commission.useThread);
                         commission.device->setNetworkPort(5540);
                         m_pendingCommissionDevice = commission.device;
 
@@ -1383,6 +1384,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             // UDP path: start CASE for CommissioningComplete
                             commission.device->setNetworkAddress(commission.address);
                             commission.device->setNetworkPort(commission.port);
+                            commission.device->setThread(commission.address.protocol() == QAbstractSocket::IPv6Protocol);
                             m_caseNeedsCommissioningComplete = true;
 
                             QTimer::singleShot(5000, this, [this, commission]() mutable { connectDevice(commission.device); });

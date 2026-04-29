@@ -288,6 +288,11 @@ Device DeviceList::parse(const QJsonObject &json)
     if (json.contains("networkPort"))
         obj->setNetworkPort(static_cast <quint16> (json.value("networkPort").toInt()));
 
+    if (json.contains("thread"))
+        obj->setThread(json.value("thread").toBool());
+    else if (obj->networkAddress().protocol() == QAbstractSocket::IPv6Protocol)
+        obj->setThread(true);
+
     if (json.contains("resumptionID"))
         obj->setResumptionID(QByteArray::fromHex(json.value("resumptionID").toString().toLatin1()));
 
@@ -386,6 +391,9 @@ QJsonArray DeviceList::serialize(void)
 
         if (obj->networkPort() != 5540)
             json.insert("networkPort", obj->networkPort());
+
+        if (obj->thread())
+            json.insert("thread", true);
 
         if (!obj->resumptionID().isEmpty())
             json.insert("resumptionID", QString::fromLatin1(obj->resumptionID().toHex()));
