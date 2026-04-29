@@ -221,10 +221,6 @@ QList <AttributePath> Matter::buildSubscribePaths(DeviceObject *device)
     for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
     {
         quint8 epId = it.key();
-
-        if (epId == 0)
-            continue;
-
         EndpointObject *ep = reinterpret_cast <EndpointObject*> (it.value().data());
         const QList <quint32> &clusters = ep->clusters();
         quint16 caps = static_cast <quint16> (ep->meta().value("colorCapabilities").toInt());
@@ -981,9 +977,10 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                     {
                         logInfo << reportDevice << "found" << discoveredEndpoints.count() << "endpoints";
 
+                        QList <quint8> queryEndpoints = QList <quint8> {0} + discoveredEndpoints; // include root in case PowerSource lives there
                         QList <AttributePath> serverPaths;
 
-                        for (quint8 ep : discoveredEndpoints)
+                        for (quint8 ep : queryEndpoints)
                         {
                             serverPaths.append(AttributePath(ep, Clusters::Descriptor::Id, Clusters::Descriptor::Attributes::ServerList));
                             serverPaths.append(AttributePath(ep, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorCapabilities));
@@ -1029,12 +1026,9 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         }
                     }
 
-                    // create endpoints and exposes
+                    // create endpoints and exposes (incl. ep 0 — some devices put PowerSource there)
                     for (auto it = endpointClusters.begin(); it != endpointClusters.end(); it++)
                     {
-                        if (it.key() == 0)
-                            continue;
-
                         quint16 minMireds = colorTempMin.value(it.key(), 0);
                         quint16 maxMireds = colorTempMax.value(it.key(), 0);
 
