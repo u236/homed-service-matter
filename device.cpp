@@ -180,6 +180,7 @@ DeviceList::DeviceList(QSettings *config, QObject *parent) : QObject(parent), m_
 
     ExposeObject::registerMetaTypes();
 
+    m_names = config->value("mqtt/names", false).toBool();
     m_file.setFileName(config->value("device/database", "/opt/homed-matter/database.json").toString());
 
     if (file.open(QFile::ReadOnly))

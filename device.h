@@ -147,7 +147,6 @@ public:
     ~DeviceList(void);
 
     inline bool names(void) { return m_names; }
-    inline void setNames(bool value) { m_names = value; }
     inline QMap <QString, QVariant> &exposeOptions(void) { return m_exposeOptions; }
 
     void init(void);

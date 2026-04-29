@@ -46,10 +46,6 @@ Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new 
             logWarning << "Failed to fetch Thread dataset from" << otbr << ":" << curl.readAllStandardError().trimmed();
     }
 
-    // move to devices class
-    m_devices->setNames(config->value("mqtt/names", false).toBool());
-    //
-
     connect(m_udp, &QUdpSocket::readyRead, this, &Matter::readyRead);
     connect(m_searchTimer, &QTimer::timeout, this, &Matter::searchTimeout);
     connect(m_reconnectTimer, &QTimer::timeout, this, &Matter::reconnectTimeout);
