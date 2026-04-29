@@ -355,6 +355,7 @@ void CASESession::timeout(void)
     {
         m_state = State::Failed;
         logWarning << "CASE: session timeout";
-        emit failed("CASE timeout");
+        // peer might be alive but stuck mid-handshake (e.g. ACK'd Sigma1 then never sent Sigma2) — retry sooner without bumping backoff
+        emit failed("CASE timeout", true);
     }
 }

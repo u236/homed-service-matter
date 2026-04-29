@@ -88,7 +88,7 @@ private:
     Key derivation uses ECDH shared secret + transcript hash (running SHA-256 of Sigma messages).
 */
 
-#define CASE_TIMEOUT 30000
+#define CASE_TIMEOUT 10000
 
 class CASESession : public QObject
 {

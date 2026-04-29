@@ -732,10 +732,14 @@ void Matter::handleSecureChannel(const MessageHeader &msgHeader, const ProtocolH
 
         case SecureChannelOpcode::CASESigma2:
         {
-            if (m_pendingCASE)
+            if (m_pendingCASE && protoHeader.exchangeId == m_caseExchangeId)
             {
                 m_pendingCASE->setLastPeerMessageCounter(msgHeader.messageCounter);
                 m_pendingCASE->handleSigma2(payload);
+            }
+            else
+            {
+                logDebug(m_debug) << "Sigma2 from stale exchange" << protoHeader.exchangeId << "(current:" << m_caseExchangeId << "), ignoring";
             }
 
             break;
@@ -2192,14 +2196,26 @@ void Matter::pingTimeout(void)
         if (!session->lastSeen)
             continue;
 
-        quint16 maxInt = device->subMaxInterval();
+        // battery-powered devices (PowerSource cluster on any endpoint): trust subscription as keepalive,
+        // don't ping (saves battery), but mark offline if no reports within maxInterval+30s window
+        bool battery = false;
 
-        if (maxInt)
+        for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
         {
-            // device with active subscription — Matter guarantees report (or keepalive) every maxInterval seconds.
-            // if we miss that window, device is gone. don't ping (saves battery), don't tear down session
-            // (let device come back via incoming report when it wakes).
-            if (now - session->lastSeen > (maxInt + 30) * 1000)
+            EndpointObject *ep = reinterpret_cast <EndpointObject*> (it.value().data());
+
+            if (ep->clusters().contains(Clusters::PowerSource::Id))
+            {
+                battery = true;
+                break;
+            }
+        }
+
+        if (battery)
+        {
+            quint16 maxInt = device->subMaxInterval();
+
+            if (maxInt && now - session->lastSeen > (maxInt + 30) * 1000)
             {
                 logWarning << device << "no subscription reports for" << maxInt << "+30s, marking offline";
                 device->setAvailability(Availability::Offline);
@@ -2208,7 +2224,7 @@ void Matter::pingTimeout(void)
             continue;
         }
 
-        // no subscription yet — fall back to legacy 60s read-as-ping
+        // mains-powered: legacy 60s read-as-ping refreshes lastSeen and detects dead sessions
         if (now - session->lastSeen > 60000)
         {
             QList <AttributePath> paths = {AttributePath(0, Clusters::BasicInformation::Id, Clusters::BasicInformation::Attributes::DataModelRevision)};

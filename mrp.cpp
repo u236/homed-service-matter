@@ -45,6 +45,7 @@ void MRP::messageSent(const QByteArray &data, const QHostAddress &address, quint
     pending.nextRetransmit = QDateTime::currentMSecsSinceEpoch() + retransmitInterval(0, baseInterval);
 
     m_pendingMessages.append(pending);
+    logDebug(m_debug) << "MRP registered counter:" << messageCounter << "to" << address.toString() << ":" << port << "nextRetransmit in" << (pending.nextRetransmit - QDateTime::currentMSecsSinceEpoch()) << "ms, queue:" << m_pendingMessages.count();
 }
 
 void MRP::messageReceived(quint32 messageCounter, quint16 exchangeId, bool hasAck, quint32 ackCounter, const QHostAddress &address, quint16 port, quint16 sessionId, bool needsAck, bool initiator)
@@ -55,6 +56,7 @@ void MRP::messageReceived(quint32 messageCounter, quint16 exchangeId, bool hasAc
         {
             if (m_pendingMessages.at(i).messageCounter == ackCounter && m_pendingMessages.at(i).address == address)
             {
+                logDebug(m_debug) << "MRP cleared counter:" << ackCounter << "by ack from" << address.toString();
                 m_pendingMessages.removeAt(i);
                 break;
             }
