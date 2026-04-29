@@ -207,6 +207,10 @@ private:
     void continueCommissioning(PendingCommission &commission);
     QByteArray generateFabricCert(quint64 fabricId, quint64 nodeId, const QByteArray &subjectPubKey, bool isRCAC);
 
+    void recordReconnectFailure(DeviceObject *device);
+    void resetReconnectBackoff(DeviceObject *device);
+    void scheduleReconnect(void);
+
 private slots:
 
     void readyRead(void);

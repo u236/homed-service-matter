@@ -1,6 +1,7 @@
 // NOT REWIEWED
 
 #include <QProcess>
+#include <QRandomGenerator>
 #include <QtEndian>
 #include "matter.h"
 #include "color.h"
@@ -1902,6 +1903,7 @@ void Matter::readyRead(void)
                 {
                     logInfo << bd << "is back online";
                     bd->setAvailability(Availability::Online);
+                    resetReconnectBackoff(bd);
                     emit updateAvailability(bd);
                 }
             }
@@ -2081,26 +2083,88 @@ void Matter::btpWriteData(const QByteArray &data)
     m_ble->write(data);
 }
 
+void Matter::recordReconnectFailure(DeviceObject *device)
+{
+    if (!device)
+        return;
+
+    quint8 failures = device->reconnectFailures() + 1;
+    device->setReconnectFailures(failures);
+
+    // exponential backoff capped at 5 min: 30, 60, 120, 240, 300, 300...; ±5s jitter to avoid phase-lock with sleep cycle
+    quint8 shift = qMin <quint8> (failures - 1, 4);
+    qint64 baseSec = qMin <qint64> (30LL << shift, 300LL);
+    qint64 jitterSec = static_cast <qint64> (QRandomGenerator::global()->bounded(11)) - 5;
+    qint64 delaySec = baseSec + jitterSec;
+
+    device->setNextReconnectAt(QDateTime::currentMSecsSinceEpoch() + delaySec * 1000);
+    logDebug(m_debug) << device << "reconnect scheduled in" << delaySec << "seconds (failure" << failures << ")";
+    scheduleReconnect();
+}
+
+void Matter::resetReconnectBackoff(DeviceObject *device)
+{
+    if (!device)
+        return;
+
+    device->setReconnectFailures(0);
+    device->setNextReconnectAt(0);
+}
+
+void Matter::scheduleReconnect(void)
+{
+    if (!m_devices)
+        return;
+
+    qint64 now = QDateTime::currentMSecsSinceEpoch();
+    qint64 nearest = -1;
+
+    for (int i = 0; i < m_devices->count(); i++)
+    {
+        DeviceObject *device = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
+
+        if (device->availability() == Availability::Online || device->networkAddress().isNull())
+            continue;
+
+        qint64 ts = device->nextReconnectAt();
+
+        if (ts == 0)
+            ts = now;
+
+        if (nearest == -1 || ts < nearest)
+            nearest = ts;
+    }
+
+    if (nearest == -1)
+        return;
+
+    qint64 delay = qMax <qint64> (0, nearest - now);
+    m_reconnectTimer->start(static_cast <int> (delay));
+}
+
 void Matter::reconnectTimeout(void)
 {
     if (!m_devices)
         return;
 
+    qint64 now = QDateTime::currentMSecsSinceEpoch();
     bool hasOffline = false;
 
     for (int i = 0; i < m_devices->count(); i++)
     {
         DeviceObject *device = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
 
-        if (device->availability() != Availability::Online && !device->networkAddress().isNull())
-        {
+        if (device->availability() == Availability::Online || device->networkAddress().isNull())
+            continue;
+
+        hasOffline = true;
+
+        if (device->nextReconnectAt() <= now)
             connectDevice(device);
-            hasOffline = true;
-        }
     }
 
     if (hasOffline)
-        m_reconnectTimer->start(30000);
+        scheduleReconnect();
 }
 
 void Matter::pingTimeout(void)
@@ -2174,9 +2238,7 @@ void Matter::handleDeviceUnreachable(DeviceObject *device)
     }
 
     connectDevice(device);
-
-    if (!m_reconnectTimer->isActive())
-        m_reconnectTimer->start(30000);
+    recordReconnectFailure(device);
 }
 
 void Matter::mrpRetransmitFailed(quint32 messageCounter, quint16 exchangeId, const QHostAddress &address, quint16 port)
@@ -2522,6 +2584,7 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
     }
 
     m_caseDevice->setAvailability(Availability::Online);
+    resetReconnectBackoff(m_caseDevice);
     emit updateAvailability(m_caseDevice);
 
     // subscribe to attributes for known devices (cold start or CASE reconnect)
@@ -2547,10 +2610,10 @@ void Matter::caseFailed(const QString &reason)
         m_pendingCASE = nullptr;
     }
 
+    DeviceObject *failedDevice = m_caseDevice;
     m_caseDevice = nullptr;
 
-    if (!m_reconnectTimer->isActive())
-        m_reconnectTimer->start(30000);
+    recordReconnectFailure(failedDevice);
 
     // connect next queued device
     if (!m_caseQueue.isEmpty())
