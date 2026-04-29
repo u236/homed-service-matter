@@ -148,16 +148,22 @@ private:
     QByteArray m_controllerNOC;
     QByteArray m_controllerRCAC;
 
-    CASESession *m_pendingCASE;
-    quint16 m_caseExchangeId;
-    DeviceObject *m_caseDevice;
-    QHostAddress m_caseAddress;
-    quint16 m_casePort;
-    bool m_caseNeedsCommissioningComplete;
+    struct PendingCASE
+    {
+        CASESession *session;
+        DeviceObject *device;
+        quint16 exchangeId;
+        QHostAddress address;
+        quint16 port;
+        bool needsCommissioningComplete;
+
+        PendingCASE(void) : session(nullptr), device(nullptr), exchangeId(0), port(0), needsCommissioningComplete(false) {}
+    };
+
+    QMap <quint16, PendingCASE> m_pendingCASEs; // keyed by exchangeId
+    bool m_caseNeedsCommissioningComplete;      // set during commissioning, consumed by connectDevice
     DeviceObject *m_pendingCommissionDevice;
     DeviceObject *m_pendingRemoveDevice;
-
-    QList <DeviceObject*> m_caseQueue;
 
     DeviceList *m_devices;
     QMetaEnum m_events;
@@ -210,6 +216,7 @@ private:
     void recordReconnectFailure(DeviceObject *device);
     void resetReconnectBackoff(DeviceObject *device);
     void scheduleReconnect(void);
+    PendingCASE *findPendingCASE(CASESession *session);
 
 private slots:
 

@@ -71,9 +71,6 @@ Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new 
     m_reconnectTimer->setSingleShot(true);
     m_pingTimer->start(10000);
 
-    m_pendingCASE = nullptr;
-    m_caseDevice = nullptr;
-    m_caseExchangeId = 0;
     m_caseNeedsCommissioningComplete = false;
     m_pendingCommissionDevice = nullptr;
     m_pendingRemoveDevice = nullptr;
@@ -136,20 +133,22 @@ void Matter::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId,
 
 void Matter::connectDevice(DeviceObject *device)
 {
-    if (m_pendingCASE)
-    {
-        if (!m_caseQueue.contains(device))
-            m_caseQueue.append(device);
-
-        return;
-    }
-
     SessionInfo *existing = m_sessions->findByPeerNodeId(device->nodeId());
 
     if (existing && existing->active)
     {
         logDebug(m_debug) << device << "already have active session";
         return;
+    }
+
+    // already a CASE in flight for this device — don't pile up another
+    for (auto it = m_pendingCASEs.begin(); it != m_pendingCASEs.end(); it++)
+    {
+        if (it.value().device == device)
+        {
+            logDebug(m_debug) << device << "CASE already in progress";
+            return;
+        }
     }
 
     QHostAddress address = device->networkAddress();
@@ -168,11 +167,17 @@ void Matter::connectDevice(DeviceObject *device)
     connect(session, &CASESession::established, this, &Matter::caseEstablished);
     connect(session, &CASESession::failed, this, &Matter::caseFailed);
 
-    m_pendingCASE = session;
-    m_caseDevice = device;
-    m_caseExchangeId = m_exchangeCounter++;
-    m_caseAddress = address;
-    m_casePort = port;
+    PendingCASE pending;
+    pending.session = session;
+    pending.device = device;
+    pending.exchangeId = m_exchangeCounter++;
+    pending.address = address;
+    pending.port = port;
+    pending.needsCommissioningComplete = m_caseNeedsCommissioningComplete;
+    m_pendingCASEs.insert(pending.exchangeId, pending);
+
+    // global "post-commissioning CASE pending" flag is now consumed by this PendingCASE entry
+    m_caseNeedsCommissioningComplete = false;
 
     quint16 sessionId = m_sessionCounter++;
 
@@ -716,9 +721,9 @@ void Matter::handleSecureChannel(const MessageHeader &msgHeader, const ProtocolH
             }
 
             // check if this is for a CASE session
-            if (m_pendingCASE && protoHeader.exchangeId == m_caseExchangeId)
+            if (m_pendingCASEs.contains(protoHeader.exchangeId))
             {
-                m_pendingCASE->handleStatusReport(payload);
+                m_pendingCASEs.value(protoHeader.exchangeId).session->handleStatusReport(payload);
                 return;
             }
 
@@ -732,14 +737,15 @@ void Matter::handleSecureChannel(const MessageHeader &msgHeader, const ProtocolH
 
         case SecureChannelOpcode::CASESigma2:
         {
-            if (m_pendingCASE && protoHeader.exchangeId == m_caseExchangeId)
+            if (m_pendingCASEs.contains(protoHeader.exchangeId))
             {
-                m_pendingCASE->setLastPeerMessageCounter(msgHeader.messageCounter);
-                m_pendingCASE->handleSigma2(payload);
+                CASESession *session = m_pendingCASEs.value(protoHeader.exchangeId).session;
+                session->setLastPeerMessageCounter(msgHeader.messageCounter);
+                session->handleSigma2(payload);
             }
             else
             {
-                logDebug(m_debug) << "Sigma2 from stale exchange" << protoHeader.exchangeId << "(current:" << m_caseExchangeId << "), ignoring";
+                logDebug(m_debug) << "Sigma2 from unknown exchange" << protoHeader.exchangeId << ", ignoring";
             }
 
             break;
@@ -2130,6 +2136,21 @@ void Matter::scheduleReconnect(void)
         if (device->availability() == Availability::Online || device->networkAddress().isNull())
             continue;
 
+        // skip devices with an in-flight CASE — they'll come back via caseEstablished/Failed
+        bool inProgress = false;
+
+        for (auto it = m_pendingCASEs.begin(); it != m_pendingCASEs.end(); it++)
+        {
+            if (it.value().device == device)
+            {
+                inProgress = true;
+                break;
+            }
+        }
+
+        if (inProgress)
+            continue;
+
         qint64 ts = device->nextReconnectAt();
 
         if (ts == 0)
@@ -2159,6 +2180,21 @@ void Matter::reconnectTimeout(void)
         DeviceObject *device = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
 
         if (device->availability() == Availability::Online || device->networkAddress().isNull())
+            continue;
+
+        // skip devices that already have a CASE handshake in flight — caseEstablished/caseFailed will trigger the next attempt
+        bool inProgress = false;
+
+        for (auto it = m_pendingCASEs.begin(); it != m_pendingCASEs.end(); it++)
+        {
+            if (it.value().device == device)
+            {
+                inProgress = true;
+                break;
+            }
+        }
+
+        if (inProgress)
             continue;
 
         hasOffline = true;
@@ -2261,10 +2297,19 @@ void Matter::mrpRetransmitFailed(quint32 messageCounter, quint16 exchangeId, con
 {
     logWarning << "Message delivery failed, counter:" << messageCounter << "exchange:" << exchangeId;
 
-    // check if this is a pending CASE handshake failure
-    if (m_pendingCASE && m_caseAddress == address)
+    // check if this is a pending CASE handshake failure — match by exchangeId so the right CASESession gets the failure
+    if (m_pendingCASEs.contains(exchangeId))
     {
-        caseFailed("MRP retransmit failed");
+        // we can't call caseFailed directly without sender — handle inline
+        PendingCASE pending = m_pendingCASEs.take(exchangeId);
+        DeviceObject *failedDevice = pending.device;
+        pending.session->deleteLater();
+
+        // peer never responded — most likely it was asleep when our Sigma1 went out, not actually dead — retry sooner without bumping backoff
+        qint64 jitterMs = QRandomGenerator::global()->bounded(5000);
+        failedDevice->setNextReconnectAt(QDateTime::currentMSecsSinceEpoch() + 5000 + jitterMs);
+        logDebug(m_debug) << failedDevice << "MRP retransmit failed during CASE, retry in 5-10s";
+        scheduleReconnect();
         return;
     }
 
@@ -2530,69 +2575,95 @@ void Matter::paseFailed(const QString &reason)
 
 // --- CASE signal handlers ---
 
+Matter::PendingCASE *Matter::findPendingCASE(CASESession *session)
+{
+    if (!session)
+        return nullptr;
+
+    for (auto it = m_pendingCASEs.begin(); it != m_pendingCASEs.end(); it++)
+    {
+        if (it.value().session == session)
+            return &it.value();
+    }
+
+    return nullptr;
+}
+
 void Matter::caseSendSigma1(const QByteArray &payload, quint16 localSessionId)
 {
     Q_UNUSED(localSessionId)
 
-    if (!m_pendingCASE)
+    CASESession *session = qobject_cast <CASESession*> (sender());
+    PendingCASE *pending = findPendingCASE(session);
+
+    if (!pending)
         return;
 
-    sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::CASESigma1), static_cast <quint16> (ProtocolId::SecureChannel), payload, m_caseExchangeId, m_caseAddress, m_casePort, true);
+    sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::CASESigma1), static_cast <quint16> (ProtocolId::SecureChannel), payload, pending->exchangeId, pending->address, pending->port, true);
 }
 
 void Matter::caseSendSigma3(const QByteArray &payload)
 {
-    if (!m_pendingCASE)
+    CASESession *session = qobject_cast <CASESession*> (sender());
+    PendingCASE *pending = findPendingCASE(session);
+
+    if (!pending)
         return;
 
-    sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::CASESigma3), static_cast <quint16> (ProtocolId::SecureChannel), payload, m_caseExchangeId, m_caseAddress, m_casePort, true, m_pendingCASE->lastPeerMessageCounter());
+    sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::CASESigma3), static_cast <quint16> (ProtocolId::SecureChannel), payload, pending->exchangeId, pending->address, pending->port, true, session->lastPeerMessageCounter());
 }
 
 void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
 {
-    if (!m_pendingCASE || !m_caseDevice)
+    CASESession *caseSes = qobject_cast <CASESession*> (sender());
+    PendingCASE *pending = findPendingCASE(caseSes);
+
+    if (!pending)
         return;
+
+    DeviceObject *device = pending->device;
+    bool needsCC = pending->needsCommissioningComplete;
+    quint16 exchangeId = pending->exchangeId;
 
     // register encrypted session
     SessionInfo session;
     session.localSessionId = localSessionId;
     session.peerSessionId = peerSessionId;
-    session.i2rKey = m_pendingCASE->encryptKey();
-    session.r2iKey = m_pendingCASE->decryptKey();
-    session.attestationChallenge = m_pendingCASE->attestationChallenge();
-    session.peerNodeId = m_caseDevice->nodeId();
+    session.i2rKey = caseSes->encryptKey();
+    session.r2iKey = caseSes->decryptKey();
+    session.attestationChallenge = caseSes->attestationChallenge();
+    session.peerNodeId = device->nodeId();
     session.localMessageCounter = 0;
     session.active = true;
 
-    session.peerAddress = m_caseDevice->networkAddress();
-    session.peerPort = m_caseDevice->networkPort();
+    session.peerAddress = device->networkAddress();
+    session.peerPort = device->networkPort();
     session.lastSeen = QDateTime::currentMSecsSinceEpoch();
 
-    session.idleInterval = m_pendingCASE->idleInterval();
-    session.activeInterval = m_pendingCASE->activeInterval();
-    session.activeThreshold = m_pendingCASE->activeThreshold();
+    session.idleInterval = caseSes->idleInterval();
+    session.activeInterval = caseSes->activeInterval();
+    session.activeThreshold = caseSes->activeThreshold();
 
     // remove old (dead) session
-    SessionInfo *existing = m_sessions->findByPeerNodeId(m_caseDevice->nodeId());
+    SessionInfo *existing = m_sessions->findByPeerNodeId(device->nodeId());
 
     if (existing)
         m_sessions->removeSession(existing->localSessionId);
 
     m_sessions->addSession(session);
 
-    logInfo << m_caseDevice << "CASE session established";
+    logInfo << device << "CASE session established";
 
     // discover device endpoints (skip during initial commissioning — discover after CommissioningComplete)
-    if (m_caseDevice->endpoints().isEmpty() && !m_caseNeedsCommissioningComplete)
-        discoverDevice(m_caseDevice);
+    if (device->endpoints().isEmpty() && !needsCC)
+        discoverDevice(device);
 
     // send CommissioningComplete on CASE session only during initial commissioning
     SessionInfo *caseSession = m_sessions->findByLocalId(localSessionId);
 
-    if (caseSession && m_caseNeedsCommissioningComplete)
+    if (caseSession && needsCC)
     {
-        m_caseNeedsCommissioningComplete = false;
-        m_pendingCommissionDevice = m_caseDevice;
+        m_pendingCommissionDevice = device;
         logDebug(m_debug) << "Sending CommissioningComplete on CASE session...";
 
         MatterTLV::Encoder fields;
@@ -2603,35 +2674,42 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
         sendEncrypted(caseSession, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
     }
 
-    m_caseDevice->setAvailability(Availability::Online);
-    resetReconnectBackoff(m_caseDevice);
-    emit updateAvailability(m_caseDevice);
+    device->setAvailability(Availability::Online);
+    resetReconnectBackoff(device);
+    emit updateAvailability(device);
 
     // subscribe to attributes for known devices (cold start or CASE reconnect)
-    if (!m_caseDevice->endpoints().isEmpty())
-        subscribeDevice(m_caseDevice, m_sessions->findByLocalId(localSessionId));
+    if (!device->endpoints().isEmpty())
+        subscribeDevice(device, m_sessions->findByLocalId(localSessionId));
 
-    m_pendingCASE->deleteLater();
-    m_pendingCASE = nullptr;
-    m_caseDevice = nullptr;
-
-    // connect next queued device
-    if (!m_caseQueue.isEmpty())
-        connectDevice(m_caseQueue.takeFirst());
+    caseSes->deleteLater();
+    m_pendingCASEs.remove(exchangeId);
 }
 
 void Matter::caseFailed(const QString &reason, bool transient)
 {
     logWarning << "CASE failed:" << reason;
 
-    if (m_pendingCASE)
+    CASESession *caseSes = qobject_cast <CASESession*> (sender());
+    DeviceObject *failedDevice = nullptr;
+    quint16 exchangeId = 0;
+
+    if (caseSes)
     {
-        m_pendingCASE->deleteLater();
-        m_pendingCASE = nullptr;
+        PendingCASE *pending = findPendingCASE(caseSes);
+
+        if (pending)
+        {
+            failedDevice = pending->device;
+            exchangeId = pending->exchangeId;
+        }
     }
 
-    DeviceObject *failedDevice = m_caseDevice;
-    m_caseDevice = nullptr;
+    if (caseSes)
+        caseSes->deleteLater();
+
+    if (exchangeId)
+        m_pendingCASEs.remove(exchangeId);
 
     if (transient && failedDevice)
     {
@@ -2645,10 +2723,6 @@ void Matter::caseFailed(const QString &reason, bool transient)
     {
         recordReconnectFailure(failedDevice);
     }
-
-    // connect next queued device
-    if (!m_caseQueue.isEmpty())
-        connectDevice(m_caseQueue.takeFirst());
 }
 
 // --- Setup code parsing ---
