@@ -100,7 +100,7 @@ void BLE::scan(void)
     adapter.call("StartDiscovery");
 
     m_scanning = true;
-    m_scanTimer->start(10000);
+    m_scanTimer->start(30000);
 
     logInfo << "BLE scanning for Matter devices...";
 }
