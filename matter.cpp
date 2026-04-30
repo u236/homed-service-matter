@@ -150,16 +150,40 @@ Matter::~Matter(void)
 
 bool Matter::fetchThreadDataset(void)
 {
-    QString url = QString("http://%1/node/dataset/active").arg(m_otbrUrl);
-    QProcess curl;
+    auto probe = [this](const QString &path) -> QByteArray
+    {
+        QProcess curl;
 
-    curl.start("curl", {"-fsS", "-H", "Accept: text/plain", "--max-time", "5", url});
-    curl.waitForFinished(6000);
+        curl.start("curl", {"-fsS", "-H", "Accept: text/plain", "--max-time", "5", QString("http://%1%2").arg(m_otbrUrl, path)});
+        curl.waitForFinished(6000);
 
-    if (curl.exitStatus() != QProcess::NormalExit || curl.exitCode() != 0)
+        if (curl.exitStatus() != QProcess::NormalExit || curl.exitCode() != 0)
+            return QByteArray();
+
+        return curl.readAllStandardOutput().trimmed();
+    };
+
+    // dataset alone isn't enough: OTBR's REST replies as soon as it loaded the active operational dataset from disk,
+    // but the radio may still be in detached/disabled state with no wpan0 routes installed. talking to peers in that
+    // window gets nowhere — packets either go to a missing route or sit in MRP retransmits that storm out when
+    // routing finally appears, which is exactly what triggers the BUSY-CASE death loop on ICDs. wait for Thread
+    // state to be in mesh (child/router/leader) before declaring ready
+    QByteArray state = probe("/node/state");
+
+    if (state.isEmpty())
         return false;
 
-    QByteArray dataset = QByteArray::fromHex(curl.readAllStandardOutput().trimmed());
+    // state body is JSON-quoted ("leader") under Accept: text/plain too; strip quotes for the comparison
+    if (state.startsWith('"') && state.endsWith('"'))
+        state = state.mid(1, state.size() - 2);
+
+    if (!QList <QByteArray> {"child", "router", "leader"}.contains(state))
+    {
+        logDebug(m_debug) << "Thread state not ready:" << state;
+        return false;
+    }
+
+    QByteArray dataset = QByteArray::fromHex(probe("/node/dataset/active"));
     QByteArray extPanId = extractThreadExtPanId(dataset);
 
     if (extPanId.isEmpty())
@@ -169,7 +193,7 @@ bool Matter::fetchThreadDataset(void)
     m_threadExtPanId = extPanId;
     m_threadReady = true;
 
-    logInfo << "Thread dataset fetched from" << m_otbrUrl << ", ExtPanId:" << m_threadExtPanId.toHex();
+    logInfo << "Thread dataset fetched from" << m_otbrUrl << ", state:" << state << "ExtPanId:" << m_threadExtPanId.toHex();
 
     return true;
 }
