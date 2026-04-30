@@ -306,6 +306,9 @@ QList <EventPath> Matter::buildSubscribeEvents(DeviceObject *device)
 {
     QList <EventPath> events;
 
+    // subscribe only to events the action handler actually consumes for the FeatureMap advertised by the
+    // endpoint. over-subscribing inflates path count (IKEA BILRESA with 9 Switch endpoints rejects 9×7=63
+    // paths with PathsExhausted) and we don't synthesize anything from the events we drop anyway.
     for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
     {
         EndpointObject *ep = reinterpret_cast <EndpointObject*> (it.value().data());
@@ -313,16 +316,32 @@ QList <EventPath> Matter::buildSubscribeEvents(DeviceObject *device)
         if (!ep->clusters().contains(Clusters::Switch::Id))
             continue;
 
-        // subscribe to all Switch cluster events on this endpoint — device only emits the ones its FeatureMap
-        // supports, so over-subscription is harmless and saves us reading FeatureMap during discovery
-        for (quint32 ev : {Clusters::Switch::Events::SwitchLatched,
-                           Clusters::Switch::Events::InitialPress,
-                           Clusters::Switch::Events::LongPress,
-                           Clusters::Switch::Events::ShortRelease,
-                           Clusters::Switch::Events::LongRelease,
-                           Clusters::Switch::Events::MultiPressOngoing,
-                           Clusters::Switch::Events::MultiPressComplete})
-            events.append(EventPath(it.key(), Clusters::Switch::Id, ev, true));
+        quint32 features = ep->meta().value("switchFeatures").toUInt();
+        quint8 cap = static_cast <quint8> (ep->meta().value("switchMultiPressMax").toUInt());
+        bool encoder = (features & Clusters::Switch::Features::MSM) && !(features & Clusters::Switch::Features::MSL) && cap > 5;
+
+        if (features & Clusters::Switch::Features::LS)
+            events.append(EventPath(it.key(), Clusters::Switch::Id, Clusters::Switch::Events::SwitchLatched, true));
+
+        // encoder endpoints want a "start" indication when rotation begins (InitialPress fires once at the
+        // beginning of a burst before MultiPressComplete reports the total). regular buttons don't need it —
+        // we synthesize their action from ShortRelease/MultiPressComplete only.
+        if (encoder)
+            events.append(EventPath(it.key(), Clusters::Switch::Id, Clusters::Switch::Events::InitialPress, true));
+
+        // ShortRelease is emitted only when MSM is absent (Matter §1.13.6.4); with MSM the peer reports
+        // press counts via MultiPressComplete instead and we map each count to a click action there.
+        if ((features & Clusters::Switch::Features::MSR) && !(features & Clusters::Switch::Features::MSM))
+            events.append(EventPath(it.key(), Clusters::Switch::Id, Clusters::Switch::Events::ShortRelease, true));
+
+        if (features & Clusters::Switch::Features::MSL)
+        {
+            events.append(EventPath(it.key(), Clusters::Switch::Id, Clusters::Switch::Events::LongPress, true));
+            events.append(EventPath(it.key(), Clusters::Switch::Id, Clusters::Switch::Events::LongRelease, true));
+        }
+
+        if (features & Clusters::Switch::Features::MSM)
+            events.append(EventPath(it.key(), Clusters::Switch::Id, Clusters::Switch::Events::MultiPressComplete, true));
     }
 
     return events;
@@ -1052,6 +1071,20 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                                 action = "latched";
                                 break;
 
+                            case Clusters::Switch::Events::InitialPress:
+                            {
+                                // only encoder endpoints subscribe to InitialPress (regular buttons don't need it);
+                                // map it to "start" so consumers see rotation begin before MultiPressComplete fires
+                                Endpoint endpoint = evDevice->endpoints().value(static_cast <quint8> (event.path.endpointId));
+                                quint32 features = endpoint.isNull() ? 0 : reinterpret_cast <EndpointObject*> (endpoint.data())->meta().value("switchFeatures").toUInt();
+                                quint8 cap = endpoint.isNull() ? 0 : static_cast <quint8> (reinterpret_cast <EndpointObject*> (endpoint.data())->meta().value("switchMultiPressMax").toUInt());
+
+                                if ((features & Clusters::Switch::Features::MSM) && !(features & Clusters::Switch::Features::MSL) && cap > 5)
+                                    action = "start";
+
+                                break;
+                            }
+
                             case Clusters::Switch::Events::ShortRelease:
                             {
                                 // for devices supporting MSM (multi-press), peer will follow up with MultiPressComplete
@@ -1085,6 +1118,25 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                                         count = static_cast <quint8> (child.value.toUInt());
                                 }
 
+                                // encoder endpoints (high MultiPressMax + no MSL) report rotation detents in count;
+                                // map MultiPressComplete to "stop" (paired with the earlier "start" from InitialPress)
+                                // and surface the burst size as a separate numeric property so consumers see motion +
+                                // amount, not a fake click count
+                                Endpoint endpoint = evDevice->endpoints().value(static_cast <quint8> (event.path.endpointId));
+                                quint32 features = endpoint.isNull() ? 0 : reinterpret_cast <EndpointObject*> (endpoint.data())->meta().value("switchFeatures").toUInt();
+                                quint8 cap = endpoint.isNull() ? 0 : static_cast <quint8> (reinterpret_cast <EndpointObject*> (endpoint.data())->meta().value("switchMultiPressMax").toUInt());
+                                bool encoder = (features & Clusters::Switch::Features::MSM) && !(features & Clusters::Switch::Features::MSL) && cap > 5;
+
+                                if (encoder)
+                                {
+                                    action = "stop";
+                                    // stash the burst size into endpoint status without emitting yet — the action
+                                    // updateEndpoint below fires the single endpointUpdated that publishes both
+                                    if (!endpoint.isNull() && count > 0)
+                                        reinterpret_cast <EndpointObject*> (endpoint.data())->status().insert("count", count);
+                                    break;
+                                }
+
                                 switch (count)
                                 {
                                     case 1: action = "singleClick"; break;
@@ -1104,9 +1156,9 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         {
                             quint8 epId = static_cast <quint8> (event.path.endpointId);
                             evDevice->updateEndpoint(epId, "action", action);
-                            // "action" is a transient event — clear it from endpoint status right after publish so
-                            // subsequent unrelated updates (other attributes on this endpoint) don't carry the stale
-                            // value, and HA picks up each press as a fresh state transition
+                            // "action" is a transient event — clear it from endpoint status right after publish
+                            // so subsequent unrelated updates don't carry the stale value, and HA picks up each
+                            // press as a fresh transition. encoder "count" stays as a sticky last-burst value.
                             Endpoint endpoint = evDevice->endpoints().value(epId);
                             if (!endpoint.isNull())
                                 reinterpret_cast <EndpointObject*> (endpoint.data())->status().remove("action");

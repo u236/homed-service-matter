@@ -146,6 +146,15 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId)
         quint32 features = ep->meta().value("switchFeatures").toUInt();
         quint8 multiPressMax = static_cast <quint8> (ep->meta().value("switchMultiPressMax").toUInt());
 
+        // encoder heuristic: an endpoint that advertises MSM with a high MultiPressMax cap and lacks MSL is
+        // virtually never a real button — it's a rotary encoder where MultiPressComplete.count carries the
+        // detent burst size (e.g. IKEA BILRESA: cap=18, no LongPress). collapse single/double/triple/multi
+        // into a single "step" action and publish the raw count alongside as a numeric "step" property.
+        bool encoder = (features & Clusters::Switch::Features::MSM) && !(features & Clusters::Switch::Features::MSL) && multiPressMax > 5;
+
+        if (encoder)
+            addExpose(new SensorObject("count"), "count");
+
         if (features)
         {
             QList <QVariant> actions;
@@ -153,7 +162,12 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId)
             if (features & Clusters::Switch::Features::LS)
                 actions.append("latched");
 
-            if (features & Clusters::Switch::Features::MSM)
+            if (encoder)
+            {
+                actions.append("start");
+                actions.append("stop");
+            }
+            else if (features & Clusters::Switch::Features::MSM)
             {
                 quint8 cap = multiPressMax ? multiPressMax : 1;
                 if (cap >= 1) actions.append("singleClick");
