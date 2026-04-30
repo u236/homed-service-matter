@@ -42,7 +42,7 @@ quint64 DeviceList::generateNodeId(void)
     return nodeId;
 }
 
-void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters, quint16 colorCapabilities, quint16 colorTempMin, quint16 colorTempMax)
+void DeviceList::addEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters)
 {
     Device holder;
 
@@ -66,22 +66,31 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QL
         device->endpoints().insert(endpointId, endpoint);
     }
 
+    reinterpret_cast <EndpointObject*> (endpoint.data())->clusters() = clusters;
+}
+
+void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId)
+{
+    Endpoint endpoint = device->endpoints().value(endpointId);
+
+    if (endpoint.isNull())
+        return;
+
     EndpointObject *ep = reinterpret_cast <EndpointObject*> (endpoint.data());
-    ep->clusters() = clusters;
-
-    if (colorCapabilities)
-        ep->meta().insert("colorCapabilities", colorCapabilities);
-
-    if (colorTempMin && colorTempMax)
-    {
-        ep->meta().insert("colorTempMin", colorTempMin);
-        ep->meta().insert("colorTempMax", colorTempMax);
-    }
-
+    const QList <quint32> &clusters = ep->clusters();
     quint16 caps = static_cast <quint16> (ep->meta().value("colorCapabilities").toInt());
 
     auto addExpose = [&](ExposeObject *obj, const QString &name)
     {
+        for (const Expose &existing : endpoint->exposes())
+        {
+            if (existing->name() == name)
+            {
+                delete obj;
+                return;
+            }
+        }
+
         Expose expose(obj);
         expose->setName(name);
         expose->setParent(endpoint.data());
@@ -126,6 +135,46 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId, const QL
     {
         addExpose(new SensorObject("battery"), "battery");
         device->setBatteryPowered(true);
+    }
+
+    if (clusters.contains(Clusters::Switch::Id))
+    {
+        addExpose(new SensorObject("action"), "action");
+
+        // per-endpoint action enum from Switch FeatureMap + MultiPressMax (Matter §1.13); meta is filled
+        // by the discovery follow-up read or loaded from JSON on unserialize before setupEndpoint runs
+        quint32 features = ep->meta().value("switchFeatures").toUInt();
+        quint8 multiPressMax = static_cast <quint8> (ep->meta().value("switchMultiPressMax").toUInt());
+
+        if (features)
+        {
+            QList <QVariant> actions;
+
+            if (features & Clusters::Switch::Features::LS)
+                actions.append("latched");
+
+            if (features & Clusters::Switch::Features::MSM)
+            {
+                quint8 cap = multiPressMax ? multiPressMax : 1;
+                if (cap >= 1) actions.append("singleClick");
+                if (cap >= 2) actions.append("doubleClick");
+                if (cap >= 3) actions.append("tripleClick");
+                if (cap >= 4) actions.append("multipleClick");
+            }
+            else if (features & Clusters::Switch::Features::MSR)
+            {
+                actions.append("singleClick");
+            }
+
+            if (features & Clusters::Switch::Features::MSL)
+            {
+                actions.append("hold");
+                actions.append("release");
+            }
+
+            if (!actions.isEmpty())
+                device->options().insert(QString("action_%1").arg(endpointId), QMap <QString, QVariant> {{"enum", actions}});
+        }
     }
 
     if (clusters.contains(Clusters::TemperatureMeasurement::Id))
@@ -367,10 +416,7 @@ void DeviceList::unserialize(const QJsonArray &devices)
         DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
 
         for (auto ep = obj->endpoints().begin(); ep != obj->endpoints().end(); ep++)
-        {
-            EndpointObject *epObj = reinterpret_cast <EndpointObject*> (ep.value().data());
-            setupEndpoint(obj, ep.key(), epObj->clusters(), static_cast <quint16> (epObj->meta().value("colorCapabilities").toInt()));
-        }
+            setupEndpoint(obj, ep.key());
 
         updateMultiple(obj);
     }

@@ -23,6 +23,20 @@ void InteractionModel::encodeCommandPath(MatterTLV::Encoder &encoder, const Comm
     encoder.closeContainer();
 }
 
+// EventPathIB (Matter §10.6.2.2): tag 0=node (opt), tag 1=endpoint, tag 2=cluster, tag 3=event, tag 4=isUrgent (opt)
+void InteractionModel::encodeEventPath(MatterTLV::Encoder &encoder, const EventPath &path)
+{
+    encoder.openList();
+    encoder.encodeUnsignedInt(1, path.endpointId);
+    encoder.encodeUnsignedInt(2, path.clusterId);
+    encoder.encodeUnsignedInt(3, path.eventId);
+
+    if (path.isUrgent)
+        encoder.encodeBool(4, true);
+
+    encoder.closeContainer();
+}
+
 // --- Path decoding ---
 
 AttributePath InteractionModel::decodeAttributePath(const MatterTLV::Element &element)
@@ -36,6 +50,24 @@ AttributePath InteractionModel::decodeAttributePath(const MatterTLV::Element &el
             case 2: path.endpointId = el.value.toUInt(); break;
             case 3: path.clusterId = el.value.toUInt(); break;
             case 4: path.attributeId = el.value.toUInt(); break;
+        }
+    }
+
+    return path;
+}
+
+EventPath InteractionModel::decodeEventPath(const MatterTLV::Element &element)
+{
+    EventPath path;
+
+    for (const MatterTLV::Element &el : element.children)
+    {
+        switch (el.tag)
+        {
+            case 1: path.endpointId = el.value.toUInt(); break;
+            case 2: path.clusterId = el.value.toUInt(); break;
+            case 3: path.eventId = el.value.toUInt(); break;
+            case 4: path.isUrgent = el.value.toBool(); break;
         }
     }
 
@@ -217,7 +249,7 @@ QByteArray InteractionModel::encodeInvokeRequest(const CommandPath &path, const 
 
 // --- Subscribe Request ---
 
-QByteArray InteractionModel::encodeSubscribeRequest(const QList <AttributePath> &paths, quint16 minInterval, quint16 maxInterval)
+QByteArray InteractionModel::encodeSubscribeRequest(const QList <AttributePath> &attributePaths, const QList <EventPath> &eventPaths, quint16 minInterval, quint16 maxInterval)
 {
     MatterTLV::Encoder encoder;
     encoder.openStructure();
@@ -229,10 +261,21 @@ QByteArray InteractionModel::encodeSubscribeRequest(const QList <AttributePath> 
     // tag 3: AttributeRequests
     encoder.openArray(3);
 
-    for (const AttributePath &path : paths)
+    for (const AttributePath &path : attributePaths)
         encodeAttributePath(encoder, path);
 
     encoder.closeContainer();
+
+    // tag 4: EventRequests (Matter §8.5.4)
+    if (!eventPaths.isEmpty())
+    {
+        encoder.openArray(4);
+
+        for (const EventPath &path : eventPaths)
+            encodeEventPath(encoder, path);
+
+        encoder.closeContainer();
+    }
 
     // tag 7: FabricFiltered (required)
     encoder.encodeBool(7, false);
@@ -322,6 +365,49 @@ QList <AttributeReport> InteractionModel::decodeReportData(const QByteArray &pay
             }
 
             reports.append(report);
+        }
+    }
+
+    return reports;
+}
+
+// EventReports live at tag 2 of ReportData. Each EventReportIB has tag 0 (EventStatusIB, error) or
+// tag 1 (EventDataIB, normal). EventDataIB: tag 0=path, tag 1=eventNumber, tag 2=priority,
+// tag 3..6 = timestamps (we ignore — peer-side time, not useful), tag 7=Data (cluster-specific TLV).
+QList <EventReport> InteractionModel::decodeEventReports(const QByteArray &payload)
+{
+    QList <EventReport> reports;
+    MatterTLV::Decoder decoder(payload);
+    MatterTLV::Element root = decoder.decode();
+
+    for (const MatterTLV::Element &el : root.children)
+    {
+        if (el.tag != 2)
+            continue;
+
+        for (const MatterTLV::Element &reportIB : el.children)
+        {
+            EventReport report;
+
+            for (const MatterTLV::Element &field : reportIB.children)
+            {
+                if (field.tag != 1) // skip EventStatusIB (errors); we only handle data
+                    continue;
+
+                for (const MatterTLV::Element &dataField : field.children)
+                {
+                    switch (dataField.tag)
+                    {
+                        case 0: report.path = decodeEventPath(dataField); break;
+                        case 1: report.eventNumber = dataField.value.toULongLong(); break;
+                        case 2: report.priority = static_cast <quint8> (dataField.value.toUInt()); break;
+                        case 7: report.data = dataField; break;
+                    }
+                }
+            }
+
+            if (report.path.clusterId)
+                reports.append(report);
         }
     }
 

@@ -302,18 +302,49 @@ QList <AttributePath> Matter::buildSubscribePaths(DeviceObject *device)
     return paths;
 }
 
+QList <EventPath> Matter::buildSubscribeEvents(DeviceObject *device)
+{
+    QList <EventPath> events;
+
+    for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
+    {
+        EndpointObject *ep = reinterpret_cast <EndpointObject*> (it.value().data());
+
+        if (!ep->clusters().contains(Clusters::Switch::Id))
+            continue;
+
+        // subscribe to all Switch cluster events on this endpoint — device only emits the ones its FeatureMap
+        // supports, so over-subscription is harmless and saves us reading FeatureMap during discovery
+        for (quint32 ev : {Clusters::Switch::Events::SwitchLatched,
+                           Clusters::Switch::Events::InitialPress,
+                           Clusters::Switch::Events::LongPress,
+                           Clusters::Switch::Events::ShortRelease,
+                           Clusters::Switch::Events::LongRelease,
+                           Clusters::Switch::Events::MultiPressOngoing,
+                           Clusters::Switch::Events::MultiPressComplete})
+            events.append(EventPath(it.key(), Clusters::Switch::Id, ev, true));
+    }
+
+    return events;
+}
+
 void Matter::subscribeDevice(DeviceObject *device, SessionInfo *session)
 {
     if (!session)
         return;
 
     QList <AttributePath> paths = buildSubscribePaths(device);
+    QList <EventPath> events = buildSubscribeEvents(device);
 
-    if (paths.isEmpty())
+    if (paths.isEmpty() && events.isEmpty())
         return;
 
-    logInfo << device << "subscribing to" << paths.count() << "attributes";
-    QByteArray subPayload = InteractionModel::encodeSubscribeRequest(paths, 0, 60);
+    logInfo << device << "subscribing to" << paths.count() << "attributes," << events.count() << "events";
+    // peer dumps its event history in the priming ReportData (Matter §8.5.7 — priming arrives before SubscribeResponse).
+    // we don't want those replayed buffered clicks to fire automations on every restart, so flag the device as
+    // "not yet primed" and drop event reports until SubscribeResponse confirms we're past the priming dump.
+    device->setSubscriptionPrimed(false);
+    QByteArray subPayload = InteractionModel::encodeSubscribeRequest(paths, events, 0, 60);
     sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::SubscribeRequest), static_cast <quint16> (ProtocolId::InteractionModel), subPayload, m_exchangeCounter++, true);
 }
 
@@ -476,6 +507,18 @@ void Matter::removeDevice(DeviceObject *device)
 
         logWarning << device << "no active session, removing forcefully";
         emit deviceEvent(device, Event::removed, {{"success", false}});
+
+        // tear down any in-flight CASE for this device before m_devices->removeAt drops the last shared pointer ref
+        for (auto it = m_pendingCASEs.begin(); it != m_pendingCASEs.end(); )
+        {
+            if (it.value().device == device)
+            {
+                it.value().session->deleteLater();
+                it = m_pendingCASEs.erase(it);
+            }
+            else
+                it++;
+        }
 
         if (index >= 0)
         {
@@ -827,6 +870,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
         {
             QList <AttributeReport> reports = InteractionModel::decodeReportData(payload);
             QList <AttributePath> pendingSubPaths;
+            QList <EventPath> pendingSubEvents;
             SessionInfo *pendingSubSession = nullptr;
             DeviceObject *pendingSubDevice = nullptr;
 
@@ -962,6 +1006,115 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                 }
             }
 
+            // process event reports — currently used for Switch cluster button actions (Matter §1.13)
+            {
+                SessionInfo *evSession = m_sessions->findByLocalId(msgHeader.sessionId);
+                DeviceObject *evDevice = nullptr;
+
+                if (evSession)
+                {
+                    for (int i = 0; i < m_devices->count(); i++)
+                    {
+                        DeviceObject *dev = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
+
+                        if (dev->nodeId() == evSession->peerNodeId)
+                        {
+                            evDevice = dev;
+                            break;
+                        }
+                    }
+                }
+
+                if (evDevice)
+                {
+                    QList <EventReport> events = InteractionModel::decodeEventReports(payload);
+
+                    for (const EventReport &event : events)
+                    {
+                        logDebug(m_debug) << "Event, ep:" << event.path.endpointId << "cluster:" << QString::number(event.path.clusterId, 16) << "event:" << QString::number(event.path.eventId, 16) << "number:" << event.eventNumber;
+
+                        // drop events arriving in the priming ReportData (peer dumps its event buffer there);
+                        // we only care about events that occur after subscribe is established
+                        if (!evDevice->subscriptionPrimed())
+                            continue;
+
+                        if (event.path.clusterId != Clusters::Switch::Id)
+                            continue;
+
+                        // map Switch events to action strings (zigbee-style: single_click/double_click/hold/release/latched).
+                        // we use MultiPressComplete for click counts when available (it carries the final N), and fall
+                        // back to ShortRelease as "single_click" for devices without the MSM feature.
+                        QString action;
+
+                        switch (event.path.eventId)
+                        {
+                            case Clusters::Switch::Events::SwitchLatched:
+                                action = "latched";
+                                break;
+
+                            case Clusters::Switch::Events::ShortRelease:
+                            {
+                                // for devices supporting MSM (multi-press), peer will follow up with MultiPressComplete
+                                // carrying the press count — emitting singleClick here causes a duplicate before the
+                                // doubleClick arrives. only fall back to ShortRelease for devices without MSM.
+                                Endpoint endpoint = evDevice->endpoints().value(static_cast <quint8> (event.path.endpointId));
+                                quint32 features = endpoint.isNull() ? 0 : reinterpret_cast <EndpointObject*> (endpoint.data())->meta().value("switchFeatures").toUInt();
+
+                                if (!(features & Clusters::Switch::Features::MSM))
+                                    action = "singleClick";
+
+                                break;
+                            }
+
+                            case Clusters::Switch::Events::LongPress:
+                                action = "hold";
+                                break;
+
+                            case Clusters::Switch::Events::LongRelease:
+                                action = "release";
+                                break;
+
+                            case Clusters::Switch::Events::MultiPressComplete:
+                            {
+                                // MultiPressComplete data (Matter §1.13.6.6): tag 0=PreviousPosition, tag 1=TotalNumberOfPressesCounted
+                                quint8 count = 0;
+
+                                for (const MatterTLV::Element &child : event.data.children)
+                                {
+                                    if (child.tag == 1)
+                                        count = static_cast <quint8> (child.value.toUInt());
+                                }
+
+                                switch (count)
+                                {
+                                    case 1: action = "singleClick"; break;
+                                    case 2: action = "doubleClick"; break;
+                                    case 3: action = "tripleClick"; break;
+                                    default:
+                                        if (count > 0)
+                                            action = "multipleClick";
+                                        break;
+                                }
+
+                                break;
+                            }
+                        }
+
+                        if (!action.isEmpty())
+                        {
+                            quint8 epId = static_cast <quint8> (event.path.endpointId);
+                            evDevice->updateEndpoint(epId, "action", action);
+                            // "action" is a transient event — clear it from endpoint status right after publish so
+                            // subsequent unrelated updates (other attributes on this endpoint) don't carry the stale
+                            // value, and HA picks up each press as a fresh state transition
+                            Endpoint endpoint = evDevice->endpoints().value(epId);
+                            if (!endpoint.isNull())
+                                reinterpret_cast <EndpointObject*> (endpoint.data())->status().remove("action");
+                        }
+                    }
+                }
+            }
+
             // process Descriptor cluster reports — build endpoints and exposes
             {
                 SessionInfo *reportSession = m_sessions->findByLocalId(msgHeader.sessionId);
@@ -1018,21 +1171,19 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         QList <AttributePath> serverPaths;
 
                         for (quint8 ep : queryEndpoints)
-                        {
                             serverPaths.append(AttributePath(ep, Clusters::Descriptor::Id, Clusters::Descriptor::Attributes::ServerList));
-                            serverPaths.append(AttributePath(ep, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorCapabilities));
-                            serverPaths.append(AttributePath(ep, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTempPhysicalMinMireds));
-                            serverPaths.append(AttributePath(ep, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTempPhysicalMaxMireds));
-                        }
 
                         QByteArray serverPayload = InteractionModel::encodeReadRequest(serverPaths);
                         sendEncrypted(reportSession, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), serverPayload, m_exchangeCounter++, true);
                     }
 
-                    // step 2 response: ServerList + ColorCapabilities + ColorTempPhysicalMin/Max — create exposes and subscribe
+                    // discovery is split across two reads to keep the path count bounded for multi-endpoint peers
+                    // (Aqara W100 hits PathsExhausted otherwise): step 2 collects ServerList per endpoint, step 3
+                    // collects cluster-specific attrs (Switch features, Color caps) only on endpoints that need them.
+                    // setupEndpoint runs ONCE per endpoint at the end — only after both stages have populated clusters
+                    // and meta — so exposes and their option enums are built in a single pass and published once.
                     QMap <quint8, QList <quint32>> endpointClusters;
-                    QMap <quint8, quint16> colorCapabilities;
-                    QMap <quint8, quint16> colorTempMin, colorTempMax;
+                    bool wroteFollowupMeta = false;
 
                     for (const AttributeReport &report : reports)
                     {
@@ -1048,39 +1199,120 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             if (report.value.isValid() && report.value.canConvert <uint> ())
                                 endpointClusters[report.path.endpointId].append(report.value.toUInt());
                         }
-                        else if (report.path.clusterId == Clusters::ColorControl::Id && report.path.attributeId == Clusters::ColorControl::Attributes::ColorCapabilities)
+                        else
                         {
-                            colorCapabilities[report.path.endpointId] = report.value.toUInt();
-                            logDebug(m_debug) << "ColorCapabilities for ep" << report.path.endpointId << ":" << QString::number(report.value.toUInt(), 16);
-                        }
-                        else if (report.path.clusterId == Clusters::ColorControl::Id && report.path.attributeId == Clusters::ColorControl::Attributes::ColorTempPhysicalMinMireds)
-                        {
-                            colorTempMin[report.path.endpointId] = static_cast <quint16> (report.value.toUInt());
-                        }
-                        else if (report.path.clusterId == Clusters::ColorControl::Id && report.path.attributeId == Clusters::ColorControl::Attributes::ColorTempPhysicalMaxMireds)
-                        {
-                            colorTempMax[report.path.endpointId] = static_cast <quint16> (report.value.toUInt());
+                            // step 3 follow-up: write attribute value to endpoint meta. expose-building is deferred
+                            // to the finalize block below so meta is fully populated when setupEndpoint runs.
+                            QString metaKey;
+
+                            switch (report.path.clusterId)
+                            {
+                                case Clusters::ColorControl::Id:
+                                    switch (report.path.attributeId)
+                                    {
+                                        case Clusters::ColorControl::Attributes::ColorCapabilities:        metaKey = "colorCapabilities"; break;
+                                        case Clusters::ColorControl::Attributes::ColorTempPhysicalMinMireds: metaKey = "colorTempMin"; break;
+                                        case Clusters::ColorControl::Attributes::ColorTempPhysicalMaxMireds: metaKey = "colorTempMax"; break;
+                                    }
+                                    break;
+
+                                case Clusters::Switch::Id:
+                                    switch (report.path.attributeId)
+                                    {
+                                        case Clusters::Switch::Attributes::FeatureMap:    metaKey = "switchFeatures"; break;
+                                        case Clusters::Switch::Attributes::MultiPressMax: metaKey = "switchMultiPressMax"; break;
+                                    }
+                                    break;
+                            }
+
+                            if (!metaKey.isEmpty() && reportDevice)
+                            {
+                                Endpoint endpoint = reportDevice->endpoints().value(static_cast <quint8> (report.path.endpointId));
+
+                                if (!endpoint.isNull())
+                                {
+                                    reinterpret_cast <EndpointObject*> (endpoint.data())->meta().insert(metaKey, report.value.toUInt());
+                                    wroteFollowupMeta = true;
+                                }
+                            }
                         }
                     }
 
-                    // create endpoints and exposes (incl. ep 0 — some devices put PowerSource there)
-                    for (auto it = endpointClusters.begin(); it != endpointClusters.end(); it++)
+                    bool finalizeDiscovery = false;
+
+                    if (!endpointClusters.isEmpty() && reportDevice)
                     {
-                        quint16 minMireds = colorTempMin.value(it.key(), 0);
-                        quint16 maxMireds = colorTempMax.value(it.key(), 0);
+                        // step 2: register endpoints with their clusters (no exposes yet — meta from step 3 isn't in)
+                        for (auto it = endpointClusters.begin(); it != endpointClusters.end(); it++)
+                            m_devices->addEndpoint(reportDevice, it.key(), it.value());
 
-                        if (minMireds && maxMireds)
-                            logInfo << reportDevice << "endpoint" << it.key() << "color temperature range:" << minMireds << "..." << maxMireds << "mireds";
+                        // build follow-up paths only for endpoints that actually need cluster-specific attrs
+                        QList <AttributePath> followupPaths;
 
-                        m_devices->setupEndpoint(reportDevice, it.key(), it.value(), colorCapabilities.value(it.key(), 0), minMireds, maxMireds);
+                        for (auto it = endpointClusters.begin(); it != endpointClusters.end(); it++)
+                        {
+                            if (it.value().contains(Clusters::ColorControl::Id))
+                            {
+                                followupPaths.append(AttributePath(it.key(), Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorCapabilities));
+                                followupPaths.append(AttributePath(it.key(), Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTempPhysicalMinMireds));
+                                followupPaths.append(AttributePath(it.key(), Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTempPhysicalMaxMireds));
+                            }
+
+                            if (it.value().contains(Clusters::Switch::Id))
+                            {
+                                followupPaths.append(AttributePath(it.key(), Clusters::Switch::Id, Clusters::Switch::Attributes::FeatureMap));
+                                followupPaths.append(AttributePath(it.key(), Clusters::Switch::Id, Clusters::Switch::Attributes::MultiPressMax));
+                            }
+                        }
+
+                        if (!followupPaths.isEmpty() && reportSession)
+                        {
+                            QByteArray followupPayload = InteractionModel::encodeReadRequest(followupPaths);
+                            sendEncrypted(reportSession, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), followupPayload, m_exchangeCounter++, true);
+                        }
+                        else
+                        {
+                            // no step 3 needed for this peer — finalize directly from step 2
+                            finalizeDiscovery = true;
+                        }
                     }
 
-                    m_devices->updateMultiple(reportDevice);
+                    if (wroteFollowupMeta && reportDevice)
+                        finalizeDiscovery = true;
 
-                    // collect subscribe paths for after StatusResponse
-                    if (!endpointClusters.isEmpty() && reportSession)
+                    if (finalizeDiscovery && reportDevice && reportSession)
                     {
+                        // single-pass expose-build for every registered endpoint with full clusters + meta
+                        for (auto ep = reportDevice->endpoints().begin(); ep != reportDevice->endpoints().end(); ep++)
+                            m_devices->setupEndpoint(reportDevice, ep.key());
+
+                        m_devices->updateMultiple(reportDevice);
+
+                        // late session persistence: caseEstablished can't tell whether a freshly-commissioned device is
+                        // battery-powered until PowerSource is detected here in discovery. now that the flag is set,
+                        // capture the active CASE keys onto the device so serialize() can write them to disk.
+                        if (reportDevice->batteryPowered() && !reportDevice->hasPersistedSession())
+                        {
+                            SessionInfo *active = m_sessions->findByPeerNodeId(reportDevice->nodeId());
+
+                            if (active)
+                            {
+                                reportDevice->setSessionLocalId(active->localSessionId);
+                                reportDevice->setSessionPeerId(active->peerSessionId);
+                                reportDevice->setSessionI2RKey(active->i2rKey);
+                                reportDevice->setSessionR2IKey(active->r2iKey);
+                                reportDevice->setSessionAttestation(active->attestationChallenge);
+                                reportDevice->setSessionLocalCounter(0);
+                                reportDevice->setSessionIdleInterval(active->idleInterval);
+                                reportDevice->setSessionActiveInterval(active->activeInterval);
+                                reportDevice->setSessionActiveThreshold(active->activeThreshold);
+                            }
+                        }
+
+                        m_devices->store(true);
+
                         pendingSubPaths = buildSubscribePaths(reportDevice);
+                        pendingSubEvents = buildSubscribeEvents(reportDevice);
                         pendingSubSession = reportSession;
                         pendingSubDevice = reportDevice;
                     }
@@ -1098,10 +1330,11 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
             }
 
             // send SubscribeRequest after StatusResponse has been sent
-            if (!pendingSubPaths.isEmpty() && pendingSubSession && pendingSubDevice)
+            if ((!pendingSubPaths.isEmpty() || !pendingSubEvents.isEmpty()) && pendingSubSession && pendingSubDevice)
             {
-                logInfo << pendingSubDevice << "subscribing to" << pendingSubPaths.count() << "attributes";
-                QByteArray subPayload = InteractionModel::encodeSubscribeRequest(pendingSubPaths, 0, 60);
+                logInfo << pendingSubDevice << "subscribing to" << pendingSubPaths.count() << "attributes," << pendingSubEvents.count() << "events";
+                pendingSubDevice->setSubscriptionPrimed(false);
+                QByteArray subPayload = InteractionModel::encodeSubscribeRequest(pendingSubPaths, pendingSubEvents, 0, 60);
                 sendEncrypted(pendingSubSession, static_cast <quint8> (InteractionModelOpcode::SubscribeRequest), static_cast <quint16> (ProtocolId::InteractionModel), subPayload, m_exchangeCounter++, true);
                 pendingSubDevice->deviceUpdated(pendingSubDevice);
             }
@@ -1226,7 +1459,13 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
             {
                 Device device = m_devices->byNodeId(subSession->peerNodeId);
                 if (!device.isNull())
-                    reinterpret_cast <DeviceObject*> (device.data())->setSubMaxInterval(maxInterval);
+                {
+                    DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
+                    obj->setSubMaxInterval(maxInterval);
+                    // priming Reports (which carry the buffered event history) arrive before SubscribeResponse —
+                    // anything from now on is real-time, safe to process events normally
+                    obj->setSubscriptionPrimed(true);
+                }
             }
             break;
         }
@@ -1458,6 +1697,26 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         m_devices->byName(m_pendingRemoveDevice->name(), &index);
 
                         emit deviceEvent(m_pendingRemoveDevice, Event::removed, {{"success", status == 0}});
+
+                        // tear down any in-flight CASE for this device — its raw DeviceObject* would dangle once
+                        // the QSharedPointer in m_devices drops to zero on removeAt, and caseFailed/Established
+                        // would crash dereferencing it
+                        for (auto it = m_pendingCASEs.begin(); it != m_pendingCASEs.end(); )
+                        {
+                            if (it.value().device == m_pendingRemoveDevice)
+                            {
+                                it.value().session->deleteLater();
+                                it = m_pendingCASEs.erase(it);
+                            }
+                            else
+                                it++;
+                        }
+
+                        // also drop any encrypted session (session manager keys by localSessionId/peerNodeId, not pointer)
+                        SessionInfo *deadSession = m_sessions->findByPeerNodeId(m_pendingRemoveDevice->nodeId());
+
+                        if (deadSession)
+                            m_sessions->removeSession(deadSession->localSessionId);
 
                         if (index >= 0)
                         {
@@ -2739,9 +2998,12 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
         logInfo << device << (caseSes->resumed() ? "session resumed" : "full handshake") << ", saving new resumptionID:" << newResumptionID.toHex();
     }
 
-    // persist secure session ONLY for battery-powered devices: for them CASE on restart means waking the radio
-    // (battery hit) and waiting tens of seconds on slow MRP intervals; for mains devices CASE-with-resumption is
-    // already ~200ms instantaneous and persistence has no upside (just risk of stale session if peer rebooted)
+    // persist the secure session for battery-powered devices so a service restart can decrypt with the
+    // existing keys instead of forcing a fresh CASE handshake (which wakes the radio and burns ~tens of
+    // seconds on slow MRP intervals). mains devices skip persistence — CASE-with-resumption is already
+    // sub-second so storing keys to disk has no upside. the battery flag may still be false here on the
+    // very first caseEstablished after commissioning (PowerSource detection happens later in discovery);
+    // discovery's finalize step late-populates session fields once the flag flips to true.
     if (device->batteryPowered())
     {
         device->setSessionLocalId(localSessionId);

@@ -51,6 +51,17 @@ struct AttributePath
     AttributePath(quint16 ep, quint32 cl, quint32 at) : endpointId(ep), clusterId(cl), attributeId(at) {}
 };
 
+struct EventPath
+{
+    quint16 endpointId;
+    quint32 clusterId;
+    quint32 eventId;
+    bool isUrgent;
+
+    EventPath(void) : endpointId(0), clusterId(0), eventId(0), isUrgent(false) {}
+    EventPath(quint16 ep, quint32 cl, quint32 ev, bool urgent = false) : endpointId(ep), clusterId(cl), eventId(ev), isUrgent(urgent) {}
+};
+
 struct CommandPath
 {
     quint16 endpointId;
@@ -72,6 +83,16 @@ struct AttributeReport
     AttributeReport(void) : status(0), hasError(false) {}
 };
 
+struct EventReport
+{
+    EventPath path;
+    quint64 eventNumber;
+    quint8 priority;
+    MatterTLV::Element data;
+
+    EventReport(void) : eventNumber(0), priority(0) {}
+};
+
 struct CommandResponse
 {
     CommandPath path;
@@ -91,7 +112,7 @@ public:
     static QByteArray encodeReadRequest(const QList <AttributePath> &paths);
     static QByteArray encodeWriteRequest(quint16 endpointId, quint32 clusterId, quint32 attributeId, const MatterTLV::Encoder &valueEncoder);
     static QByteArray encodeInvokeRequest(const CommandPath &path, const MatterTLV::Encoder &fieldsEncoder, bool timedRequest = false);
-    static QByteArray encodeSubscribeRequest(const QList <AttributePath> &paths, quint16 minInterval, quint16 maxInterval);
+    static QByteArray encodeSubscribeRequest(const QList <AttributePath> &attributePaths, const QList <EventPath> &eventPaths, quint16 minInterval, quint16 maxInterval);
 
     static QByteArray encodeTimedRequest(quint16 timeoutMs);
     static QByteArray encodeStatusResponse(quint8 status);
@@ -99,6 +120,7 @@ public:
     // --- Decoding ---
 
     static QList <AttributeReport> decodeReportData(const QByteArray &payload);
+    static QList <EventReport> decodeEventReports(const QByteArray &payload);
     static QList <CommandResponse> decodeInvokeResponse(const QByteArray &payload);
     static quint8 decodeStatusResponse(const QByteArray &payload);
 
@@ -115,9 +137,11 @@ public:
 private:
 
     static void encodeAttributePath(MatterTLV::Encoder &encoder, const AttributePath &path);
+    static void encodeEventPath(MatterTLV::Encoder &encoder, const EventPath &path);
     static void encodeCommandPath(MatterTLV::Encoder &encoder, const CommandPath &path);
 
     static AttributePath decodeAttributePath(const MatterTLV::Element &element);
+    static EventPath decodeEventPath(const MatterTLV::Element &element);
     static CommandPath decodeCommandPath(const MatterTLV::Element &element);
 
 };

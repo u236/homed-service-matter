@@ -34,7 +34,7 @@ class DeviceObject : public AbstractDeviceObject
 public:
 
     DeviceObject(quint64 nodeId, const QString &name) :
-        AbstractDeviceObject(name), m_nodeId(nodeId), m_fabricIndex(0), m_vendorId(0), m_productId(0), m_networkPort(5540), m_subMaxInterval(0), m_nextReconnectAt(0), m_thread(false), m_batteryPowered(false), m_lastSeen(0),
+        AbstractDeviceObject(name), m_nodeId(nodeId), m_fabricIndex(0), m_vendorId(0), m_productId(0), m_networkPort(5540), m_subMaxInterval(0), m_nextReconnectAt(0), m_thread(false), m_batteryPowered(false), m_subscriptionPrimed(true), m_lastSeen(0),
         m_sessionLocalId(0), m_sessionPeerId(0), m_sessionLocalCounter(0), m_sessionIdleInterval(500), m_sessionActiveInterval(300), m_sessionActiveThreshold(4000) {}
 
     inline QByteArray resumptionID(void) { return m_resumptionID; }
@@ -72,6 +72,9 @@ public:
 
     inline bool batteryPowered(void) { return m_batteryPowered; }
     inline void setBatteryPowered(bool value) { m_batteryPowered = value; }
+
+    inline bool subscriptionPrimed(void) { return m_subscriptionPrimed; }
+    inline void setSubscriptionPrimed(bool value) { m_subscriptionPrimed = value; }
 
     inline qint64 lastSeen(void) { return m_lastSeen; }
     inline void setLastSeen(qint64 value) { m_lastSeen = value; }
@@ -126,6 +129,7 @@ private:
     qint64 m_nextReconnectAt;
     bool m_thread;
     bool m_batteryPowered;
+    bool m_subscriptionPrimed;
     qint64 m_lastSeen;
     QByteArray m_resumptionID;
     QByteArray m_resumptionSharedSecret;
@@ -163,7 +167,8 @@ public:
 
     void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC, const QByteArray &controllerRCAC);
 
-    void setupEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters, quint16 colorCapabilities = 0, quint16 colorTempMin = 0, quint16 colorTempMax = 0);
+    void addEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters);
+    void setupEndpoint(DeviceObject *device, quint8 endpointId);
     void updateMultiple(DeviceObject *device);
 
     Device byName(const QString &name, int *index = nullptr);

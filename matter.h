@@ -199,6 +199,7 @@ private:
     void handleDeviceUnreachable(DeviceObject *device);
     void connectDeviceSignals(DeviceObject *device);
     QList <AttributePath> buildSubscribePaths(DeviceObject *device);
+    QList <EventPath> buildSubscribeEvents(DeviceObject *device);
     void subscribeDevice(DeviceObject *device, SessionInfo *session);
     void sendBleMessage(quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator);
     void sendEncryptedBle(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator);

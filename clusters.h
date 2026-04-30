@@ -165,6 +165,41 @@ namespace Clusters
         }
     }
 
+    namespace Switch // 0x003B
+    {
+        const quint32 Id = 0x003B;
+
+        namespace Attributes
+        {
+            const quint32 NumberOfPositions = 0x0000;
+            const quint32 CurrentPosition   = 0x0001;
+            const quint32 MultiPressMax     = 0x0002;
+            const quint32 FeatureMap        = 0xFFFC;
+        }
+
+        // Matter §1.13 — events depend on FeatureMap bits LS/MS/MSR/MSL/MSM/AS
+        namespace Events
+        {
+            const quint32 SwitchLatched      = 0x00; // LS (Latching Switch)
+            const quint32 InitialPress       = 0x01; // MS (Momentary Switch)
+            const quint32 LongPress          = 0x02; // MSL
+            const quint32 ShortRelease       = 0x03; // MSR (without AS)
+            const quint32 LongRelease        = 0x04; // MSL
+            const quint32 MultiPressOngoing  = 0x05; // MSM
+            const quint32 MultiPressComplete = 0x06; // MSM
+        }
+
+        namespace Features
+        {
+            const quint32 LS  = 1 << 0;
+            const quint32 MS  = 1 << 1;
+            const quint32 MSR = 1 << 2;
+            const quint32 MSL = 1 << 3;
+            const quint32 MSM = 1 << 4;
+            const quint32 AS  = 1 << 5;
+        }
+    }
+
     namespace LevelControl // 0x0008
     {
         const quint32 Id = 0x0008;
