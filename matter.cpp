@@ -10,7 +10,7 @@
 
 using namespace MatterProtocol;
 
-Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), m_mrp(new MRP(this)), m_mdns(new MDNS(this)), m_ble(new BLE(this)), m_btp(new BTP(this)), m_sessions(new SessionManager(this)), m_searchTimer(new QTimer(this)), m_reconnectTimer(new QTimer(this)), m_pingTimer(new QTimer(this)), m_port(5540), m_debug(false), m_searching(false), m_searchShortDiscriminator(false), m_searchPasscode(0), m_searchDiscriminator(0), m_messageCounter(0), m_exchangeCounter(0), m_sessionCounter(1), m_fabricId(1), m_nodeId(1), m_devices(new DeviceList(config, parent)), m_events(QMetaEnum::fromType <Event> ()), m_bleCommissioning(false)
+Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), m_mrp(new MRP(this)), m_mdns(new MDNS(this)), m_ble(new BLE(this)), m_btp(new BTP(this)), m_sessions(new SessionManager(this)), m_searchTimer(new QTimer(this)), m_reconnectTimer(new QTimer(this)), m_pingTimer(new QTimer(this)), m_port(5540), m_debug(false), m_searching(false), m_searchShortDiscriminator(false), m_searchPasscode(0), m_searchDiscriminator(0), m_messageCounter(0), m_exchangeCounter(0), m_sessionCounter(1), m_fabricId(1), m_nodeId(1), m_threadReady(false), m_threadDatasetTimer(new QTimer(this)), m_devices(new DeviceList(config, parent)), m_events(QMetaEnum::fromType <Event> ()), m_bleCommissioning(false)
 {
     QByteArray counterBytes = Crypto::randomBytes(sizeof(m_messageCounter));
 
@@ -23,27 +23,16 @@ Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new 
     m_wifiSSID = config->value("wifi/ssid").toString();
     m_wifiPassword = config->value("wifi/password").toString();
 
-    QString otbr = config->value("thread/otbr").toString();
+    m_otbrUrl = config->value("thread/otbr").toString();
 
-    if (!otbr.isEmpty())
+    // probe OTBR right away; if it isn't up yet (matter started before otbr after host reboot), start a 5s
+    // retry timer. m_threadReady stays false until we successfully fetch a dataset — that flag gates outgoing
+    // traffic to Thread peers so we don't pile MRP retransmits onto a dead route, and gates startup subscribe
+    // for restored Thread sessions so we don't burst-flood peers when the radio finally comes up
+    if (!m_otbrUrl.isEmpty() && !fetchThreadDataset())
     {
-        QString url = QString("http://%1/node/dataset/active").arg(otbr);
-        QProcess curl;
-        curl.start("curl", {"-fsS", "-H", "Accept: text/plain", "--max-time", "5", url});
-        curl.waitForFinished(6000);
-
-        if (curl.exitStatus() == QProcess::NormalExit && curl.exitCode() == 0)
-        {
-            m_threadDataset = QByteArray::fromHex(curl.readAllStandardOutput().trimmed());
-            m_threadExtPanId = extractThreadExtPanId(m_threadDataset);
-
-            if (m_threadExtPanId.isEmpty())
-                logWarning << "Failed to extract Extended PAN ID from Thread dataset fetched from" << otbr;
-            else
-                logInfo << "Thread dataset fetched from" << otbr << ", ExtPanId:" << m_threadExtPanId.toHex();
-        }
-        else
-            logWarning << "Failed to fetch Thread dataset from" << otbr << ":" << curl.readAllStandardError().trimmed();
+        connect(m_threadDatasetTimer, &QTimer::timeout, this, &Matter::threadDatasetTimeout);
+        m_threadDatasetTimer->start(5000);
     }
 
     connect(m_udp, &QUdpSocket::readyRead, this, &Matter::readyRead);
@@ -121,9 +110,21 @@ Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new 
         logInfo << device << "restored secure session, local:" << session.localSessionId << "peer:" << session.peerSessionId << "counter from:" << session.localMessageCounter;
 
         // peer's subscription state may have timed out while we were down (max interval passed without our acks),
-        // re-subscribe to be safe — if the old subscription still exists peer will replace it
-        if (!device->endpoints().isEmpty())
-            subscribeDevice(device, m_sessions->findByLocalId(session.localSessionId));
+        // re-subscribe to be safe — if the old subscription still exists peer will replace it. Thread-routed
+        // peers wait for OTBR readiness: until m_threadReady flips we have no route to mesh-local addresses,
+        // so subscribing now would just queue MRP retransmits that would all storm out at once when the route
+        // appears, prompting BUSY responses from peers
+        if (device->endpoints().isEmpty())
+            continue;
+
+        if (device->thread() && !m_threadReady)
+        {
+            // device stays Offline until the first packet round-trip succeeds via resumeThreadDevices()
+            device->setAvailability(Availability::Offline);
+            continue;
+        }
+
+        subscribeDevice(device, m_sessions->findByLocalId(session.localSessionId));
     }
 
     if (m_devices->fabricKey().isEmpty())
@@ -145,6 +146,70 @@ Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new 
 Matter::~Matter(void)
 {
     delete m_devices;
+}
+
+bool Matter::fetchThreadDataset(void)
+{
+    QString url = QString("http://%1/node/dataset/active").arg(m_otbrUrl);
+    QProcess curl;
+
+    curl.start("curl", {"-fsS", "-H", "Accept: text/plain", "--max-time", "5", url});
+    curl.waitForFinished(6000);
+
+    if (curl.exitStatus() != QProcess::NormalExit || curl.exitCode() != 0)
+        return false;
+
+    QByteArray dataset = QByteArray::fromHex(curl.readAllStandardOutput().trimmed());
+    QByteArray extPanId = extractThreadExtPanId(dataset);
+
+    if (extPanId.isEmpty())
+        return false;
+
+    m_threadDataset = dataset;
+    m_threadExtPanId = extPanId;
+    m_threadReady = true;
+
+    logInfo << "Thread dataset fetched from" << m_otbrUrl << ", ExtPanId:" << m_threadExtPanId.toHex();
+
+    return true;
+}
+
+void Matter::threadDatasetTimeout(void)
+{
+    if (!fetchThreadDataset())
+        return;
+
+    m_threadDatasetTimer->stop();
+    resumeThreadDevices();
+}
+
+void Matter::resumeThreadDevices(void)
+{
+    // OTBR just came up and the host now has a route into the Thread mesh. Wake Thread peers the same way
+    // cold start does: peers with a session restored from disk get a subscribe directly, peers without get
+    // a fresh CASE via reconnect-pipeline. No stagger — burst at startup has never been a problem here.
+    bool needReconnect = false;
+
+    for (int i = 0; i < m_devices->count(); i++)
+    {
+        DeviceObject *device = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
+
+        if (!device->thread() || device->endpoints().isEmpty())
+            continue;
+
+        SessionInfo *session = m_sessions->findByPeerNodeId(device->nodeId());
+
+        if (session)
+            subscribeDevice(device, session);
+        else
+        {
+            device->setNextReconnectAt(0);
+            needReconnect = true;
+        }
+    }
+
+    if (needReconnect)
+        scheduleReconnect();
 }
 
 void Matter::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC, const QByteArray &controllerRCAC)
@@ -176,6 +241,14 @@ void Matter::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId,
 
 void Matter::connectDevice(DeviceObject *device)
 {
+    // OTBR not up yet — Thread mesh has no route from this host, CASE Sigma1 would queue MRP retransmits
+    // and storm out when the route appears, prompting peer BUSY. resumeThreadDevices() will retry once ready
+    if (device->thread() && !m_threadReady)
+    {
+        logDebug(m_debug) << device << "Thread not ready, deferring CASE";
+        return;
+    }
+
     SessionInfo *existing = m_sessions->findByPeerNodeId(device->nodeId());
 
     if (existing && existing->active)
@@ -2535,6 +2608,10 @@ void Matter::reconnectTimeout(void)
         DeviceObject *device = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
 
         if (device->availability() == Availability::Online || device->networkAddress().isNull())
+            continue;
+
+        // OTBR not up yet — don't try to reach Thread peers; resumeThreadDevices() will reschedule once ready
+        if (device->thread() && !m_threadReady)
             continue;
 
         // already have a session (just restored from disk and waiting for first ack) — don't trigger CASE; we'll only

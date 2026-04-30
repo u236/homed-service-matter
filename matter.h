@@ -172,8 +172,11 @@ private:
 
     QString m_wifiSSID;
     QString m_wifiPassword;
+    QString m_otbrUrl;
     QByteArray m_threadDataset;
     QByteArray m_threadExtPanId;
+    bool m_threadReady;
+    QTimer *m_threadDatasetTimer;
     bool m_bleCommissioning;
 
     QMap <quint16, PendingCommission> m_pendingCommissions;
@@ -220,12 +223,16 @@ private:
     void scheduleReconnect(void);
     PendingCASE *findPendingCASE(CASESession *session);
 
+    bool fetchThreadDataset(void);
+    void resumeThreadDevices(void);
+
 private slots:
 
     void readyRead(void);
     void searchTimeout(void);
     void reconnectTimeout(void);
     void pingTimeout(void);
+    void threadDatasetTimeout(void);
 
     void mrpRetransmit(const QByteArray &data, const QHostAddress &address, quint16 port);
     void mrpRetransmitFailed(quint32 messageCounter, quint16 exchangeId, const QHostAddress &address, quint16 port);
