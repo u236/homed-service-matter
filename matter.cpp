@@ -694,6 +694,31 @@ void Matter::sendCommand(DeviceObject *device, quint8 endpointId, const QString 
         return;
     }
 
+    // gate by the cluster the command targets — broadcast (deviceAction with endpointId=0) iterates ALL
+    // endpoints, including ep 0 (root: BasicInfo/Descriptor/PowerSource/etc) and any auxiliary sensor-only
+    // endpoints that don't actually expose the actionable cluster. without this, every send goes out twice
+    // (or more) and peers get a no-op InvokeRequest on a cluster they don't have
+    quint32 requiredCluster = 0;
+
+    if (name == "status")
+        requiredCluster = Clusters::OnOff::Id;
+    else if (name == "level")
+        requiredCluster = Clusters::LevelControl::Id;
+    else if (name == "color" || name == "colorTemperature" || name == "colorMode")
+        requiredCluster = Clusters::ColorControl::Id;
+    else if (name == "lock")
+        requiredCluster = Clusters::DoorLock::Id;
+    else if (name == "cover" || name == "coverPosition")
+        requiredCluster = Clusters::WindowCovering::Id;
+
+    if (requiredCluster)
+    {
+        Endpoint endpoint = device->endpoints().value(endpointId);
+
+        if (endpoint.isNull() || !reinterpret_cast <EndpointObject*> (endpoint.data())->clusters().contains(requiredCluster))
+            return;
+    }
+
     QByteArray payload;
 
     if (name == "status")
