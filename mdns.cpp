@@ -349,6 +349,24 @@ void MDNS::resolve(const QString &instanceName)
     // TODO: send targeted SRV/TXT/A queries for specific instance
 }
 
+void MDNS::purgeOperational(const QHostAddress &address)
+{
+    // peers that get removed from the fabric should withdraw their mDNS announcement, but some don't
+    // (Shelly 1PM stays on the network and keeps advertising) — drop the cache entry locally so
+    // subsequent browses don't keep finding the ghost
+    for (auto it = m_services.begin(); it != m_services.end(); )
+    {
+        if (it.value().operational && it.value().address == address)
+        {
+            logInfo << "Purging stale operational mDNS entry:" << it.value().instanceName;
+            it = m_services.erase(it);
+            continue;
+        }
+
+        it++;
+    }
+}
+
 void MDNS::readyRead(void)
 {
     QList <QUdpSocket*> sockets = {m_socket, m_socket6};

@@ -108,6 +108,7 @@ public:
     void browse(void);
     void stop(void);
     void resolve(const QString &instanceName);
+    void purgeOperational(const QHostAddress &address);
 
 private:
 

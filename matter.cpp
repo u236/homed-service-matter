@@ -659,10 +659,13 @@ void Matter::removeDevice(DeviceObject *device)
             {
                 it.value().session->deleteLater();
                 it = m_pendingCASEs.erase(it);
+                continue;
             }
-            else
-                it++;
+
+            it++;
         }
+
+        m_mdns->purgeOperational(device->networkAddress());
 
         if (index >= 0)
         {
@@ -1764,9 +1767,10 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                             {
                                 it.value().session->deleteLater();
                                 it = m_pendingCASEs.erase(it);
+                                continue;
                             }
-                            else
-                                it++;
+
+                            it++;
                         }
 
                         // also drop any encrypted session (session manager keys by localSessionId/peerNodeId, not pointer)
@@ -1774,6 +1778,11 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                         if (deadSession)
                             m_sessions->removeSession(deadSession->localSessionId);
+
+                        // drop cached operational mDNS entry — peer (e.g. Shelly 1PM) often keeps announcing
+                        // itself even after we kicked it from the fabric, so the next browse would re-populate
+                        // m_services and we'd risk routing to a node we no longer have keys for
+                        m_mdns->purgeOperational(m_pendingRemoveDevice->networkAddress());
 
                         if (index >= 0)
                         {
