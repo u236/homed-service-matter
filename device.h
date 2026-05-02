@@ -8,7 +8,9 @@
 
 #include <QMetaEnum>
 #include <QHostAddress>
+#include "action.h"
 #include "endpoint.h"
+#include "property.h"
 
 class EndpointObject : public AbstractEndpointObject
 {
@@ -17,13 +19,15 @@ public:
 
     EndpointObject(quint8 id, const Device &device) : AbstractEndpointObject(id, device) {}
 
-    inline QMap <QString, QVariant> &status(void) { return m_status; }
     inline QList <quint32> &clusters(void) { return m_clusters; }
+    inline QList <Property> &properties(void) { return m_properties; }
+    inline QList <Action> &actions(void) { return m_actions; }
 
 private:
 
-    QMap <QString, QVariant> m_status;
     QList <quint32> m_clusters;
+    QList <Property> m_properties;
+    QList <Action> m_actions;
 
 };
 
@@ -111,7 +115,7 @@ public:
 
     inline QString address(void) { return QString::number(m_nodeId, 16); }
 
-    void updateEndpoint(quint8 endpointId, const QString &property, const QVariant &value);
+    void updateEndpoint(quint8 endpointId);
 
 signals:
 

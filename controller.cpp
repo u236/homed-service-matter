@@ -1,5 +1,4 @@
 #include "controller.h"
-#include "expose.h"
 #include "logger.h"
 
 Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, configFile), m_deviceDataTimer(new QTimer(this)), m_propertiesTimer(new QTimer(this)), m_matter(new Matter(getConfig(), this)), m_commands(QMetaEnum::fromType <Command> ())
@@ -33,12 +32,6 @@ void Controller::publishExposes(DeviceObject *device, bool remove)
         return;
 
     m_propertiesTimer->start(UPDATE_PROPERTIES_DELAY);
-}
-
-void Controller::publishProperties(const Device &device)
-{
-    for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
-        endpointUpdated(device.data(), it.key());
 }
 
 void Controller::quit(void)
@@ -136,11 +129,6 @@ void Controller::updateAvailability(DeviceObject *device)
     logInfo << device << "is" << status;
 }
 
-void Controller::updateProperties(void)
-{
-    for (int i = 0; i < m_matter->devices()->count(); i++)
-        publishProperties(m_matter->devices()->at(i));
-}
 
 void Controller::updateDeviceData(void)
 {
@@ -156,6 +144,25 @@ void Controller::updateDeviceData(void)
     }
 }
 
+void Controller::updateProperties(void)
+{
+    for (int i = 0; i < m_matter->devices()->count(); i++)
+    {
+        const Device &device = m_matter->devices()->at(i);
+
+        if (!device->active())
+            continue;
+
+        for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
+        {
+            if (it.value()->properties().isEmpty())
+                continue;
+
+            endpointUpdated(device.data(), it.key());
+        }
+    }
+}
+
 void Controller::deviceUpdated(DeviceObject *device)
 {
     logInfo << device << "successfully updated";
@@ -163,24 +170,35 @@ void Controller::deviceUpdated(DeviceObject *device)
     m_matter->devices()->store(true);
 }
 
-void Controller::endpointUpdated(DeviceObject *device, quint8 endpointId) // TODO: use properties instead of exposes
+void Controller::endpointUpdated(DeviceObject *device, quint8 endpointId)
 {
-    Endpoint endpoint = device->endpoints().value(endpointId);
-    QString topic = mqttTopic("fd/%1/%2").arg(serviceTopic(), m_matter->devices()->names() ? device->name() : device->address());
+    QMap <QString, QVariant> endpointMap, deviceMap;
+    QList <QString> list = {"action", "event", "scene"};
 
-    if (endpoint.isNull() || endpoint->status().isEmpty())
-        return;
-
-    for (int i = 0; i < endpoint->exposes().count(); i++)
+    for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
     {
-        if (!endpoint->exposes().at(i)->multiple())
-            continue;
+        for (int i = 0; i < it.value()->properties().count(); i++)
+        {
+            const Property &property = it.value()->properties().at(i);
+            QMap <QString, QVariant> &map = property->multiple() ? endpointMap : deviceMap;
 
-        topic.append(QString("/%1").arg(endpointId));
-        break;
+            if (!property->value().isValid() || (property->multiple() && it.value()->id() != endpointId))
+                continue;
+
+            map.insert(property->name(), property->value());
+
+            if (!list.contains(property->name()))
+                continue;
+
+            property->clearValue();
+        }
     }
 
-    mqttPublish(topic, QJsonObject::fromVariantMap(endpoint->status()));
+    if (!endpointMap.isEmpty())
+        mqttPublish(mqttTopic("fd/%1/%2/%3").arg(serviceTopic(), m_matter->devices()->names() ? device->name() : device->address()).arg(endpointId), QJsonObject::fromVariantMap(endpointMap));
+
+    if (!deviceMap.isEmpty())
+        mqttPublish(mqttTopic("fd/%1/%2").arg(serviceTopic(), m_matter->devices()->names() ? device->name() : device->address()), QJsonObject::fromVariantMap(deviceMap));
 }
 
 void Controller::deviceEvent(DeviceObject *device, Matter::Event event, const QJsonObject &json)

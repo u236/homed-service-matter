@@ -1,7 +1,7 @@
 #ifndef CONTROLLER_H
 #define CONTROLLER_H
 
-#define SERVICE_VERSION                 "0.1.4"
+#define SERVICE_VERSION                 "0.2.0"
 #define UPDATE_DEVICE_DATA_INTERVAL     5000
 #define UPDATE_PROPERTIES_DELAY         1000
 
@@ -41,7 +41,6 @@ private:
     QMap <quint64, qint64> m_lastSeen;
 
     void publishExposes(DeviceObject *device, bool remove = false);
-    void publishProperties(const Device &device);
 
 public slots:
 

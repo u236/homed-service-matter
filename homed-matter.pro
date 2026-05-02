@@ -4,6 +4,7 @@ include(../homed-common/homed-endpoint.pri)
 include(../homed-common/homed-parser.pri)
 
 HEADERS += \
+    action.h \
     ble.h \
     case.h \
     clusters.h \
@@ -16,9 +17,11 @@ HEADERS += \
     mrp.h \
     pase.h \
     matter.h \
+    property.h \
     tlv.h
 
 SOURCES += \
+    action.cpp \
     ble.cpp \
     case.cpp \
     controller.cpp \
@@ -30,6 +33,7 @@ SOURCES += \
     mrp.cpp \
     pase.cpp \
     matter.cpp \
+    property.cpp \
     tlv.cpp
 
 QT += dbus

@@ -4,13 +4,12 @@
 #include <QRandomGenerator>
 #include <QtEndian>
 #include "matter.h"
-#include "color.h"
 #include "logger.h"
 #include "clusters.h"
 
 using namespace MatterProtocol;
 
-Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), m_mrp(new MRP(this)), m_mdns(new MDNS(this)), m_ble(new BLE(this)), m_btp(new BTP(this)), m_sessions(new SessionManager(this)), m_searchTimer(new QTimer(this)), m_reconnectTimer(new QTimer(this)), m_pingTimer(new QTimer(this)), m_port(5540), m_debug(false), m_searching(false), m_searchShortDiscriminator(false), m_searchPasscode(0), m_searchDiscriminator(0), m_messageCounter(0), m_exchangeCounter(0), m_sessionCounter(1), m_fabricId(1), m_nodeId(1), m_threadReady(false), m_threadDatasetTimer(new QTimer(this)), m_devices(new DeviceList(config, parent)), m_events(QMetaEnum::fromType <Event> ()), m_bleCommissioning(false)
+Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), m_mrp(new MRP(this)), m_mdns(new MDNS(this)), m_ble(new BLE(this)), m_btp(new BTP(this)), m_sessions(new SessionManager(this)), m_searchTimer(new QTimer(this)), m_reconnectTimer(new QTimer(this)), m_pingTimer(new QTimer(this)), m_port(5540), m_debug(false), m_searching(false), m_searchShortDiscriminator(false), m_searchPasscode(0), m_searchDiscriminator(0), m_messageCounter(0), m_exchangeCounter(0), m_sessionCounter(1), m_fabricId(1), m_nodeId(1), m_devices(new DeviceList(config, parent)), m_events(QMetaEnum::fromType <Event> ()), m_threadReady(false), m_threadDatasetTimer(new QTimer(this)), m_bleCommissioning(false)
 {
     QByteArray counterBytes = Crypto::randomBytes(sizeof(m_messageCounter));
 
@@ -586,11 +585,16 @@ void Matter::getProperties(const QString &deviceName)
 {
     const Device &device = m_devices->byName(deviceName);
 
-    if (device.isNull())
+    if (device.isNull() || !device->active())
         return;
 
     for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
-        emit endpointUpdated(reinterpret_cast <DeviceObject*> (device.data()), it.key());
+    {
+        if (it.value()->properties().isEmpty())
+            continue;
+
+        emit endpointUpdated(device.data(), it.key());
+    }
 }
 
 void Matter::deviceAction(const QString &deviceName, quint8 endpointId, const QString &name, const QVariant &value)
@@ -694,73 +698,34 @@ void Matter::sendCommand(DeviceObject *device, quint8 endpointId, const QString 
         return;
     }
 
-    // gate by the cluster the command targets — broadcast (deviceAction with endpointId=0) iterates ALL
-    // endpoints, including ep 0 (root: BasicInfo/Descriptor/PowerSource/etc) and any auxiliary sensor-only
-    // endpoints that don't actually expose the actionable cluster. without this, every send goes out twice
-    // (or more) and peers get a no-op InvokeRequest on a cluster they don't have
-    quint32 requiredCluster = 0;
+    Endpoint endpoint = device->endpoints().value(endpointId);
 
-    if (name == "status")
-        requiredCluster = Clusters::OnOff::Id;
-    else if (name == "level")
-        requiredCluster = Clusters::LevelControl::Id;
-    else if (name == "color" || name == "colorTemperature" || name == "colorMode")
-        requiredCluster = Clusters::ColorControl::Id;
-    else if (name == "lock")
-        requiredCluster = Clusters::DoorLock::Id;
-    else if (name == "cover" || name == "coverPosition")
-        requiredCluster = Clusters::WindowCovering::Id;
+    if (endpoint.isNull())
+        return;
 
-    if (requiredCluster)
+    EndpointObject *epObj = reinterpret_cast <EndpointObject*> (endpoint.data());
+
+    // walk the endpoint's actions and ask the matching one to encode the InvokeRequest payload. broadcast
+    // (deviceAction with endpointId=0) iterates ALL endpoints; those without the targeted cluster simply
+    // don't carry the matching Action and the loop below produces nothing — that's the cluster-membership
+    // gate, no longer hardcoded as a separate check
+    for (const Action &action : epObj->actions())
     {
-        Endpoint endpoint = device->endpoints().value(endpointId);
+        if (action->name() != name)
+            continue;
 
-        if (endpoint.isNull() || !reinterpret_cast <EndpointObject*> (endpoint.data())->clusters().contains(requiredCluster))
-            return;
-    }
+        if (!epObj->clusters().contains(action->clusterId()))
+            continue;
 
-    QByteArray payload;
+        QByteArray payload = action->request(endpointId, value);
 
-    if (name == "status")
-    {
-        QString status = value.toString();
+        if (payload.isEmpty())
+            continue;
 
-        if (status == "toggle")
-            payload = InteractionModel::encodeToggleCommand(endpointId);
-        else
-            payload = InteractionModel::encodeOnOffCommand(endpointId, status == "on");
-    }
-    else if (name == "level")
-        payload = InteractionModel::encodeMoveToLevelCommand(endpointId, static_cast <quint8> (value.toUInt() * 0xFE / 0xFF));
-    else if (name == "colorTemperature")
-        payload = InteractionModel::encodeMoveToColorTemperatureCommand(endpointId, static_cast <quint16> (value.toUInt()));
-    else if (name == "color")
-    {
-        QList <QVariant> list = value.toList();
-
-        if (list.count() >= 3)
-        {
-            Color color(list.at(0).toDouble() / 0xFF, list.at(1).toDouble() / 0xFF, list.at(2).toDouble() / 0xFF);
-            double h, s;
-            color.toHS(&h, &s);
-            payload = InteractionModel::encodeMoveToHueAndSaturationCommand(endpointId, static_cast <quint8> (h * 0xFE), static_cast <quint8> (s * 0xFE));
-        }
-    }
-    else if (name == "lock")
-        payload = InteractionModel::encodeLockCommand(endpointId, value.toString() == "lock");
-    else if (name == "cover")
-        payload = InteractionModel::encodeCoverCommand(endpointId, static_cast <quint8> (value.toUInt()));
-    else if (name == "coverPosition")
-        payload = InteractionModel::encodeCoverCommand(endpointId, 3, static_cast <quint16> (value.toUInt()));
-
-    if (payload.isEmpty())
-    {
-        logWarning << "Unknown command:" << name;
+        logInfo << device << "sending command" << name << "to endpoint" << endpointId;
+        sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
         return;
     }
-
-    logInfo << device << "sending command" << name << "to endpoint" << endpointId;
-    sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
 }
 
 void Matter::readAttributes(DeviceObject *device, const QList <AttributePath> &paths)
@@ -1049,7 +1014,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                 logDebug(m_debug) << "Attribute, ep:" << report.path.endpointId << "cluster:" << QString::number(report.path.clusterId, 16) << "attr:" << QString::number(report.path.attributeId, 16) << "value:" << report.value;
 
-                // update device state from subscription reports
+                // update device state from subscription reports — dispatch through endpoint's properties
                 {
                     SessionInfo *attrSession = m_sessions->findByLocalId(msgHeader.sessionId);
 
@@ -1059,53 +1024,27 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         {
                             DeviceObject *dev = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
 
-                            if (dev->nodeId() == attrSession->peerNodeId)
-                            {
-                                if (report.path.clusterId == Clusters::OnOff::Id && report.path.attributeId == Clusters::OnOff::Attributes::OnOff)
-                                    dev->updateEndpoint(report.path.endpointId, "status", report.value.toBool() ? "on" : "off");
-                                else if (report.path.clusterId == Clusters::LevelControl::Id && report.path.attributeId == Clusters::LevelControl::Attributes::CurrentLevel)
-                                    dev->updateEndpoint(report.path.endpointId, "level", qMin(report.value.toUInt() * 0xFF / 0xFE, 0xFFu));
-                                else if (report.path.clusterId == Clusters::ColorControl::Id && (report.path.attributeId == Clusters::ColorControl::Attributes::CurrentHue || report.path.attributeId == Clusters::ColorControl::Attributes::CurrentSaturation))
-                                {
-                                    Endpoint ep = dev->endpoints().value(report.path.endpointId);
+                            if (dev->nodeId() != attrSession->peerNodeId)
+                                continue;
 
-                                    if (!ep.isNull())
-                                    {
-                                        if (report.path.attributeId == Clusters::ColorControl::Attributes::CurrentHue)
-                                            ep->status().insert("colorH", report.value.toUInt());
-                                        else
-                                            ep->status().insert("colorS", report.value.toUInt());
+                            Endpoint endpoint = dev->endpoints().value(report.path.endpointId);
 
-                                        if (ep->status().contains("colorH") && ep->status().contains("colorS"))
-                                        {
-                                            Color color = Color::fromHS(ep->status().value("colorH").toDouble() / 0xFE, ep->status().value("colorS").toDouble() / 0xFE);
-                                            dev->updateEndpoint(report.path.endpointId, "color", QVariant(QList <QVariant> {static_cast <int> (color.r() * 0xFF), static_cast <int> (color.g() * 0xFF), static_cast <int> (color.b() * 0xFF)}));
-                                        }
-                                    }
-                                }
-                                else if (report.path.clusterId == Clusters::ColorControl::Id && report.path.attributeId == Clusters::ColorControl::Attributes::ColorTemperatureMireds)
-                                    dev->updateEndpoint(report.path.endpointId, "colorTemperature", report.value.toUInt());
-                                else if (report.path.clusterId == Clusters::ColorControl::Id && report.path.attributeId == Clusters::ColorControl::Attributes::ColorMode)
-                                    dev->updateEndpoint(report.path.endpointId, "colorMode", report.value.toUInt() != 2);
-                                else if (report.path.clusterId == Clusters::PowerSource::Id && report.path.attributeId == Clusters::PowerSource::Attributes::BatPercentRemaining)
-                                    dev->updateEndpoint(report.path.endpointId, "battery", report.value.toDouble() / 2.0);
-                                else if (report.path.clusterId == Clusters::TemperatureMeasurement::Id && report.path.attributeId == Clusters::TemperatureMeasurement::Attributes::MeasuredValue)
-                                    dev->updateEndpoint(report.path.endpointId, "temperature", report.value.toDouble() / 100.0);
-                                else if (report.path.clusterId == Clusters::RelativeHumidityMeasurement::Id && report.path.attributeId == Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue)
-                                    dev->updateEndpoint(report.path.endpointId, "humidity", report.value.toDouble() / 100.0);
-                                else if (report.path.clusterId == Clusters::ElectricalPowerMeasurement::Id && report.path.attributeId == Clusters::ElectricalPowerMeasurement::Attributes::ActivePower)
-                                    dev->updateEndpoint(report.path.endpointId, "power", report.value.toLongLong() / 1000.0);
-                                else if (report.path.clusterId == Clusters::ElectricalEnergyMeasurement::Id && report.path.attributeId == Clusters::ElectricalEnergyMeasurement::Attributes::CumulativeEnergyImported)
-                                {
-                                    for (const MatterTLV::Element &child : report.rawValue.children)
-                                    {
-                                        if (child.tag == 0)
-                                            dev->updateEndpoint(report.path.endpointId, "energy", child.value.toLongLong() / 1000.0);
-                                    }
-                                }
-
+                            if (endpoint.isNull())
                                 break;
+
+                            EndpointObject *epObj = reinterpret_cast <EndpointObject*> (endpoint.data());
+
+                            for (const Property &property : epObj->properties())
+                            {
+                                if (property->clusterId() != report.path.clusterId)
+                                    continue;
+
+                                property->parseAttribute(report.path.attributeId, report.rawValue);
                             }
+
+                            dev->updateEndpoint(report.path.endpointId);
+
+                            break;
                         }
                     }
                 }
@@ -1179,112 +1118,24 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                         if (!evDevice->subscriptionPrimed())
                             continue;
 
-                        if (event.path.clusterId != Clusters::Switch::Id)
+                        Endpoint endpoint = evDevice->endpoints().value(static_cast <quint8> (event.path.endpointId));
+
+                        if (endpoint.isNull())
                             continue;
 
-                        // map Switch events to action strings (zigbee-style: single_click/double_click/hold/release/latched).
-                        // we use MultiPressComplete for click counts when available (it carries the final N), and fall
-                        // back to ShortRelease as "single_click" for devices without the MSM feature.
-                        QString action;
+                        EndpointObject *epObj = reinterpret_cast <EndpointObject*> (endpoint.data());
 
-                        switch (event.path.eventId)
+                        for (const Property &property : epObj->properties())
                         {
-                            case Clusters::Switch::Events::SwitchLatched:
-                                action = "latched";
-                                break;
+                            if (property->clusterId() != event.path.clusterId)
+                                continue;
 
-                            case Clusters::Switch::Events::InitialPress:
-                            {
-                                // only encoder endpoints subscribe to InitialPress (regular buttons don't need it);
-                                // map it to "start" so consumers see rotation begin before MultiPressComplete fires
-                                Endpoint endpoint = evDevice->endpoints().value(static_cast <quint8> (event.path.endpointId));
-                                quint32 features = endpoint.isNull() ? 0 : reinterpret_cast <EndpointObject*> (endpoint.data())->meta().value("switchFeatures").toUInt();
-                                quint8 cap = endpoint.isNull() ? 0 : static_cast <quint8> (reinterpret_cast <EndpointObject*> (endpoint.data())->meta().value("switchMultiPressMax").toUInt());
-
-                                if ((features & Clusters::Switch::Features::MSM) && !(features & Clusters::Switch::Features::MSL) && cap > 5)
-                                    action = "start";
-
-                                break;
-                            }
-
-                            case Clusters::Switch::Events::ShortRelease:
-                            {
-                                // for devices supporting MSM (multi-press), peer will follow up with MultiPressComplete
-                                // carrying the press count — emitting singleClick here causes a duplicate before the
-                                // doubleClick arrives. only fall back to ShortRelease for devices without MSM.
-                                Endpoint endpoint = evDevice->endpoints().value(static_cast <quint8> (event.path.endpointId));
-                                quint32 features = endpoint.isNull() ? 0 : reinterpret_cast <EndpointObject*> (endpoint.data())->meta().value("switchFeatures").toUInt();
-
-                                if (!(features & Clusters::Switch::Features::MSM))
-                                    action = "singleClick";
-
-                                break;
-                            }
-
-                            case Clusters::Switch::Events::LongPress:
-                                action = "hold";
-                                break;
-
-                            case Clusters::Switch::Events::LongRelease:
-                                action = "release";
-                                break;
-
-                            case Clusters::Switch::Events::MultiPressComplete:
-                            {
-                                // MultiPressComplete data (Matter §1.13.6.6): tag 0=PreviousPosition, tag 1=TotalNumberOfPressesCounted
-                                quint8 count = 0;
-
-                                for (const MatterTLV::Element &child : event.data.children)
-                                {
-                                    if (child.tag == 1)
-                                        count = static_cast <quint8> (child.value.toUInt());
-                                }
-
-                                // encoder endpoints (high MultiPressMax + no MSL) report rotation detents in count;
-                                // map MultiPressComplete to "stop" (paired with the earlier "start" from InitialPress)
-                                // and surface the burst size as a separate numeric property so consumers see motion +
-                                // amount, not a fake click count
-                                Endpoint endpoint = evDevice->endpoints().value(static_cast <quint8> (event.path.endpointId));
-                                quint32 features = endpoint.isNull() ? 0 : reinterpret_cast <EndpointObject*> (endpoint.data())->meta().value("switchFeatures").toUInt();
-                                quint8 cap = endpoint.isNull() ? 0 : static_cast <quint8> (reinterpret_cast <EndpointObject*> (endpoint.data())->meta().value("switchMultiPressMax").toUInt());
-                                bool encoder = (features & Clusters::Switch::Features::MSM) && !(features & Clusters::Switch::Features::MSL) && cap > 5;
-
-                                if (encoder)
-                                {
-                                    action = "stop";
-                                    // stash the burst size into endpoint status without emitting yet — the action
-                                    // updateEndpoint below fires the single endpointUpdated that publishes both
-                                    if (!endpoint.isNull() && count > 0)
-                                        reinterpret_cast <EndpointObject*> (endpoint.data())->status().insert("count", count);
-                                    break;
-                                }
-
-                                switch (count)
-                                {
-                                    case 1: action = "singleClick"; break;
-                                    case 2: action = "doubleClick"; break;
-                                    case 3: action = "tripleClick"; break;
-                                    default:
-                                        if (count > 0)
-                                            action = "multipleClick";
-                                        break;
-                                }
-
-                                break;
-                            }
+                            property->parseEvent(event.path.eventId, event.data);
                         }
 
-                        if (!action.isEmpty())
-                        {
-                            quint8 epId = static_cast <quint8> (event.path.endpointId);
-                            evDevice->updateEndpoint(epId, "action", action);
-                            // "action" is a transient event — clear it from endpoint status right after publish
-                            // so subsequent unrelated updates don't carry the stale value, and HA picks up each
-                            // press as a fresh transition. encoder "count" stays as a sticky last-burst value.
-                            Endpoint endpoint = evDevice->endpoints().value(epId);
-                            if (!endpoint.isNull())
-                                reinterpret_cast <EndpointObject*> (endpoint.data())->status().remove("action");
-                        }
+                        // single endpointUpdated emit covers all properties that just fired; Controller iterates
+                        // them, builds one MQTT payload, and clears transient props ("action") afterwards
+                        evDevice->updateEndpoint(static_cast <quint8> (event.path.endpointId));
                     }
                 }
             }

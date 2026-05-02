@@ -124,16 +124,6 @@ public:
     static QList <CommandResponse> decodeInvokeResponse(const QByteArray &payload);
     static quint8 decodeStatusResponse(const QByteArray &payload);
 
-    // --- Helpers ---
-
-    static QByteArray encodeOnOffCommand(quint16 endpointId, bool on);
-    static QByteArray encodeToggleCommand(quint16 endpointId);
-    static QByteArray encodeMoveToLevelCommand(quint16 endpointId, quint8 level, quint16 transitionTime = 0);
-    static QByteArray encodeMoveToColorTemperatureCommand(quint16 endpointId, quint16 mireds, quint16 transitionTime = 0);
-    static QByteArray encodeMoveToHueAndSaturationCommand(quint16 endpointId, quint8 hue, quint8 saturation, quint16 transitionTime = 0);
-    static QByteArray encodeLockCommand(quint16 endpointId, bool lock);
-    static QByteArray encodeCoverCommand(quint16 endpointId, quint8 command, quint16 position = 0);
-
 private:
 
     static void encodeAttributePath(MatterTLV::Encoder &encoder, const AttributePath &path);

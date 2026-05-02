@@ -6,14 +6,13 @@
 #include "clusters.h"
 #include "logger.h"
 
-void DeviceObject::updateEndpoint(quint8 endpointId, const QString &property, const QVariant &value)
+void DeviceObject::updateEndpoint(quint8 endpointId)
 {
-    Endpoint endpoint = m_endpoints.value(endpointId);
-
-    if (endpoint.isNull())
+    if (m_endpoints.value(endpointId).isNull())
         return;
 
-    endpoint->status().insert(property, value);
+    // signal-only — Controller iterates this device's endpoints/properties on receipt and builds the MQTT
+    // payload from each property->value() directly. no per-call name/value side state to keep
     emit endpointUpdated(this, endpointId);
 }
 
@@ -80,66 +79,88 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId)
     const QList <quint32> &clusters = ep->clusters();
     quint16 caps = static_cast <quint16> (ep->meta().value("colorCapabilities").toInt());
 
-    auto addExpose = [&](ExposeObject *obj, const QString &name)
+    if (clusters.contains(Clusters::OnOff::Id))
     {
-        for (const Expose &existing : endpoint->exposes())
+        ep->properties().append(Property(new Properties::Status));
+        ep->actions().append(Action(new Actions::Status));
+
+        if (endpoint->exposes().isEmpty())
         {
-            if (existing->name() == name)
+            if (clusters.contains(Clusters::LevelControl::Id) || clusters.contains(Clusters::ColorControl::Id))
             {
-                delete obj;
-                return;
+                QList <QVariant> options;
+
+                if (clusters.contains(Clusters::LevelControl::Id))
+                    options.append("level");
+
+                if (caps & 0x0001)
+                    options.append("color");
+
+                if (caps & 0x0010)
+                {
+                    options.append("colorTemperature");
+
+                    if (ep->meta().contains("colorTempMin") && ep->meta().contains("colorTempMax"))
+                        device->options().insert(QString("colorTemperature_%1").arg(endpointId), QMap <QString, QVariant> {{"min", ep->meta().value("colorTempMin")}, {"max", ep->meta().value("colorTempMax")}});
+                }
+
+                if ((caps & 0x0011) == 0x0011)
+                    options.append("colorMode");
+
+                ep->exposes().append(Expose(new LightObject));
+                device->options().insert(QString("light_%1").arg(endpointId), options);
+            }
+            else
+            {
+                ep->exposes().append(Expose(new SwitchObject));
             }
         }
+    }
 
-        Expose expose(obj);
-        expose->setName(name);
-        expose->setParent(endpoint.data());
-        endpoint->exposes().append(expose);
-        device->options().insert(name, m_exposeOptions.value(name));
-        logInfo << device << "endpoint" << endpointId << "expose" << name;
-    };
-
-    if (clusters.contains(Clusters::OnOff::Id) && endpoint->exposes().isEmpty())
+    if (clusters.contains(Clusters::LevelControl::Id))
     {
-        if (clusters.contains(Clusters::LevelControl::Id) || clusters.contains(Clusters::ColorControl::Id))
+        ep->properties().append(Property(new Properties::Level));
+        ep->actions().append(Action(new Actions::Level));
+    }
+
+    if (clusters.contains(Clusters::ColorControl::Id))
+    {
+        if (caps & 0x0001)
         {
-            QList <QVariant> options;
-
-            if (clusters.contains(Clusters::LevelControl::Id))
-                options.append("level");
-
-            if (caps & 0x0001)
-                options.append("color");
-
-            if (caps & 0x0010)
-            {
-                options.append("colorTemperature");
-
-                if (ep->meta().contains("colorTempMin") && ep->meta().contains("colorTempMax"))
-                    device->options().insert(QString("colorTemperature_%1").arg(endpointId), QMap <QString, QVariant> {{"min", ep->meta().value("colorTempMin")}, {"max", ep->meta().value("colorTempMax")}});
-            }
-
-            if ((caps & 0x0011) == 0x0011)
-                options.append("colorMode");
-
-            addExpose(new LightObject, "light");
-            device->options().insert(QString("light_%1").arg(endpointId), options);
+            ep->properties().append(Property(new Properties::ColorHS));
+            ep->actions().append(Action(new Actions::ColorHS));
         }
-        else
+
+        if (caps & 0x0010)
         {
-            addExpose(new SwitchObject, "switch");
+            ep->properties().append(Property(new Properties::ColorTemperature));
+            ep->actions().append(Action(new Actions::ColorTemperature));
         }
+
+        if ((caps & 0x0011) == 0x0011)
+            ep->properties().append(Property(new Properties::ColorMode));
+    }
+
+    if (clusters.contains(Clusters::DoorLock::Id))
+        ep->actions().append(Action(new Actions::Lock));
+
+    if (clusters.contains(Clusters::WindowCovering::Id))
+    {
+        ep->actions().append(Action(new Actions::CoverStatus));
+        ep->actions().append(Action(new Actions::CoverPosition));
     }
 
     if (clusters.contains(Clusters::PowerSource::Id))
     {
-        addExpose(new SensorObject("battery"), "battery");
+        ep->properties().append(Property(new Properties::Battery));
+        ep->exposes().append(Expose(new SensorObject("battery")));
         device->setBatteryPowered(true);
     }
 
     if (clusters.contains(Clusters::Switch::Id))
     {
-        addExpose(new SensorObject("action"), "action");
+        ep->properties().append(Property(new Properties::SwitchAction));
+        ep->exposes().append(Expose(new SensorObject("action")));
 
         // per-endpoint action enum from Switch FeatureMap + MultiPressMax (Matter §1.13); meta is filled
         // by the discovery follow-up read or loaded from JSON on unserialize before setupEndpoint runs
@@ -153,7 +174,10 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId)
         bool encoder = (features & Clusters::Switch::Features::MSM) && !(features & Clusters::Switch::Features::MSL) && multiPressMax > 5;
 
         if (encoder)
-            addExpose(new SensorObject("count"), "count");
+        {
+            ep->properties().append(Property(new Properties::SwitchCount));
+            ep->exposes().append(Expose(new SensorObject("count")));
+        }
 
         if (features)
         {
@@ -192,16 +216,44 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId)
     }
 
     if (clusters.contains(Clusters::TemperatureMeasurement::Id))
-        addExpose(new SensorObject("temperature"), "temperature");
+    {
+        ep->properties().append(Property(new Properties::Temperature));
+        ep->exposes().append(Expose(new SensorObject("temperature")));
+    }
 
     if (clusters.contains(Clusters::RelativeHumidityMeasurement::Id))
-        addExpose(new SensorObject("humidity"), "humidity");
+    {
+        ep->properties().append(Property(new Properties::Humidity));
+        ep->exposes().append(Expose(new SensorObject("humidity")));
+    }
 
     if (clusters.contains(Clusters::ElectricalPowerMeasurement::Id))
-        addExpose(new SensorObject("power"), "power");
+    {
+        ep->properties().append(Property(new Properties::Power));
+        ep->exposes().append(Expose(new SensorObject("power")));
+    }
 
     if (clusters.contains(Clusters::ElectricalEnergyMeasurement::Id))
-        addExpose(new SensorObject("energy"), "energy");
+    {
+        ep->properties().append(Property(new Properties::Energy));
+        ep->exposes().append(Expose(new SensorObject("energy")));
+    }
+
+    // single sweep over freshly-attached meta-objects: wire up parent + (for exposes) propagate the option
+    // template from share/homed-common/expose.json into device->options() so HA discovery can pick up icon,
+    // unit, etc. one place to add anything that needs to apply to every Property/Action/Expose
+    for (const Property &property : ep->properties())
+        property->setParent(ep);
+
+    for (const Action &action : ep->actions())
+        action->setParent(ep);
+
+    for (const Expose &expose : ep->exposes())
+    {
+        expose->setParent(ep);
+        device->options().insert(expose->name(), m_exposeOptions.value(expose->name()));
+        logInfo << device << "endpoint" << endpointId << "expose" << expose->name();
+    }
 }
 
 void DeviceList::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC, const QByteArray &controllerRCAC)
@@ -216,15 +268,17 @@ void DeviceList::setFabricCredentials(const QByteArray &fabricKey, quint64 rootC
 
 void DeviceList::updateMultiple(DeviceObject *device)
 {
-    QMap <QString, int> exposeCounts;
+    QMap <QString, int> exposeCounts, propertyCounts;
 
     for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
     {
         for (int i = 0; i < it.value()->exposes().count(); i++)
-        {
-            QString name = it.value()->exposes().at(i)->name().split('_').value(0);
-            exposeCounts[name]++;
-        }
+            exposeCounts[it.value()->exposes().at(i)->name().split('_').value(0)]++;
+
+        EndpointObject *ep = reinterpret_cast <EndpointObject*> (it.value().data());
+
+        for (int i = 0; i < ep->properties().count(); i++)
+            propertyCounts[ep->properties().at(i)->name()]++;
     }
 
     for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
@@ -234,6 +288,11 @@ void DeviceList::updateMultiple(DeviceObject *device)
             QString name = it.value()->exposes().at(i)->name().split('_').value(0);
             it.value()->exposes().at(i)->setMultiple(exposeCounts.value(name) > 1);
         }
+
+        EndpointObject *ep = reinterpret_cast <EndpointObject*> (it.value().data());
+
+        for (int i = 0; i < ep->properties().count(); i++)
+            ep->properties().at(i)->setMultiple(propertyCounts.value(ep->properties().at(i)->name()) > 1);
     }
 }
 
