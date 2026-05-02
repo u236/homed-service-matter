@@ -75,6 +75,23 @@ namespace Properties
 
     };
 
+    // UNTESTED: written from Matter spec §3.2.7, no XY-only test device on hand to validate the X/Y → RGB
+    // conversion or the 0..0xFEFF normalization. mirror of ColorHS for caps bit 0x0008
+    class ColorXY : public PropertyObject
+    {
+
+    public:
+
+        ColorXY(void) : PropertyObject("color", Clusters::ColorControl::Id), m_haveX(false), m_haveY(false), m_x(0), m_y(0) {}
+        void parseAttribute(quint32 attributeId, const MatterTLV::Element &data) override;
+
+    private:
+
+        bool m_haveX, m_haveY;
+        quint16 m_x, m_y;
+
+    };
+
     class ColorTemperature : public PropertyObject
     {
 
@@ -125,6 +142,26 @@ namespace Properties
 
     };
 
+    class Voltage : public PropertyObject
+    {
+
+    public:
+
+        Voltage(void) : PropertyObject("voltage", Clusters::ElectricalPowerMeasurement::Id) {}
+        void parseAttribute(quint32 attributeId, const MatterTLV::Element &data) override;
+
+    };
+
+    class Current : public PropertyObject
+    {
+
+    public:
+
+        Current(void) : PropertyObject("current", Clusters::ElectricalPowerMeasurement::Id) {}
+        void parseAttribute(quint32 attributeId, const MatterTLV::Element &data) override;
+
+    };
+
     class Power : public PropertyObject
     {
 
@@ -141,6 +178,30 @@ namespace Properties
     public:
 
         Energy(void) : PropertyObject("energy", Clusters::ElectricalEnergyMeasurement::Id) {}
+        void parseAttribute(quint32 attributeId, const MatterTLV::Element &data) override;
+
+    };
+
+    // UNTESTED: written from Matter spec §5.2 (DoorLock cluster), no real lock to verify the LockState enum
+    // mapping. spec values: 0=NotFullyLocked, 1=Locked, 2=Unlocked, 3=Unlatched
+    class Lock : public PropertyObject
+    {
+
+    public:
+
+        Lock(void) : PropertyObject("lock", Clusters::DoorLock::Id) {}
+        void parseAttribute(quint32 attributeId, const MatterTLV::Element &data) override;
+
+    };
+
+    // UNTESTED: Matter spec §5.3 WindowCovering reports CurrentPositionLiftPercent100ths (uint16, 0..10000
+    // representing 0.00..100.00%); we expose 0..100 to consumers. no real cover on hand to verify
+    class CoverPosition : public PropertyObject
+    {
+
+    public:
+
+        CoverPosition(void) : PropertyObject("coverPosition", Clusters::WindowCovering::Id) {}
         void parseAttribute(quint32 attributeId, const MatterTLV::Element &data) override;
 
     };

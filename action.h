@@ -59,6 +59,17 @@ namespace Actions
 
     };
 
+    // UNTESTED: written from Matter spec §3.2.11.7 (MoveToColor command), no XY-only test device on hand
+    class ColorXY : public ActionObject
+    {
+
+    public:
+
+        ColorXY(void) : ActionObject("color", Clusters::ColorControl::Id) {}
+        QByteArray request(quint16 endpointId, const QVariant &data) override;
+
+    };
+
     class ColorTemperature : public ActionObject
     {
 

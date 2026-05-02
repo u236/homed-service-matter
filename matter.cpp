@@ -366,16 +366,22 @@ QList <AttributePath> Matter::buildSubscribePaths(DeviceObject *device)
 
         if (clusters.contains(Clusters::ColorControl::Id))
         {
-            if (caps & 0x0009)
+            if (caps & 0x0001)
             {
                 paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentHue));
                 paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentSaturation));
             }
 
+            if ((caps & 0x0008) && !(caps & 0x0001))
+            {
+                paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentX));
+                paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentY));
+            }
+
             if (caps & 0x0010)
                 paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTemperatureMireds));
 
-            if ((caps & 0x0019) == 0x0019)
+            if ((caps & 0x0011) == 0x0011)
                 paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorMode));
         }
 
@@ -389,7 +395,11 @@ QList <AttributePath> Matter::buildSubscribePaths(DeviceObject *device)
             paths.append(AttributePath(epId, Clusters::RelativeHumidityMeasurement::Id, Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue));
 
         if (clusters.contains(Clusters::ElectricalPowerMeasurement::Id))
+        {
+            paths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::Voltage));
+            paths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::ActiveCurrent));
             paths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::ActivePower));
+        }
 
         if (clusters.contains(Clusters::ElectricalEnergyMeasurement::Id))
             paths.append(AttributePath(epId, Clusters::ElectricalEnergyMeasurement::Id, Clusters::ElectricalEnergyMeasurement::Attributes::CumulativeEnergyImported));
@@ -1248,6 +1258,7 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                                         case Clusters::Switch::Attributes::MultiPressMax: metaKey = "switchMultiPressMax"; break;
                                     }
                                     break;
+
                             }
 
                             if (!metaKey.isEmpty() && reportDevice)

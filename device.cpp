@@ -93,7 +93,7 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId)
                 if (clusters.contains(Clusters::LevelControl::Id))
                     options.append("level");
 
-                if (caps & 0x0001)
+                if (caps & 0x0009) // HS (bit 0) or XY (bit 3)
                     options.append("color");
 
                 if (caps & 0x0010)
@@ -131,6 +131,13 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId)
             ep->actions().append(Action(new Actions::ColorHS));
         }
 
+        // UNTESTED: XY-only devices haven't been verified end-to-end; HS is preferred when both are advertised
+        if ((caps & 0x0008) && !(caps & 0x0001))
+        {
+            ep->properties().append(Property(new Properties::ColorXY));
+            ep->actions().append(Action(new Actions::ColorXY));
+        }
+
         if (caps & 0x0010)
         {
             ep->properties().append(Property(new Properties::ColorTemperature));
@@ -142,10 +149,16 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId)
     }
 
     if (clusters.contains(Clusters::DoorLock::Id))
+    {
+        // UNTESTED: no real lock to validate state mapping or command round-trip
+        ep->properties().append(Property(new Properties::Lock));
         ep->actions().append(Action(new Actions::Lock));
+    }
 
     if (clusters.contains(Clusters::WindowCovering::Id))
     {
+        // UNTESTED: no real cover to validate position read-back or command round-trip
+        ep->properties().append(Property(new Properties::CoverPosition));
         ep->actions().append(Action(new Actions::CoverStatus));
         ep->actions().append(Action(new Actions::CoverPosition));
     }
@@ -229,7 +242,11 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId)
 
     if (clusters.contains(Clusters::ElectricalPowerMeasurement::Id))
     {
+        ep->properties().append(Property(new Properties::Voltage));
+        ep->properties().append(Property(new Properties::Current));
         ep->properties().append(Property(new Properties::Power));
+        ep->exposes().append(Expose(new SensorObject("voltage")));
+        ep->exposes().append(Expose(new SensorObject("current")));
         ep->exposes().append(Expose(new SensorObject("power")));
     }
 

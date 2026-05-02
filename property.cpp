@@ -47,12 +47,59 @@ void ColorHS::parseAttribute(quint32 attributeId, const MatterTLV::Element &data
     m_value = QVariant(QList <QVariant> {static_cast <int> (color.r() * 0xFF), static_cast <int> (color.g() * 0xFF), static_cast <int> (color.b() * 0xFF)});
 }
 
+void ColorXY::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+{
+    // UNTESTED: CurrentX/CurrentY are uint16 normalized so that 0xFEFF represents 1.0 in CIE xy space
+    // (Matter §3.2.7.5). Color::fromXY expects normalized 0.0..1.0 doubles
+    switch (attributeId)
+    {
+        case Clusters::ColorControl::Attributes::CurrentX:
+            m_x = static_cast <quint16> (data.value.toUInt());
+            m_haveX = true;
+            break;
+
+        case Clusters::ColorControl::Attributes::CurrentY:
+            m_y = static_cast <quint16> (data.value.toUInt());
+            m_haveY = true;
+            break;
+
+        default:
+            return;
+    }
+
+    if (!m_haveX || !m_haveY)
+        return;
+
+    Color color = Color::fromXY(m_x / static_cast <double> (0xFEFF), m_y / static_cast <double> (0xFEFF));
+    m_value = QVariant(QList <QVariant> {static_cast <int> (color.r() * 0xFF), static_cast <int> (color.g() * 0xFF), static_cast <int> (color.b() * 0xFF)});
+}
+
 void ColorTemperature::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
     if (attributeId != Clusters::ColorControl::Attributes::ColorTemperatureMireds)
         return;
 
     m_value = data.value.toUInt();
+}
+
+void Lock::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+{
+    if (attributeId != Clusters::DoorLock::Attributes::LockState)
+        return;
+
+    // UNTESTED: LockState enum (Matter §5.2.5.5): 0=NotFullyLocked, 1=Locked, 2=Unlocked, 3=Unlatched.
+    // we report "locked" only on value=1 — partial/unlatched states fall to false until proven otherwise
+    m_value = data.value.toUInt() == 1;
+}
+
+void CoverPosition::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+{
+    if (attributeId != Clusters::WindowCovering::Attributes::CurrentPositionLiftPercent100ths)
+        return;
+
+    // UNTESTED: peer reports 0..10000 in 0.01% units, scale to 0..100 to match what Actions::CoverPosition
+    // accepts on the way down (consumer-facing percent)
+    m_value = data.value.toUInt() / 100;
 }
 
 void ColorMode::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
@@ -87,6 +134,22 @@ void Humidity::parseAttribute(quint32 attributeId, const MatterTLV::Element &dat
         return;
 
     m_value = data.value.toDouble() / 100.0;
+}
+
+void Voltage::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+{
+    if (attributeId != Clusters::ElectricalPowerMeasurement::Attributes::Voltage)
+        return;
+
+    m_value = data.value.toLongLong() / 1000.0;
+}
+
+void Current::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+{
+    if (attributeId != Clusters::ElectricalPowerMeasurement::Attributes::ActiveCurrent)
+        return;
+
+    m_value = data.value.toLongLong() / 1000.0;
 }
 
 void Power::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
