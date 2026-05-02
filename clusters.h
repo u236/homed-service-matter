@@ -292,6 +292,21 @@ namespace Clusters
             const quint32 Voltage       = 0x0004;
             const quint32 ActiveCurrent = 0x0005;
             const quint32 ActivePower   = 0x0008;
+            // AC-specific RMS variants (Matter spec §2.13.5); peer chooses one set based on AC vs DC mode
+            const quint32 RMSVoltage    = 0x000B;
+            const quint32 RMSCurrent    = 0x000C;
+            const quint32 Frequency     = 0x000E;
+            const quint32 FeatureMap    = 0xFFFC;
+        }
+
+        // Matter spec §2.13.4 ElectricalPowerMeasurement FeatureMap
+        namespace Features
+        {
+            const quint32 DIRC = 1 << 0; // DirectCurrent
+            const quint32 ALTC = 1 << 1; // AlternatingCurrent
+            const quint32 POLY = 1 << 2; // PolyphasePower
+            const quint32 HARM = 1 << 3; // Harmonics
+            const quint32 PWRQ = 1 << 4; // PowerQuality
         }
     }
 

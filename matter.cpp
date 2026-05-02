@@ -396,8 +396,22 @@ QList <AttributePath> Matter::buildSubscribePaths(DeviceObject *device)
 
         if (clusters.contains(Clusters::ElectricalPowerMeasurement::Id))
         {
-            paths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::Voltage));
-            paths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::ActiveCurrent));
+            quint32 powerFeatures = ep->meta().value("powerFeatures").toUInt();
+
+            // AC peers report RMS variants (V/A); DC peers use generic Voltage/ActiveCurrent — pick whichever
+            // matches the cluster's declared domain
+            if (powerFeatures & Clusters::ElectricalPowerMeasurement::Features::ALTC)
+            {
+                paths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::RMSVoltage));
+                paths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::RMSCurrent));
+                paths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::Frequency));
+            }
+            else if (powerFeatures & Clusters::ElectricalPowerMeasurement::Features::DIRC)
+            {
+                paths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::Voltage));
+                paths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::ActiveCurrent));
+            }
+
             paths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::ActivePower));
         }
 
@@ -1259,6 +1273,10 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                                     }
                                     break;
 
+                                case Clusters::ElectricalPowerMeasurement::Id:
+                                    if (report.path.attributeId == Clusters::ElectricalPowerMeasurement::Attributes::FeatureMap)
+                                        metaKey = "powerFeatures";
+                                    break;
                             }
 
                             if (!metaKey.isEmpty() && reportDevice)
@@ -1299,6 +1317,9 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                                 followupPaths.append(AttributePath(it.key(), Clusters::Switch::Id, Clusters::Switch::Attributes::FeatureMap));
                                 followupPaths.append(AttributePath(it.key(), Clusters::Switch::Id, Clusters::Switch::Attributes::MultiPressMax));
                             }
+
+                            if (it.value().contains(Clusters::ElectricalPowerMeasurement::Id))
+                                followupPaths.append(AttributePath(it.key(), Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::FeatureMap));
                         }
 
                         if (!followupPaths.isEmpty() && reportSession)

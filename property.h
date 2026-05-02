@@ -172,6 +172,16 @@ namespace Properties
 
     };
 
+    class Frequency : public PropertyObject
+    {
+
+    public:
+
+        Frequency(void) : PropertyObject("frequency", Clusters::ElectricalPowerMeasurement::Id) {}
+        void parseAttribute(quint32 attributeId, const MatterTLV::Element &data) override;
+
+    };
+
     class Energy : public PropertyObject
     {
 

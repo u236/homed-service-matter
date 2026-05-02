@@ -242,12 +242,27 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId)
 
     if (clusters.contains(Clusters::ElectricalPowerMeasurement::Id))
     {
-        ep->properties().append(Property(new Properties::Voltage));
-        ep->properties().append(Property(new Properties::Current));
+        // FeatureMap declares the cluster's measurement domain (DC vs AC). presence of any DIRC/ALTC bit
+        // implies V/A measurements are advertised; AC additionally exposes Frequency. ActivePower is
+        // mandatory in any case (Matter spec §2.13.5)
+        quint32 features = ep->meta().value("powerFeatures").toUInt();
+
+        if (features & (Clusters::ElectricalPowerMeasurement::Features::DIRC | Clusters::ElectricalPowerMeasurement::Features::ALTC))
+        {
+            ep->properties().append(Property(new Properties::Voltage));
+            ep->properties().append(Property(new Properties::Current));
+            ep->exposes().append(Expose(new SensorObject("voltage")));
+            ep->exposes().append(Expose(new SensorObject("current")));
+        }
+
         ep->properties().append(Property(new Properties::Power));
-        ep->exposes().append(Expose(new SensorObject("voltage")));
-        ep->exposes().append(Expose(new SensorObject("current")));
         ep->exposes().append(Expose(new SensorObject("power")));
+
+        if (features & Clusters::ElectricalPowerMeasurement::Features::ALTC)
+        {
+            ep->properties().append(Property(new Properties::Frequency));
+            ep->exposes().append(Expose(new SensorObject("frequency")));
+        }
     }
 
     if (clusters.contains(Clusters::ElectricalEnergyMeasurement::Id))

@@ -138,7 +138,9 @@ void Humidity::parseAttribute(quint32 attributeId, const MatterTLV::Element &dat
 
 void Voltage::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
-    if (attributeId != Clusters::ElectricalPowerMeasurement::Attributes::Voltage)
+    // peer reports either generic Voltage (DC) or AC RMSVoltage; same units (mV), same scale
+    if (attributeId != Clusters::ElectricalPowerMeasurement::Attributes::Voltage &&
+        attributeId != Clusters::ElectricalPowerMeasurement::Attributes::RMSVoltage)
         return;
 
     m_value = data.value.toLongLong() / 1000.0;
@@ -146,7 +148,8 @@ void Voltage::parseAttribute(quint32 attributeId, const MatterTLV::Element &data
 
 void Current::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
-    if (attributeId != Clusters::ElectricalPowerMeasurement::Attributes::ActiveCurrent)
+    if (attributeId != Clusters::ElectricalPowerMeasurement::Attributes::ActiveCurrent &&
+        attributeId != Clusters::ElectricalPowerMeasurement::Attributes::RMSCurrent)
         return;
 
     m_value = data.value.toLongLong() / 1000.0;
@@ -157,6 +160,15 @@ void Power::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
     if (attributeId != Clusters::ElectricalPowerMeasurement::Attributes::ActivePower)
         return;
 
+    m_value = data.value.toLongLong() / 1000.0;
+}
+
+void Frequency::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+{
+    if (attributeId != Clusters::ElectricalPowerMeasurement::Attributes::Frequency)
+        return;
+
+    // Matter spec §2.13.5: Frequency in mHz, scale to Hz
     m_value = data.value.toLongLong() / 1000.0;
 }
 
