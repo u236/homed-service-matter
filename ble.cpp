@@ -314,7 +314,7 @@ void BLE::interfacesAdded(const QDBusMessage &message)
 
         m_discovered.insert(device.address, device);
 
-        logInfo << "BLE Matter device found:" << device.name << device.address << "discriminator:" << device.discriminator;
+        logInfo << "BLE Matter device found:" << device.address << "discriminator:" << device.discriminator << "VID:" << QString::asprintf("0x%04X", device.vendorId) << "PID:" << QString::asprintf("0x%04X", device.productId) << "Name:" << (device.name.isEmpty() ? "[empty]" : device.name);
         emit deviceFound(device);
     }
 
