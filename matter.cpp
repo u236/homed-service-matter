@@ -2060,9 +2060,10 @@ void Matter::continueCommissioning(PendingCommission &commission)
         {
             logDebug(m_debug) << "Requesting PAI certificate...";
 
+            // Matter spec §11.17.5.1 CertificateChainRequest.CertificateType: 1 = DAC, 2 = PAI
             MatterTLV::Encoder fields;
             fields.openStructure();
-            fields.encodeUnsignedInt(0, 1);  // CertificateType = PAI
+            fields.encodeUnsignedInt(0, 2);
             fields.closeContainer();
 
             QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::CertificateChainRequest), fields);
@@ -2076,7 +2077,7 @@ void Matter::continueCommissioning(PendingCommission &commission)
 
             MatterTLV::Encoder fields;
             fields.openStructure();
-            fields.encodeUnsignedInt(0, 2);  // CertificateType = DAC
+            fields.encodeUnsignedInt(0, 1);
             fields.closeContainer();
 
             QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::CertificateChainRequest), fields);
