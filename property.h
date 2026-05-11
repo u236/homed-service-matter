@@ -216,6 +216,39 @@ namespace Properties
 
     };
 
+    // BooleanState (Matter §1.7) is the generic binary-state cluster reused by multiple device types. semantics
+    // come from the endpoint's DeviceTypeList: water leak detector reports true=leak, contact sensor reports
+    // true=closed. Contact inverts so that "true" externally consistently means "abnormal/active/open"
+    class WaterLeak : public PropertyObject
+    {
+
+    public:
+
+        WaterLeak(void) : PropertyObject("waterLeak", Clusters::BooleanState::Id) {}
+        void parseAttribute(quint32 attributeId, const MatterTLV::Element &data) override;
+
+    };
+
+    class Contact : public PropertyObject
+    {
+
+    public:
+
+        Contact(void) : PropertyObject("contact", Clusters::BooleanState::Id) {}
+        void parseAttribute(quint32 attributeId, const MatterTLV::Element &data) override;
+
+    };
+
+    class Occupancy : public PropertyObject
+    {
+
+    public:
+
+        Occupancy(void) : PropertyObject("occupancy", Clusters::OccupancySensing::Id) {}
+        void parseAttribute(quint32 attributeId, const MatterTLV::Element &data) override;
+
+    };
+
     class SwitchAction : public PropertyObject
     {
 

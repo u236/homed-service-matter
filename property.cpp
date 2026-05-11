@@ -188,6 +188,33 @@ void Energy::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
     }
 }
 
+void WaterLeak::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+{
+    if (attributeId != Clusters::BooleanState::Attributes::StateValue)
+        return;
+
+    m_value = data.value.toBool();
+}
+
+void Contact::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+{
+    if (attributeId != Clusters::BooleanState::Attributes::StateValue)
+        return;
+
+    // Matter §1.7.5.1: StateValue true = contact closed; HOMEd "contact" follows HA door semantics where
+    // true = open → invert
+    m_value = !data.value.toBool();
+}
+
+void Occupancy::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+{
+    if (attributeId != Clusters::OccupancySensing::Attributes::Occupancy)
+        return;
+
+    // Matter §2.7.5.1: Occupancy is a bitmap8; bit 0 = occupied
+    m_value = (data.value.toUInt() & 0x01) != 0;
+}
+
 void SwitchAction::parseEvent(quint32 eventId, const MatterTLV::Element &data)
 {
     quint32 features = meta("switchFeatures").toUInt();

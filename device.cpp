@@ -228,6 +228,33 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId)
         }
     }
 
+    if (clusters.contains(Clusters::BooleanState::Id))
+    {
+        // BooleanState is generic; the DeviceType from Descriptor tells us what kind of binary sensor this is
+        switch (ep->meta().value("deviceType").toUInt())
+        {
+            case Clusters::DeviceTypes::ContactSensor:
+                ep->properties().append(Property(new Properties::Contact));
+                ep->exposes().append(Expose(new BinaryObject("contact")));
+                break;
+
+            case Clusters::DeviceTypes::WaterLeakDetector:
+                ep->properties().append(Property(new Properties::WaterLeak));
+                ep->exposes().append(Expose(new BinaryObject("waterLeak")));
+                break;
+
+            default:
+                logWarning << device << "endpoint" << endpointId << "has BooleanState but unhandled deviceType:" << QString::asprintf("0x%04X", ep->meta().value("deviceType").toUInt());
+                break;
+        }
+    }
+
+    if (clusters.contains(Clusters::OccupancySensing::Id))
+    {
+        ep->properties().append(Property(new Properties::Occupancy));
+        ep->exposes().append(Expose(new BinaryObject("occupancy")));
+    }
+
     if (clusters.contains(Clusters::TemperatureMeasurement::Id))
     {
         ep->properties().append(Property(new Properties::Temperature));

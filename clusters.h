@@ -320,6 +320,26 @@ namespace Clusters
         }
     }
 
+    namespace BooleanState // 0x0045
+    {
+        const quint32 Id = 0x0045;
+
+        namespace Attributes
+        {
+            const quint32 StateValue = 0x0000;
+        }
+    }
+
+    // Matter device types (spec §10) — endpoint Descriptor's DeviceTypeList discriminates what a generic
+    // cluster like BooleanState semantically means on this endpoint (contact vs leak vs freeze vs rain)
+    namespace DeviceTypes
+    {
+        const quint32 ContactSensor       = 0x0015;
+        const quint32 WaterFreezeDetector = 0x0041;
+        const quint32 WaterLeakDetector   = 0x0043;
+        const quint32 RainSensor          = 0x0044;
+    }
+
     namespace OccupancySensing // 0x0406
     {
         const quint32 Id = 0x0406;

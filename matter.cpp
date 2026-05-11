@@ -388,6 +388,12 @@ QList <AttributePath> Matter::buildSubscribePaths(DeviceObject *device)
         if (clusters.contains(Clusters::PowerSource::Id))
             paths.append(AttributePath(epId, Clusters::PowerSource::Id, Clusters::PowerSource::Attributes::BatPercentRemaining));
 
+        if (clusters.contains(Clusters::BooleanState::Id))
+            paths.append(AttributePath(epId, Clusters::BooleanState::Id, Clusters::BooleanState::Attributes::StateValue));
+
+        if (clusters.contains(Clusters::OccupancySensing::Id))
+            paths.append(AttributePath(epId, Clusters::OccupancySensing::Id, Clusters::OccupancySensing::Attributes::Occupancy));
+
         if (clusters.contains(Clusters::TemperatureMeasurement::Id))
             paths.append(AttributePath(epId, Clusters::TemperatureMeasurement::Id, Clusters::TemperatureMeasurement::Attributes::MeasuredValue));
 
@@ -1259,6 +1265,11 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                             switch (report.path.clusterId)
                             {
+                                case Clusters::Descriptor::Id:
+                                    if (report.path.attributeId == Clusters::Descriptor::Attributes::DeviceTypeList)
+                                        metaKey = "deviceType";
+                                    break;
+
                                 case Clusters::ColorControl::Id:
                                     switch (report.path.attributeId)
                                     {
@@ -1288,8 +1299,37 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                                 if (!endpoint.isNull())
                                 {
-                                    reinterpret_cast <EndpointObject*> (endpoint.data())->meta().insert(metaKey, report.value.toUInt());
-                                    wroteFollowupMeta = true;
+                                    QVariant value;
+
+                                    // DeviceTypeList is a list of DeviceTypeStruct{ DeviceType uint32 tag 0, Revision uint16 tag 1 };
+                                    // take the first entry's DeviceType — composed endpoints (multi-type) are rare for sensors
+                                    if (metaKey == "deviceType")
+                                    {
+                                        for (const MatterTLV::Element &entry : report.rawValue.children)
+                                        {
+                                            for (const MatterTLV::Element &field : entry.children)
+                                            {
+                                                if (field.tag != 0)
+                                                    continue;
+
+                                                value = field.value.toUInt();
+                                                break;
+                                            }
+
+                                            if (value.isValid())
+                                                break;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        value = report.value.toUInt();
+                                    }
+
+                                    if (value.isValid())
+                                    {
+                                        reinterpret_cast <EndpointObject*> (endpoint.data())->meta().insert(metaKey, value);
+                                        wroteFollowupMeta = true;
+                                    }
                                 }
                             }
                         }
@@ -1323,6 +1363,11 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                             if (it.value().contains(Clusters::ElectricalPowerMeasurement::Id))
                                 followupPaths.append(AttributePath(it.key(), Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::FeatureMap));
+
+                            // BooleanState is the same cluster on contact / water-leak / freeze / rain sensors —
+                            // discriminate by the endpoint's DeviceTypeList from Descriptor (Matter §10)
+                            if (it.value().contains(Clusters::BooleanState::Id))
+                                followupPaths.append(AttributePath(it.key(), Clusters::Descriptor::Id, Clusters::Descriptor::Attributes::DeviceTypeList));
                         }
 
                         if (!followupPaths.isEmpty() && reportSession)
