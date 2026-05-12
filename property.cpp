@@ -47,33 +47,6 @@ void ColorHS::parseAttribute(quint32 attributeId, const MatterTLV::Element &data
     m_value = QVariant(QList <QVariant> {static_cast <int> (color.r() * 0xFF), static_cast <int> (color.g() * 0xFF), static_cast <int> (color.b() * 0xFF)});
 }
 
-void ColorXY::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
-{
-    // UNTESTED: CurrentX/CurrentY are uint16 normalized so that 0xFEFF represents 1.0 in CIE xy space
-    // (Matter §3.2.7.5). Color::fromXY expects normalized 0.0..1.0 doubles
-    switch (attributeId)
-    {
-        case Clusters::ColorControl::Attributes::CurrentX:
-            m_x = static_cast <quint16> (data.value.toUInt());
-            m_haveX = true;
-            break;
-
-        case Clusters::ColorControl::Attributes::CurrentY:
-            m_y = static_cast <quint16> (data.value.toUInt());
-            m_haveY = true;
-            break;
-
-        default:
-            return;
-    }
-
-    if (!m_haveX || !m_haveY)
-        return;
-
-    Color color = Color::fromXY(m_x / static_cast <double> (0xFEFF), m_y / static_cast <double> (0xFEFF));
-    m_value = QVariant(QList <QVariant> {static_cast <int> (color.r() * 0xFF), static_cast <int> (color.g() * 0xFF), static_cast <int> (color.b() * 0xFF)});
-}
-
 void ColorTemperature::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
     if (attributeId != Clusters::ColorControl::Attributes::ColorTemperatureMireds)

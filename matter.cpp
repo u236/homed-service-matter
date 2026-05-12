@@ -379,12 +379,6 @@ QList <AttributePath> Matter::buildSubscribePaths(DeviceObject *device)
                 paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentSaturation));
             }
 
-            if ((caps & 0x0008) && !(caps & 0x0001))
-            {
-                paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentX));
-                paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentY));
-            }
-
             if (caps & 0x0010)
                 paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTemperatureMireds));
 

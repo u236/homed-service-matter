@@ -93,7 +93,10 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId)
                 if (clusters.contains(Clusters::LevelControl::Id))
                     options.append("level");
 
-                if (caps & 0x0009) // HS (bit 0) or XY (bit 3)
+                // bit 0 (HS) is the only color capability we treat as RGB; some CT-only lamps (e.g. IKEA
+                // TRADFRI WS) misreport bit 3 (XY) without actually supporting color, which used to falsely
+                // promote them to RGB exposes
+                if (caps & 0x0001)
                     options.append("color");
 
                 if (caps & 0x0010)
@@ -139,13 +142,6 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId)
         {
             ep->properties().append(Property(new Properties::ColorHS));
             ep->actions().append(Action(new Actions::ColorHS));
-        }
-
-        // UNTESTED: XY-only devices haven't been verified end-to-end; HS is preferred when both are advertised
-        if ((caps & 0x0008) && !(caps & 0x0001))
-        {
-            ep->properties().append(Property(new Properties::ColorXY));
-            ep->actions().append(Action(new Actions::ColorXY));
         }
 
         if (caps & 0x0010)

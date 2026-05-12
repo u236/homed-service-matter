@@ -75,23 +75,6 @@ namespace Properties
 
     };
 
-    // UNTESTED: written from Matter spec §3.2.7, no XY-only test device on hand to validate the X/Y → RGB
-    // conversion or the 0..0xFEFF normalization. mirror of ColorHS for caps bit 0x0008
-    class ColorXY : public PropertyObject
-    {
-
-    public:
-
-        ColorXY(void) : PropertyObject("color", Clusters::ColorControl::Id), m_haveX(false), m_haveY(false), m_x(0), m_y(0) {}
-        void parseAttribute(quint32 attributeId, const MatterTLV::Element &data) override;
-
-    private:
-
-        bool m_haveX, m_haveY;
-        quint16 m_x, m_y;
-
-    };
-
     class ColorTemperature : public PropertyObject
     {
 

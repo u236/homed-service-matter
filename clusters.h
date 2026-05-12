@@ -239,8 +239,6 @@ namespace Clusters
         {
             const quint32 CurrentHue          = 0x0000;
             const quint32 CurrentSaturation   = 0x0001;
-            const quint32 CurrentX            = 0x0003;
-            const quint32 CurrentY            = 0x0004;
             const quint32 ColorTemperatureMireds        = 0x0007;
             const quint32 ColorMode                     = 0x0008;
             const quint32 ColorCapabilities             = 0x400A;
@@ -251,7 +249,6 @@ namespace Clusters
         namespace Commands
         {
             const quint32 MoveToHueAndSaturation  = 0x0006;
-            const quint32 MoveToColor             = 0x0007;
             const quint32 MoveToColorTemperature  = 0x000A;
         }
     }

@@ -61,30 +61,6 @@ QByteArray ColorHS::request(quint16 endpointId, const QVariant &data)
     return InteractionModel::encodeInvokeRequest(CommandPath(endpointId, Clusters::ColorControl::Id, Clusters::ColorControl::Commands::MoveToHueAndSaturation), fields);
 }
 
-QByteArray ColorXY::request(quint16 endpointId, const QVariant &data)
-{
-    // UNTESTED: encodes MoveToColor (Matter §3.2.11.7). RGB → CIE xy via Color::toXY, then 0..1.0 → 0..0xFEFF
-    QList <QVariant> list = data.toList();
-
-    if (list.count() < 3)
-        return QByteArray();
-
-    Color color(list.at(0).toDouble() / 0xFF, list.at(1).toDouble() / 0xFF, list.at(2).toDouble() / 0xFF);
-    double x, y;
-    color.toXY(&x, &y);
-
-    MatterTLV::Encoder fields;
-    fields.openStructure();
-    fields.encodeUnsignedInt(0, static_cast <quint16> (x * 0xFEFF)); // colorX
-    fields.encodeUnsignedInt(1, static_cast <quint16> (y * 0xFEFF)); // colorY
-    fields.encodeUnsignedInt(2, 0);                                  // transitionTime
-    fields.encodeUnsignedInt(3, 0);                                  // optionsMask
-    fields.encodeUnsignedInt(4, 0);                                  // optionsOverride
-    fields.closeContainer();
-
-    return InteractionModel::encodeInvokeRequest(CommandPath(endpointId, Clusters::ColorControl::Id, Clusters::ColorControl::Commands::MoveToColor), fields);
-}
-
 QByteArray ColorTemperature::request(quint16 endpointId, const QVariant &data)
 {
     MatterTLV::Encoder fields;
