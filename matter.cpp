@@ -359,7 +359,14 @@ QList <AttributePath> Matter::buildSubscribePaths(DeviceObject *device)
         quint16 caps = static_cast <quint16> (ep->meta().value("colorCapabilities").toInt());
 
         if (clusters.contains(Clusters::OnOff::Id))
+        {
             paths.append(AttributePath(epId, Clusters::OnOff::Id, Clusters::OnOff::Attributes::OnOff));
+
+            // StartUpOnOff is mandatory only when the LT (Lighting) feature is advertised; on plain on/off
+            // relays it's optional and reading it would risk UNSUPPORTED_ATTRIBUTE on the whole subscription
+            if (ep->meta().value("onOffFeatures").toUInt() & Clusters::OnOff::Features::LT)
+                paths.append(AttributePath(epId, Clusters::OnOff::Id, Clusters::OnOff::Attributes::StartUpOnOff));
+        }
 
         if (clusters.contains(Clusters::LevelControl::Id))
             paths.append(AttributePath(epId, Clusters::LevelControl::Id, Clusters::LevelControl::Attributes::CurrentLevel));
@@ -756,7 +763,7 @@ void Matter::sendCommand(DeviceObject *device, quint8 endpointId, const QString 
             continue;
 
         logInfo << device << "sending command" << name << "to endpoint" << endpointId;
-        sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+        sendEncrypted(session, action->opcode(), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
         return;
     }
 }
@@ -1270,6 +1277,11 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                                         metaKey = "deviceType";
                                     break;
 
+                                case Clusters::OnOff::Id:
+                                    if (report.path.attributeId == Clusters::OnOff::Attributes::FeatureMap)
+                                        metaKey = "onOffFeatures";
+                                    break;
+
                                 case Clusters::ColorControl::Id:
                                     switch (report.path.attributeId)
                                     {
@@ -1348,6 +1360,9 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
 
                         for (auto it = endpointClusters.begin(); it != endpointClusters.end(); it++)
                         {
+                            if (it.value().contains(Clusters::OnOff::Id))
+                                followupPaths.append(AttributePath(it.key(), Clusters::OnOff::Id, Clusters::OnOff::Attributes::FeatureMap));
+
                             if (it.value().contains(Clusters::ColorControl::Id))
                             {
                                 followupPaths.append(AttributePath(it.key(), Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorCapabilities));
@@ -1486,6 +1501,14 @@ void Matter::handleInteractionModel(const MessageHeader &msgHeader, const Protoc
                 }
             }
 
+            break;
+        }
+
+        case InteractionModelOpcode::WriteResponse:
+        {
+            // WriteResponse carries an array of AttributeStatusIB per Matter §10.6.4; full parsing is
+            // overkill for our use cases (one-off StartUpOnOff write) — log the raw size at debug
+            logDebug(m_debug) << "WriteResponse received, size:" << payload.size();
             break;
         }
 

@@ -115,6 +115,16 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId)
                 ep->exposes().append(Expose(new SwitchObject));
             }
         }
+
+        // StartUpOnOff is mandatory only with the LT (Lighting) feature; plain on/off relays may or may not
+        // implement it. expose the powerOnStatus property/action only when LT is advertised — writes to
+        // unsupported attributes would otherwise return errors at runtime
+        if (ep->meta().value("onOffFeatures").toUInt() & Clusters::OnOff::Features::LT)
+        {
+            ep->properties().append(Property(new Properties::PowerOnStatus));
+            ep->actions().append(Action(new Actions::PowerOnStatus));
+            ep->exposes().append(Expose(new SelectObject("powerOnStatus")));
+        }
     }
 
     if (clusters.contains(Clusters::LevelControl::Id))

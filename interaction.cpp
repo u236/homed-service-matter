@@ -141,28 +141,30 @@ QByteArray InteractionModel::encodeWriteRequest(quint16 endpointId, quint32 clus
     encoder.encodeUnsignedInt(4, attributeId);
     encoder.closeContainer();
 
-    // tag 2: Data — append raw TLV value
-    // The value needs tag 2 context-specific
-    QByteArray valueData = valueEncoder.data();
-    // Re-encode with proper tag
-    // For simplicity, just append the raw encoded value bytes as tag 2
-    // We need to handle this properly: the value was encoded with tag 0 by default
-    // Let's just put the raw bytes
-    encoder.openStructure(2); // wrap value
-    encoder.closeContainer(); // placeholder — see below
+    // tag 2: Data — caller passes the value encoded with tag 0; decode + re-emit under tag 2 so the
+    // AttributeDataIB carries the data with the spec-required context tag (same trick encodeInvokeRequest
+    // uses for command fields)
+    MatterTLV::Decoder decoder(valueEncoder.data());
+    MatterTLV::Element value = decoder.decode();
+
+    switch (value.type)
+    {
+        case MatterTLV::Type::UnsignedInt: encoder.encodeUnsignedInt(2, value.value.toULongLong()); break;
+        case MatterTLV::Type::SignedInt:   encoder.encodeSignedInt(2, value.value.toLongLong());    break;
+        case MatterTLV::Type::Boolean:     encoder.encodeBool(2, value.value.toBool());             break;
+        case MatterTLV::Type::UTF8String:  encoder.encodeUTF8String(2, value.value.toString());     break;
+        case MatterTLV::Type::ByteString:  encoder.encodeByteString(2, value.value.toByteArray());  break;
+        case MatterTLV::Type::Null:        encoder.encodeNull(2);                                   break;
+        default: break;
+    }
 
     encoder.closeContainer(); // AttributeDataIB
     encoder.closeContainer(); // WriteRequests array
 
+    // tag 0xFF: InteractionModelRevision
+    encoder.encodeUnsignedInt(0xFF, 11);
+
     encoder.closeContainer();
-
-    // TODO: proper value embedding — for now return the structure
-    // Real implementation needs the value TLV element with tag 2
-    Q_UNUSED(endpointId)
-    Q_UNUSED(clusterId)
-    Q_UNUSED(attributeId)
-    Q_UNUSED(valueData)
-
     return encoder.data();
 }
 

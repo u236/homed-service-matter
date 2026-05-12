@@ -138,4 +138,24 @@ QByteArray CoverPosition::request(quint16 endpointId, const QVariant &data)
     return InteractionModel::encodeInvokeRequest(CommandPath(endpointId, Clusters::WindowCovering::Id, Clusters::WindowCovering::Commands::GoToLiftPercentage), fields);
 }
 
+QByteArray PowerOnStatus::request(quint16 endpointId, const QVariant &data)
+{
+    QString label = data.toString();
+    MatterTLV::Encoder value;
+
+    // accept both spec values (0/1/2/null) and the expose.json labels HA sends as select payload
+    if (label == "off")
+        value.encodeUnsignedInt(0, 0);
+    else if (label == "on")
+        value.encodeUnsignedInt(0, 1);
+    else if (label == "toggle")
+        value.encodeUnsignedInt(0, 2);
+    else if (label == "previous")
+        value.encodeNull(0);
+    else
+        return QByteArray();
+
+    return InteractionModel::encodeWriteRequest(endpointId, Clusters::OnOff::Id, Clusters::OnOff::Attributes::StartUpOnOff, value);
+}
+
 }

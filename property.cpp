@@ -303,4 +303,25 @@ void SwitchCount::parseEvent(quint32 eventId, const MatterTLV::Element &data)
     }
 }
 
+void PowerOnStatus::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+{
+    if (attributeId != Clusters::OnOff::Attributes::StartUpOnOff)
+        return;
+
+    // Matter §1.5.6.3 StartUpOnOff: nullable enum8. null carries "preserve previous state" semantics —
+    // expose.json labels it "previous"; the numeric values map 1:1 to off/on/toggle
+    if (data.type == MatterTLV::Type::Null)
+    {
+        m_value = "previous";
+        return;
+    }
+
+    switch (data.value.toUInt())
+    {
+        case 0: m_value = "off";    break;
+        case 1: m_value = "on";     break;
+        case 2: m_value = "toggle"; break;
+    }
+}
+
 }

@@ -154,7 +154,9 @@ namespace Clusters
 
         namespace Attributes
         {
-            const quint32 OnOff = 0x0000;
+            const quint32 OnOff        = 0x0000;
+            const quint32 StartUpOnOff = 0x4003; // power-on default (LT feature)
+            const quint32 FeatureMap   = 0xFFFC;
         }
 
         namespace Commands
@@ -162,6 +164,13 @@ namespace Clusters
             const quint32 Off    = 0x0000;
             const quint32 On     = 0x0001;
             const quint32 Toggle = 0x0002;
+        }
+
+        // Matter spec §1.5.4 OnOff FeatureMap; LT makes StartUpOnOff mandatory
+        namespace Features
+        {
+            const quint32 LT = 1 << 0; // Lighting
+            const quint32 DF = 1 << 1; // DeadFrontBehavior
         }
     }
 

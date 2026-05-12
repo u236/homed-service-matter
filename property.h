@@ -268,6 +268,16 @@ namespace Properties
         void parseEvent(quint32 eventId, const MatterTLV::Element &data) override;
 
     };
+
+    class PowerOnStatus : public PropertyObject
+    {
+
+    public:
+
+        PowerOnStatus(void) : PropertyObject("powerOnStatus", Clusters::OnOff::Id) {}
+        void parseAttribute(quint32 attributeId, const MatterTLV::Element &data) override;
+
+    };
 }
 
 #endif
