@@ -2345,6 +2345,10 @@ void Matter::readyRead(void)
                 continue;
             }
 
+            // A successfully decrypted peer message proves that a resumed CASE session is usable.
+            // Keep the fallback armed only until this first round-trip completes.
+            session->resumptionPendingValidation = false;
+
             logDebug(m_debug) << "Decrypted message from session" << msgHeader.sessionId << "counter:" << msgHeader.messageCounter << "size:" << payload.size();
 
             // device sent something — refresh lastSeen and bring online if not already (covers both Offline → Online and
@@ -2765,6 +2769,17 @@ void Matter::mrpRetransmitFailed(quint32 messageCounter, quint16 exchangeId, con
 
         if (device->nodeId() == nodeId)
         {
+            // Some peers accept Sigma2_Resume but do not process the first encrypted message after the
+            // controller has restarted. Retrying the same saved resumption state loops forever. Drop only
+            // the resumption pair and let handleDeviceUnreachable schedule a full CASE handshake.
+            if (session->resumptionPendingValidation && !device->resumptionID().isEmpty())
+            {
+                logWarning << device << "resumed CASE failed before the first encrypted response, retrying with full handshake";
+                device->setResumptionID(QByteArray());
+                device->setResumptionSharedSecret(QByteArray());
+                m_devices->store(true);
+            }
+
             handleDeviceUnreachable(device);
             break;
         }
@@ -3082,6 +3097,7 @@ void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
     session.peerNodeId = device->nodeId();
     session.localMessageCounter = 0;
     session.active = true;
+    session.resumptionPendingValidation = caseSes->resumed();
 
     session.peerAddress = device->networkAddress();
     session.peerPort = device->networkPort();
