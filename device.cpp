@@ -333,31 +333,35 @@ void DeviceList::setFabricCredentials(const QByteArray &fabricKey, quint64 rootC
 
 void DeviceList::updateMultiple(DeviceObject *device)
 {
-    QMap <QString, int> exposeCounts, propertyCounts;
+    QMap <QString, int> counts;
 
     for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
     {
-        for (int i = 0; i < it.value()->exposes().count(); i++)
-            exposeCounts[it.value()->exposes().at(i)->name().split('_').value(0)]++;
-
         EndpointObject *ep = reinterpret_cast <EndpointObject*> (it.value().data());
 
         for (int i = 0; i < ep->properties().count(); i++)
-            propertyCounts[ep->properties().at(i)->name()]++;
+            counts[ep->properties().at(i)->name()]++;
     }
 
     for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
     {
-        for (int i = 0; i < it.value()->exposes().count(); i++)
-        {
-            QString name = it.value()->exposes().at(i)->name().split('_').value(0);
-            it.value()->exposes().at(i)->setMultiple(exposeCounts.value(name) > 1);
-        }
-
         EndpointObject *ep = reinterpret_cast <EndpointObject*> (it.value().data());
+        bool multiple = false;
 
         for (int i = 0; i < ep->properties().count(); i++)
-            ep->properties().at(i)->setMultiple(propertyCounts.value(ep->properties().at(i)->name()) > 1);
+        {
+            if (counts.value(ep->properties().at(i)->name()) < 2)
+                continue;
+
+            multiple = true;
+            break;
+        }
+
+        for (int i = 0; i < it.value()->exposes().count(); i++)
+            it.value()->exposes().at(i)->setMultiple(multiple);
+
+        for (int i = 0; i < ep->properties().count(); i++)
+            ep->properties().at(i)->setMultiple(multiple);
     }
 }
 
