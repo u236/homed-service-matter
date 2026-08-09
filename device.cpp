@@ -230,7 +230,10 @@ void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId)
             }
 
             if (!actions.isEmpty())
-                device->options().insert(QString("action_%1").arg(endpointId), QMap <QString, QVariant> {{"enum", actions}});
+            {
+                device->options().insert(QString("action_%1").arg(endpointId), m_exposeOptions.value("action"));
+                device->updateOption(QString("action_%1").arg(endpointId), "enum", actions);
+            }
         }
     }
 
