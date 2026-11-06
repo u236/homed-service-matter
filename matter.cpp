@@ -589,6 +589,8 @@ void Matter::updateDevice(const QString &deviceName, const QString &name, const 
         device->setName(name);
     }
 
+    // TODO: inactive device must not run at all: no session restore, subscription or reconnect, status always offline.
+    // Now it keeps working and any incoming packet sets it online. Also decide how to remove inactive device, without a session it stays in our fabric
     device->setActive(active);
     device->setDiscovery(discovery);
     device->setCloud(cloud);

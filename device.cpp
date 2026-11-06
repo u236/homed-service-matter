@@ -577,7 +577,7 @@ QJsonArray DeviceList::serialize(void)
     {
         const Device &device = at(i);
         DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
-        QJsonObject json = {{"nodeId", QString::number(obj->nodeId(), 16)}, {"name", device->name()}, {"active", device->active()}, {"cloud", device->cloud()}, {"discovery", device->discovery()}};
+        QJsonObject json = {{"nodeId", QString::number(obj->nodeId(), 16)}, {"name", device->name()}, {"active", device->active()}, {"discovery", device->discovery()}, {"cloud", device->cloud()}};
 
         if (obj->vendorId())
             json.insert("vendorId", obj->vendorId());

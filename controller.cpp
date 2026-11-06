@@ -227,6 +227,7 @@ void Controller::deviceEvent(DeviceObject *device, Matter::Event event, const QJ
         case Matter::Event::added:
         case Matter::Event::updated:
 
+            // TODO: device renamed while availability is unknown gets no status under new name until restart or availability change
             if (device->availability() != Availability::Unknown)
                 mqttPublish(mqttTopic("device/%1/%2").arg(serviceTopic(), m_matter->devices()->names() ? device->name() : device->address()), {{"lastSeen", device->lastSeen()}, {"status", device->availability() == Availability::Online ? "online" : "offline"}}, true);
 
