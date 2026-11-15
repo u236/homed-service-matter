@@ -3,43 +3,10 @@
 #ifndef INTERACTION_H
 #define INTERACTION_H
 
+#define INTERACTION_MODEL_REVISION      11
+#define INTERACTION_MODEL_REVISION_TAG  0xFF
+
 #include "tlv.h"
-
-/*
-    Matter Interaction Model (spec section 8)
-
-    TLV structure for IM messages:
-
-    AttributePathIB:
-        0 = enableTagCompression (bool)
-        1 = nodeId (u64, optional)
-        2 = endpointId (u16)
-        3 = clusterId (u32)
-        4 = attributeId (u32)
-        5 = listIndex (u16, optional)
-
-    CommandPathIB:
-        0 = endpointId (u16)
-        1 = clusterId (u32)
-        2 = commandId (u32)
-
-    ReadRequest:
-        0 = attributeRequests (array of AttributePathIB)
-
-    WriteRequest:
-        0 = suppressResponse (bool)
-        1 = timedRequest (bool)
-        2 = writeRequests (array of AttributeDataIB)
-
-    InvokeRequest:
-        0 = suppressResponse (bool)
-        1 = timedRequest (bool)
-        2 = invokeRequests (array of CommandDataIB)
-
-    ReportData:
-        0 = subscriptionId (u32, optional)
-        1 = attributeReports (array of AttributeReportIB)
-*/
 
 struct AttributePath
 {
@@ -47,8 +14,7 @@ struct AttributePath
     quint32 clusterId;
     quint32 attributeId;
 
-    AttributePath(void) : endpointId(0), clusterId(0), attributeId(0) {}
-    AttributePath(quint16 ep, quint32 cl, quint32 at) : endpointId(ep), clusterId(cl), attributeId(at) {}
+    AttributePath(quint16 endpointId = 0, quint32 clusterId = 0, quint32 attributeId = 0) : endpointId(endpointId), clusterId(clusterId), attributeId(attributeId) {}
 };
 
 struct EventPath
@@ -56,10 +22,9 @@ struct EventPath
     quint16 endpointId;
     quint32 clusterId;
     quint32 eventId;
-    bool isUrgent;
+    bool    urgent;
 
-    EventPath(void) : endpointId(0), clusterId(0), eventId(0), isUrgent(false) {}
-    EventPath(quint16 ep, quint32 cl, quint32 ev, bool urgent = false) : endpointId(ep), clusterId(cl), eventId(ev), isUrgent(urgent) {}
+    EventPath(quint16 endpointId = 0, quint32 clusterId = 0, quint32 eventId = 0, bool urgent = false) : endpointId(endpointId), clusterId(clusterId), eventId(eventId), urgent(urgent) {}
 };
 
 struct CommandPath
@@ -68,26 +33,25 @@ struct CommandPath
     quint32 clusterId;
     quint32 commandId;
 
-    CommandPath(void) : endpointId(0), clusterId(0), commandId(0) {}
-    CommandPath(quint16 ep, quint32 cl, quint32 cmd) : endpointId(ep), clusterId(cl), commandId(cmd) {}
+    CommandPath(quint16 endpointId = 0, quint32 clusterId = 0, quint32 commandId = 0) : endpointId(endpointId), clusterId(clusterId), commandId(commandId) {}
 };
 
 struct AttributeReport
 {
-    AttributePath path;
-    QVariant value;
-    MatterTLV::Element rawValue;
-    quint8 status;
-    bool hasError;
+    AttributePath      path;
+    QVariant           value;
+    MatterTLV::Element data;
+    quint8             status;
+    bool               error;
 
-    AttributeReport(void) : status(0), hasError(false) {}
+    AttributeReport(void) : status(0), error(false) {}
 };
 
 struct EventReport
 {
-    EventPath path;
-    quint64 eventNumber;
-    quint8 priority;
+    EventPath          path;
+    quint64            eventNumber;
+    quint8             priority;
     MatterTLV::Element data;
 
     EventReport(void) : eventNumber(0), priority(0) {}
@@ -95,8 +59,8 @@ struct EventReport
 
 struct CommandResponse
 {
-    CommandPath path;
-    quint8 status;
+    CommandPath        path;
+    quint8             status;
     MatterTLV::Element data;
 
     CommandResponse(void) : status(0) {}
@@ -107,32 +71,30 @@ class InteractionModel
 
 public:
 
-    // --- Encoding ---
+    static QByteArray readRequest(const QList <AttributePath> &attributes);
+    static QByteArray writeRequest(const AttributePath &path, MatterTLV::Encoder &value);
+    static QByteArray invokeRequest(const CommandPath &path, MatterTLV::Encoder &fields, bool timed = false);
+    static QByteArray subscribeRequest(const QList <AttributePath> &attributes, const QList <EventPath> &events, quint16 minInterval, quint16 maxInterval);
+    static QByteArray timedRequest(quint16 timeout);
+    static QByteArray statusResponse(quint8 status);
 
-    static QByteArray encodeReadRequest(const QList <AttributePath> &paths);
-    static QByteArray encodeWriteRequest(quint16 endpointId, quint32 clusterId, quint32 attributeId, const MatterTLV::Encoder &valueEncoder);
-    static QByteArray encodeInvokeRequest(const CommandPath &path, const MatterTLV::Encoder &fieldsEncoder, bool timedRequest = false);
-    static QByteArray encodeSubscribeRequest(const QList <AttributePath> &attributePaths, const QList <EventPath> &eventPaths, quint16 minInterval, quint16 maxInterval);
-
-    static QByteArray encodeTimedRequest(quint16 timeoutMs);
-    static QByteArray encodeStatusResponse(quint8 status);
-
-    // --- Decoding ---
-
-    static QList <AttributeReport> decodeReportData(const QByteArray &payload);
-    static QList <EventReport> decodeEventReports(const QByteArray &payload);
-    static QList <CommandResponse> decodeInvokeResponse(const QByteArray &payload);
-    static quint8 decodeStatusResponse(const QByteArray &payload);
+    static QList <AttributeReport> attributeReports(const QByteArray &payload);
+    static QList <EventReport> eventReports(const QByteArray &payload);
+    static QList <CommandResponse> commandResponses(const QByteArray &payload);
+    static quint8 status(const QByteArray &payload);
 
 private:
 
     static void encodeAttributePath(MatterTLV::Encoder &encoder, const AttributePath &path);
     static void encodeEventPath(MatterTLV::Encoder &encoder, const EventPath &path);
     static void encodeCommandPath(MatterTLV::Encoder &encoder, const CommandPath &path);
+    static void encodeElement(MatterTLV::Encoder &encoder, int tag, const MatterTLV::Element &element);
 
     static AttributePath decodeAttributePath(const MatterTLV::Element &element);
     static EventPath decodeEventPath(const MatterTLV::Element &element);
     static CommandPath decodeCommandPath(const MatterTLV::Element &element);
+
+    static quint8 decodeStatus(const MatterTLV::Element &element);
 
 };
 

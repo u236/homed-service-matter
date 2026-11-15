@@ -12,11 +12,11 @@ HEADERS += \
     crypto.h \
     device.h \
     interaction.h \
+    matter.h \
     mdns.h \
     message.h \
     mrp.h \
     pase.h \
-    matter.h \
     property.h \
     tlv.h
 
@@ -28,11 +28,11 @@ SOURCES += \
     crypto.cpp \
     device.cpp \
     interaction.cpp \
+    matter.cpp \
     mdns.cpp \
     message.cpp \
     mrp.cpp \
     pase.cpp \
-    matter.cpp \
     property.cpp \
     tlv.cpp
 

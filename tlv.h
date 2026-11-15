@@ -51,8 +51,6 @@ namespace MatterTLV
 
     public:
 
-        Encoder(void) {}
-
         void encodeSignedInt(int tag, qint64 value);
         void encodeUnsignedInt(int tag, quint64 value);
         void encodeBool(int tag, bool value);
@@ -67,16 +65,17 @@ namespace MatterTLV
         void openList(int tag = -1);
         void closeContainer(void);
 
-        void encodeRaw(const QByteArray &raw);
+        void encodeRaw(const QByteArray &data);
 
-        inline QByteArray data(void) const { return m_data; }
+        inline QByteArray data(void) { return m_data; }
 
     private:
 
         QByteArray m_data;
 
-        void encodeControl(Type type, int tag);
-        void encodeLength(quint32 length);
+        void encodeControl(quint8 control, int tag);
+        void encodeValue(quint64 value, quint8 length);
+        void encodeString(Type type, int tag, const QByteArray &value);
 
     };
 

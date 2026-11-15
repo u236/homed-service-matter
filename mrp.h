@@ -3,31 +3,43 @@
 #ifndef MRP_H
 #define MRP_H
 
-#include <QTimer>
-#include <QHostAddress>
-
-/*
-    Message Reliability Protocol (MRP) — spec section 4.11
-
-    Provides reliable delivery over UDP:
-    - Each message with R flag set requires an ACK
-    - ACK via standalone ack or piggybacked in next message
-    - Retransmit with exponential backoff
-    - Duplicate detection via message counter tracking
-
-    Timers:
-    - MRP_STANDALONE_ACK_TIMEOUT: 200ms (max delay before sending standalone ACK)
-    - MRP_RETRANS_BASE: 300ms (base retransmission interval)
-    - MRP_RETRANS_MAX: 3 retries
-    - MRP_BACKOFF_BASE: 1.6 (exponential backoff multiplier)
-    - MRP_BACKOFF_JITTER: 0.25 (random jitter)
-*/
-
+#define MRP_TIMER_INTERVAL          50
 #define MRP_STANDALONE_ACK_TIMEOUT  200
-#define MRP_RETRANS_BASE            300
-#define MRP_RETRANS_MAX             3
+#define MRP_RETRANSMIT_INTERVAL     300
+#define MRP_RETRANSMIT_RETRIES      3
 #define MRP_BACKOFF_MULTIPLIER      1.6
 #define MRP_BACKOFF_JITTER          0.25
+#define MRP_COUNTER_WINDOW_SIZE     32
+
+#include <QHostAddress>
+#include <QTimer>
+
+struct PendingMessage
+{
+    QByteArray   data;
+    QHostAddress address;
+    quint16      port;
+    quint32      messageCounter;
+    quint16      exchangeId;
+    quint8       retry;
+    qint64       retransmitTime;
+    quint32      interval;
+
+    PendingMessage(void) : port(0), messageCounter(0), exchangeId(0), retry(0), retransmitTime(0), interval(0) {}
+};
+
+struct PendingAck
+{
+    QHostAddress address;
+    quint16      port;
+    quint16      sessionId;
+    quint32      messageCounter;
+    quint16      exchangeId;
+    bool         initiator;
+    qint64       deadline;
+
+    PendingAck(void) : port(0), sessionId(0), messageCounter(0), exchangeId(0), initiator(false), deadline(0) {}
+};
 
 class MRP : public QObject
 {
@@ -35,42 +47,15 @@ class MRP : public QObject
 
 public:
 
-    struct PendingMessage
-    {
-        QByteArray data;
-        QHostAddress address;
-        quint16 port;
-        quint32 messageCounter;
-        quint16 exchangeId;
-        quint8 retryCount;
-        qint64 nextRetransmit;
-        quint32 baseInterval; // ms; 0 → use MRP_RETRANS_BASE default
-
-        PendingMessage(void) : port(0), messageCounter(0), exchangeId(0), retryCount(0), nextRetransmit(0), baseInterval(0) {}
-    };
-
-    struct PendingAck
-    {
-        QHostAddress address;
-        quint16 port;
-        quint16 sessionId;
-        quint32 messageCounter;
-        quint16 exchangeId;
-        bool initiator;
-        qint64 deadline;
-
-        PendingAck(void) : port(0), sessionId(0), messageCounter(0), exchangeId(0), initiator(false), deadline(0) {}
-    };
-
     MRP(QObject *parent);
 
     inline void setDebug(bool value) { m_debug = value; }
 
-    void messageSent(const QByteArray &data, const QHostAddress &address, quint16 port, quint32 messageCounter, quint16 exchangeId, bool needsAck, quint32 baseInterval = 0);
+    void messageSent(const QByteArray &data, const QHostAddress &address, quint16 port, quint32 messageCounter, quint16 exchangeId, bool needsAck, quint32 interval = 0);
     void messageReceived(quint32 messageCounter, quint16 exchangeId, bool hasAck, quint32 ackCounter, const QHostAddress &address, quint16 port, quint16 sessionId, bool needsAck, bool initiator);
     void cancelPendingAck(quint32 messageCounter);
 
-    bool isDuplicate(const QHostAddress &address, quint32 messageCounter);
+    bool duplicate(const QHostAddress &address, quint32 messageCounter);
 
 private:
 
@@ -79,14 +64,13 @@ private:
 
     QList <PendingMessage> m_pendingMessages;
     QList <PendingAck> m_pendingAcks;
-    QMap <QString, QList <quint32>> m_peerCounters;
+    QMap <QString, QList <quint32>> m_counters;
 
-    quint32 retransmitInterval(quint8 retryCount, quint32 baseInterval = 0);
-    QString peerKey(const QHostAddress &address);
+    quint32 retransmitInterval(quint8 retry, quint32 interval);
 
 private slots:
 
-    void processTimers(void);
+    void update(void);
 
 signals:
 

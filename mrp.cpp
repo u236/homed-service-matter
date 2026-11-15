@@ -2,70 +2,58 @@
 
 #include <QDateTime>
 #include <QRandomGenerator>
-#include "mrp.h"
 #include "logger.h"
-
-#define COUNTER_WINDOW_SIZE 32
+#include "mrp.h"
 
 MRP::MRP(QObject *parent) : QObject(parent), m_timer(new QTimer(this)), m_debug(false)
 {
-    connect(m_timer, &QTimer::timeout, this, &MRP::processTimers);
-    m_timer->start(50);
+    connect(m_timer, &QTimer::timeout, this, &MRP::update);
+    m_timer->start(MRP_TIMER_INTERVAL);
 }
 
-quint32 MRP::retransmitInterval(quint8 retryCount, quint32 baseInterval)
+void MRP::messageSent(const QByteArray &data, const QHostAddress &address, quint16 port, quint32 messageCounter, quint16 exchangeId, bool needsAck, quint32 interval)
 {
-    double interval = baseInterval ? static_cast <double> (baseInterval) : MRP_RETRANS_BASE;
+    PendingMessage message;
+    qint64 now = QDateTime::currentMSecsSinceEpoch();
 
-    for (quint8 i = 0; i < retryCount; i++)
-        interval *= MRP_BACKOFF_MULTIPLIER;
-
-    double jitter = interval * MRP_BACKOFF_JITTER * (QRandomGenerator::global()->generateDouble() * 2.0 - 1.0);
-    return static_cast <quint32> (interval + jitter);
-}
-
-QString MRP::peerKey(const QHostAddress &address)
-{
-    return address.toString();
-}
-
-void MRP::messageSent(const QByteArray &data, const QHostAddress &address, quint16 port, quint32 messageCounter, quint16 exchangeId, bool needsAck, quint32 baseInterval)
-{
     if (!needsAck)
         return;
 
-    PendingMessage pending;
-    pending.data = data;
-    pending.address = address;
-    pending.port = port;
-    pending.messageCounter = messageCounter;
-    pending.exchangeId = exchangeId;
-    pending.retryCount = 0;
-    pending.baseInterval = baseInterval;
-    pending.nextRetransmit = QDateTime::currentMSecsSinceEpoch() + retransmitInterval(0, baseInterval);
+    message.data = data;
+    message.address = address;
+    message.port = port;
+    message.messageCounter = messageCounter;
+    message.exchangeId = exchangeId;
+    message.interval = interval;
+    message.retransmitTime = now + retransmitInterval(0, interval);
 
-    m_pendingMessages.append(pending);
-    logDebug(m_debug) << "MRP registered counter:" << messageCounter << "to" << address.toString() << ":" << port << "nextRetransmit in" << (pending.nextRetransmit - QDateTime::currentMSecsSinceEpoch()) << "ms, queue:" << m_pendingMessages.count();
+    m_pendingMessages.append(message);
+    logDebug(m_debug) << "MRP message" << messageCounter << "sent to" << address.toString() << "port" << port << "retransmit in" << message.retransmitTime - now << "ms, queue length" << m_pendingMessages.count();
 }
 
 void MRP::messageReceived(quint32 messageCounter, quint16 exchangeId, bool hasAck, quint32 ackCounter, const QHostAddress &address, quint16 port, quint16 sessionId, bool needsAck, bool initiator)
 {
+    QList <quint32> &counters = m_counters[address.toString()];
+
     if (hasAck)
     {
         for (int i = m_pendingMessages.count() - 1; i >= 0; i--)
         {
-            if (m_pendingMessages.at(i).messageCounter == ackCounter && m_pendingMessages.at(i).address == address)
-            {
-                logDebug(m_debug) << "MRP cleared counter:" << ackCounter << "by ack from" << address.toString();
-                m_pendingMessages.removeAt(i);
-                break;
-            }
+            const PendingMessage &message = m_pendingMessages.at(i);
+
+            if (message.messageCounter != ackCounter || message.address != address)
+                continue;
+
+            logDebug(m_debug) << "MRP message" << ackCounter << "acknowledged by" << address.toString();
+            m_pendingMessages.removeAt(i);
+            break;
         }
     }
 
     if (needsAck)
     {
         PendingAck ack;
+
         ack.address = address;
         ack.port = port;
         ack.sessionId = sessionId;
@@ -77,77 +65,71 @@ void MRP::messageReceived(quint32 messageCounter, quint16 exchangeId, bool hasAc
         m_pendingAcks.append(ack);
     }
 
-    QString key = peerKey(address);
-    QList <quint32> &counters = m_peerCounters[key];
     counters.append(messageCounter);
 
-    while (counters.count() > COUNTER_WINDOW_SIZE)
+    while (counters.count() > MRP_COUNTER_WINDOW_SIZE)
         counters.removeFirst();
-}
-
-bool MRP::isDuplicate(const QHostAddress &address, quint32 messageCounter)
-{
-    QString key = peerKey(address);
-
-    if (!m_peerCounters.contains(key))
-        return false;
-
-    return m_peerCounters.value(key).contains(messageCounter);
 }
 
 void MRP::cancelPendingAck(quint32 messageCounter)
 {
     for (int i = m_pendingAcks.count() - 1; i >= 0; i--)
     {
-        if (m_pendingAcks.at(i).messageCounter == messageCounter)
-        {
-            m_pendingAcks.removeAt(i);
-            break;
-        }
+        if (m_pendingAcks.at(i).messageCounter != messageCounter)
+            continue;
+
+        m_pendingAcks.removeAt(i);
+        break;
     }
 }
 
-void MRP::processTimers(void)
+bool MRP::duplicate(const QHostAddress &address, quint32 messageCounter)
+{
+    return m_counters.value(address.toString()).contains(messageCounter);
+}
+
+quint32 MRP::retransmitInterval(quint8 retry, quint32 interval)
+{
+    double value = interval ? interval : MRP_RETRANSMIT_INTERVAL;
+
+    for (quint8 i = 0; i < retry; i++)
+        value *= MRP_BACKOFF_MULTIPLIER;
+
+    return static_cast <quint32> (value + value * MRP_BACKOFF_JITTER * (QRandomGenerator::global()->generateDouble() * 2 - 1));
+}
+
+void MRP::update(void)
 {
     qint64 now = QDateTime::currentMSecsSinceEpoch();
 
     for (int i = m_pendingAcks.count() - 1; i >= 0; i--)
     {
-        const PendingAck &ack = m_pendingAcks.at(i);
+        PendingAck ack;
 
-        if (now >= ack.deadline)
-        {
-            quint32 messageCounter = ack.messageCounter;
-            quint16 exchangeId = ack.exchangeId;
-            quint16 sessionId = ack.sessionId;
-            QHostAddress address = ack.address;
-            quint16 port = ack.port;
+        if (now < m_pendingAcks.at(i).deadline)
+            continue;
 
-            bool init = m_pendingAcks.at(i).initiator;
-            m_pendingAcks.removeAt(i);
-            emit sendStandaloneAck(messageCounter, exchangeId, sessionId, address, port, init);
-        }
+        ack = m_pendingAcks.takeAt(i);
+        emit sendStandaloneAck(ack.messageCounter, ack.exchangeId, ack.sessionId, ack.address, ack.port, ack.initiator);
     }
 
     for (int i = m_pendingMessages.count() - 1; i >= 0; i--)
     {
-        PendingMessage &pending = m_pendingMessages[i];
+        PendingMessage &message = m_pendingMessages[i];
 
-        if (now < pending.nextRetransmit)
+        if (now < message.retransmitTime)
             continue;
 
-        pending.retryCount++;
-
-        if (pending.retryCount > MRP_RETRANS_MAX)
+        if (++message.retry > MRP_RETRANSMIT_RETRIES)
         {
-            logWarning << "MRP retransmit failed for counter" << pending.messageCounter;
-            emit retransmitFailed(pending.messageCounter, pending.exchangeId, pending.address, pending.port);
+            logWarning << "MRP message" << message.messageCounter << "retransmit failed";
+            emit retransmitFailed(message.messageCounter, message.exchangeId, message.address, message.port);
             m_pendingMessages.removeAt(i);
             continue;
         }
 
-        logDebug(m_debug) << "MRP retransmit" << pending.retryCount << "for counter" << pending.messageCounter;
-        emit retransmit(pending.data, pending.address, pending.port);
-        pending.nextRetransmit = now + retransmitInterval(pending.retryCount, pending.baseInterval);
+        logDebug(m_debug) << "MRP message" << message.messageCounter << "retransmit" << message.retry;
+        emit retransmit(message.data, message.address, message.port);
+        message.retransmitTime = now + retransmitInterval(message.retry, message.interval);
     }
 }

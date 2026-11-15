@@ -2,136 +2,127 @@
 #include "color.h"
 #include "interaction.h"
 
-namespace Actions
+QByteArray Actions::Status::request(quint16 endpointId, const QVariant &data)
 {
-
-QByteArray Status::request(quint16 endpointId, const QVariant &data)
-{
-    QString status = data.toString();
-    quint32 cmdId = Clusters::OnOff::Commands::Off;
-
-    if (status == "on")
-        cmdId = Clusters::OnOff::Commands::On;
-    else if (status == "toggle")
-        cmdId = Clusters::OnOff::Commands::Toggle;
-
+    QList <QString> list = {"off", "on", "toggle"};
     MatterTLV::Encoder fields;
+    quint32 commandId;
+
+    switch (list.indexOf(data.toString()))
+    {
+        case 1:  commandId = Clusters::OnOff::Commands::On; break;
+        case 2:  commandId = Clusters::OnOff::Commands::Toggle; break;
+        default: commandId = Clusters::OnOff::Commands::Off; break;
+    }
+
     fields.openStructure();
     fields.closeContainer();
 
-    return InteractionModel::encodeInvokeRequest(CommandPath(endpointId, Clusters::OnOff::Id, cmdId), fields);
+    return InteractionModel::invokeRequest(CommandPath(endpointId, Clusters::OnOff::Id, commandId), fields);
 }
 
-QByteArray Level::request(quint16 endpointId, const QVariant &data)
+QByteArray Actions::Level::request(quint16 endpointId, const QVariant &data)
 {
-    // consumer scale is 0..0xFF, peer's MoveToLevel takes 0..0xFE
-    quint8 level = static_cast <quint8> (data.toUInt() * 0xFE / 0xFF);
-
     MatterTLV::Encoder fields;
+
     fields.openStructure();
-    fields.encodeUnsignedInt(0, level);
-    fields.encodeUnsignedInt(1, 0); // transitionTime (tenths of seconds)
-    fields.encodeUnsignedInt(2, 0); // optionsMask
-    fields.encodeUnsignedInt(3, 0); // optionsOverride
+    fields.encodeUnsignedInt(0, static_cast <quint8> (data.toUInt() * 0xFE / 0xFF)); // level, 0xFE is maximum
+    fields.encodeUnsignedInt(1, 0); // transition time
+    fields.encodeUnsignedInt(2, 0); // options mask
+    fields.encodeUnsignedInt(3, 0); // options override
     fields.closeContainer();
 
-    return InteractionModel::encodeInvokeRequest(CommandPath(endpointId, Clusters::LevelControl::Id, Clusters::LevelControl::Commands::MoveToLevelWithOnOff), fields);
+    return InteractionModel::invokeRequest(CommandPath(endpointId, Clusters::LevelControl::Id, Clusters::LevelControl::Commands::MoveToLevelWithOnOff), fields);
 }
 
-QByteArray ColorHS::request(quint16 endpointId, const QVariant &data)
+QByteArray Actions::ColorHS::request(quint16 endpointId, const QVariant &data)
 {
     QList <QVariant> list = data.toList();
+    MatterTLV::Encoder fields;
+    double hue, saturation;
 
     if (list.count() < 3)
         return QByteArray();
 
-    Color color(list.at(0).toDouble() / 0xFF, list.at(1).toDouble() / 0xFF, list.at(2).toDouble() / 0xFF);
-    double h, s;
-    color.toHS(&h, &s);
+    Color(list.at(0).toDouble() / 0xFF, list.at(1).toDouble() / 0xFF, list.at(2).toDouble() / 0xFF).toHS(&hue, &saturation);
 
-    MatterTLV::Encoder fields;
     fields.openStructure();
-    fields.encodeUnsignedInt(0, static_cast <quint8> (h * 0xFE)); // hue
-    fields.encodeUnsignedInt(1, static_cast <quint8> (s * 0xFE)); // saturation
-    fields.encodeUnsignedInt(2, 0);                                // transitionTime
-    fields.encodeUnsignedInt(3, 0);                                // optionsMask
-    fields.encodeUnsignedInt(4, 0);                                // optionsOverride
+    fields.encodeUnsignedInt(0, static_cast <quint8> (hue * 0xFE));
+    fields.encodeUnsignedInt(1, static_cast <quint8> (saturation * 0xFE));
+    fields.encodeUnsignedInt(2, 0); // transition time
+    fields.encodeUnsignedInt(3, 0); // options mask
+    fields.encodeUnsignedInt(4, 0); // options override
     fields.closeContainer();
 
-    return InteractionModel::encodeInvokeRequest(CommandPath(endpointId, Clusters::ColorControl::Id, Clusters::ColorControl::Commands::MoveToHueAndSaturation), fields);
+    return InteractionModel::invokeRequest(CommandPath(endpointId, Clusters::ColorControl::Id, Clusters::ColorControl::Commands::MoveToHueAndSaturation), fields);
 }
 
-QByteArray ColorTemperature::request(quint16 endpointId, const QVariant &data)
+QByteArray Actions::ColorTemperature::request(quint16 endpointId, const QVariant &data)
 {
     MatterTLV::Encoder fields;
+
     fields.openStructure();
-    fields.encodeUnsignedInt(0, static_cast <quint16> (data.toUInt())); // colorTemperatureMireds
-    fields.encodeUnsignedInt(1, 0);                                     // transitionTime
-    fields.encodeUnsignedInt(2, 0);                                     // optionsMask
-    fields.encodeUnsignedInt(3, 0);                                     // optionsOverride
+    fields.encodeUnsignedInt(0, static_cast <quint16> (data.toUInt()));
+    fields.encodeUnsignedInt(1, 0); // transition time
+    fields.encodeUnsignedInt(2, 0); // options mask
+    fields.encodeUnsignedInt(3, 0); // options override
     fields.closeContainer();
 
-    return InteractionModel::encodeInvokeRequest(CommandPath(endpointId, Clusters::ColorControl::Id, Clusters::ColorControl::Commands::MoveToColorTemperature), fields);
+    return InteractionModel::invokeRequest(CommandPath(endpointId, Clusters::ColorControl::Id, Clusters::ColorControl::Commands::MoveToColorTemperature), fields);
 }
 
-QByteArray Lock::request(quint16 endpointId, const QVariant &data)
+QByteArray Actions::Lock::request(quint16 endpointId, const QVariant &data)
 {
-    quint32 cmdId = data.toString() == "lock" ? Clusters::DoorLock::Commands::LockDoor : Clusters::DoorLock::Commands::UnlockDoor;
-
     MatterTLV::Encoder fields;
+
     fields.openStructure();
     fields.closeContainer();
 
-    return InteractionModel::encodeInvokeRequest(CommandPath(endpointId, Clusters::DoorLock::Id, cmdId), fields);
+    return InteractionModel::invokeRequest(CommandPath(endpointId, Clusters::DoorLock::Id, data.toString() == "lock" ? Clusters::DoorLock::Commands::LockDoor : Clusters::DoorLock::Commands::UnlockDoor), fields);
 }
 
-QByteArray CoverStatus::request(quint16 endpointId, const QVariant &data)
+QByteArray Actions::CoverStatus::request(quint16 endpointId, const QVariant &data)
 {
-    quint32 cmdId;
+    MatterTLV::Encoder fields;
+    quint32 commandId;
 
     switch (data.toUInt())
     {
-        case 0: cmdId = Clusters::WindowCovering::Commands::UpOrOpen; break;
-        case 1: cmdId = Clusters::WindowCovering::Commands::DownOrClose; break;
-        case 2: cmdId = Clusters::WindowCovering::Commands::StopMotion; break;
+        case 0:  commandId = Clusters::WindowCovering::Commands::UpOrOpen; break;
+        case 1:  commandId = Clusters::WindowCovering::Commands::DownOrClose; break;
+        case 2:  commandId = Clusters::WindowCovering::Commands::StopMotion; break;
         default: return QByteArray();
     }
 
-    MatterTLV::Encoder fields;
     fields.openStructure();
     fields.closeContainer();
 
-    return InteractionModel::encodeInvokeRequest(CommandPath(endpointId, Clusters::WindowCovering::Id, cmdId), fields);
+    return InteractionModel::invokeRequest(CommandPath(endpointId, Clusters::WindowCovering::Id, commandId), fields);
 }
 
-QByteArray CoverPosition::request(quint16 endpointId, const QVariant &data)
+QByteArray Actions::CoverPosition::request(quint16 endpointId, const QVariant &data)
 {
     MatterTLV::Encoder fields;
+
     fields.openStructure();
-    fields.encodeUnsignedInt(0, static_cast <quint16> (data.toUInt())); // liftPercent100ths
+    fields.encodeUnsignedInt(0, static_cast <quint16> (data.toUInt()));
     fields.closeContainer();
 
-    return InteractionModel::encodeInvokeRequest(CommandPath(endpointId, Clusters::WindowCovering::Id, Clusters::WindowCovering::Commands::GoToLiftPercentage), fields);
+    return InteractionModel::invokeRequest(CommandPath(endpointId, Clusters::WindowCovering::Id, Clusters::WindowCovering::Commands::GoToLiftPercentage), fields);
 }
 
-QByteArray PowerOnStatus::request(quint16 endpointId, const QVariant &data)
+QByteArray Actions::PowerOnStatus::request(quint16 endpointId, const QVariant &data)
 {
-    QString label = data.toString();
+    QList <QString> list = {"off", "on", "toggle", "previous"};
+    int index = list.indexOf(data.toString());
     MatterTLV::Encoder value;
 
-    // accept both spec values (0/1/2/null) and the expose.json labels HA sends as select payload
-    if (label == "off")
-        value.encodeUnsignedInt(0, 0);
-    else if (label == "on")
-        value.encodeUnsignedInt(0, 1);
-    else if (label == "toggle")
-        value.encodeUnsignedInt(0, 2);
-    else if (label == "previous")
-        value.encodeNull(0);
-    else
-        return QByteArray();
+    switch (index)
+    {
+        case 0 ... 2: value.encodeUnsignedInt(0, static_cast <quint64> (index)); break;
+        case 3:       value.encodeNull(0); break; // null means previous state
+        default:      return QByteArray();
+    }
 
-    return InteractionModel::encodeWriteRequest(endpointId, Clusters::OnOff::Id, Clusters::OnOff::Attributes::StartUpOnOff, value);
-}
-
+    return InteractionModel::writeRequest(AttributePath(endpointId, Clusters::OnOff::Id, Clusters::OnOff::Attributes::StartUpOnOff), value);
 }

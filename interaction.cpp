@@ -1,9 +1,327 @@
 // NOT REWIEWED
 
-#include "clusters.h"
 #include "interaction.h"
 
-// --- Path encoding ---
+QByteArray InteractionModel::readRequest(const QList <AttributePath> &attributes)
+{
+    MatterTLV::Encoder encoder;
+
+    encoder.openStructure();
+    encoder.openArray(0);
+
+    for (int i = 0; i < attributes.count(); i++)
+        encodeAttributePath(encoder, attributes.at(i));
+
+    encoder.closeContainer();
+    encoder.encodeBool(3, false); // fabric filtered
+    encoder.encodeUnsignedInt(INTERACTION_MODEL_REVISION_TAG, INTERACTION_MODEL_REVISION);
+    encoder.closeContainer();
+
+    return encoder.data();
+}
+
+QByteArray InteractionModel::writeRequest(const AttributePath &path, MatterTLV::Encoder &value)
+{
+    MatterTLV::Encoder encoder;
+
+    encoder.openStructure();
+    encoder.encodeBool(0, false); // suppress response
+    encoder.encodeBool(1, false); // timed request
+    encoder.openArray(2);
+    encoder.openStructure();
+
+    encoder.openList(1);
+    encoder.encodeUnsignedInt(2, path.endpointId);
+    encoder.encodeUnsignedInt(3, path.clusterId);
+    encoder.encodeUnsignedInt(4, path.attributeId);
+    encoder.closeContainer();
+
+    // value is encoded by caller with tag 0, re-encode it with data tag
+    encodeElement(encoder, 2, MatterTLV::Decoder(value.data()).decode());
+
+    encoder.closeContainer();
+    encoder.closeContainer();
+    encoder.encodeUnsignedInt(INTERACTION_MODEL_REVISION_TAG, INTERACTION_MODEL_REVISION);
+    encoder.closeContainer();
+
+    return encoder.data();
+}
+
+QByteArray InteractionModel::invokeRequest(const CommandPath &path, MatterTLV::Encoder &fields, bool timed)
+{
+    MatterTLV::Encoder encoder;
+    QByteArray data = fields.data();
+
+    encoder.openStructure();
+    encoder.encodeBool(0, false); // suppress response
+    encoder.encodeBool(1, timed);
+    encoder.openArray(2);
+    encoder.openStructure();
+
+    encodeCommandPath(encoder, path);
+
+    if (!data.isEmpty())
+    {
+        QList <MatterTLV::Element> list = MatterTLV::Decoder(data).decodeAll();
+
+        encoder.openStructure(1);
+
+        // fields are encoded by caller as anonymous structure, re-encode its children only
+        if (!list.isEmpty() && list.first().type == MatterTLV::Type::Structure)
+        {
+            const MatterTLV::Element &structure = list.first();
+
+            for (int i = 0; i < structure.children.count(); i++)
+                encodeElement(encoder, structure.children.at(i).tag, structure.children.at(i));
+        }
+
+        encoder.closeContainer();
+    }
+
+    encoder.closeContainer();
+    encoder.closeContainer();
+    encoder.encodeUnsignedInt(INTERACTION_MODEL_REVISION_TAG, INTERACTION_MODEL_REVISION);
+    encoder.closeContainer();
+
+    return encoder.data();
+}
+
+QByteArray InteractionModel::subscribeRequest(const QList <AttributePath> &attributes, const QList <EventPath> &events, quint16 minInterval, quint16 maxInterval)
+{
+    MatterTLV::Encoder encoder;
+
+    encoder.openStructure();
+    encoder.encodeBool(0, false); // keep subscriptions
+    encoder.encodeUnsignedInt(1, minInterval);
+    encoder.encodeUnsignedInt(2, maxInterval);
+    encoder.openArray(3);
+
+    for (int i = 0; i < attributes.count(); i++)
+        encodeAttributePath(encoder, attributes.at(i));
+
+    encoder.closeContainer();
+
+    if (!events.isEmpty())
+    {
+        encoder.openArray(4);
+
+        for (int i = 0; i < events.count(); i++)
+            encodeEventPath(encoder, events.at(i));
+
+        encoder.closeContainer();
+    }
+
+    encoder.encodeBool(7, false); // fabric filtered
+    encoder.encodeUnsignedInt(INTERACTION_MODEL_REVISION_TAG, INTERACTION_MODEL_REVISION);
+    encoder.closeContainer();
+
+    return encoder.data();
+}
+
+QByteArray InteractionModel::timedRequest(quint16 timeout)
+{
+    MatterTLV::Encoder encoder;
+
+    encoder.openStructure();
+    encoder.encodeUnsignedInt(0, timeout);
+    encoder.encodeUnsignedInt(INTERACTION_MODEL_REVISION_TAG, INTERACTION_MODEL_REVISION);
+    encoder.closeContainer();
+
+    return encoder.data();
+}
+
+QByteArray InteractionModel::statusResponse(quint8 status)
+{
+    MatterTLV::Encoder encoder;
+
+    encoder.openStructure();
+    encoder.encodeUnsignedInt(0, status);
+    encoder.closeContainer();
+
+    return encoder.data();
+}
+
+QList <AttributeReport> InteractionModel::attributeReports(const QByteArray &payload)
+{
+    MatterTLV::Element root = MatterTLV::Decoder(payload).decode();
+    QList <AttributeReport> list;
+
+    for (int i = 0; i < root.children.count(); i++)
+    {
+        const MatterTLV::Element &reports = root.children.at(i);
+
+        if (reports.tag != 1)
+            continue;
+
+        for (int j = 0; j < reports.children.count(); j++)
+        {
+            const MatterTLV::Element &item = reports.children.at(j);
+            AttributeReport report;
+
+            for (int k = 0; k < item.children.count(); k++)
+            {
+                const MatterTLV::Element &field = item.children.at(k);
+
+                switch (field.tag)
+                {
+                    case 0: // attribute status
+                    {
+                        report.error = true;
+
+                        for (int l = 0; l < field.children.count(); l++)
+                        {
+                            const MatterTLV::Element &element = field.children.at(l);
+
+                            switch (element.tag)
+                            {
+                                case 0: report.path = decodeAttributePath(element); break;
+                                case 1: report.status = decodeStatus(element); break;
+                            }
+                        }
+
+                        break;
+                    }
+
+                    case 1: // attribute data
+                    {
+                        for (int l = 0; l < field.children.count(); l++)
+                        {
+                            const MatterTLV::Element &element = field.children.at(l);
+
+                            switch (element.tag)
+                            {
+                                case 1: report.path = decodeAttributePath(element); break;
+                                case 2: report.data = element; report.value = element.value; break;
+                            }
+                        }
+
+                        break;
+                    }
+                }
+            }
+
+            list.append(report);
+        }
+    }
+
+    return list;
+}
+
+QList <EventReport> InteractionModel::eventReports(const QByteArray &payload)
+{
+    MatterTLV::Element root = MatterTLV::Decoder(payload).decode();
+    QList <EventReport> list;
+
+    for (int i = 0; i < root.children.count(); i++)
+    {
+        const MatterTLV::Element &reports = root.children.at(i);
+
+        if (reports.tag != 2)
+            continue;
+
+        for (int j = 0; j < reports.children.count(); j++)
+        {
+            const MatterTLV::Element &item = reports.children.at(j);
+            EventReport report;
+
+            for (int k = 0; k < item.children.count(); k++)
+            {
+                const MatterTLV::Element &field = item.children.at(k);
+
+                // event status reports are ignored, event data timestamps are ignored too
+                if (field.tag != 1)
+                    continue;
+
+                for (int l = 0; l < field.children.count(); l++)
+                {
+                    const MatterTLV::Element &element = field.children.at(l);
+
+                    switch (element.tag)
+                    {
+                        case 0: report.path = decodeEventPath(element); break;
+                        case 1: report.eventNumber = element.value.toULongLong(); break;
+                        case 2: report.priority = static_cast <quint8> (element.value.toUInt()); break;
+                        case 7: report.data = element; break;
+                    }
+                }
+            }
+
+            if (!report.path.clusterId)
+                continue;
+
+            list.append(report);
+        }
+    }
+
+    return list;
+}
+
+QList <CommandResponse> InteractionModel::commandResponses(const QByteArray &payload)
+{
+    MatterTLV::Element root = MatterTLV::Decoder(payload).decode();
+    QList <CommandResponse> list;
+
+    for (int i = 0; i < root.children.count(); i++)
+    {
+        const MatterTLV::Element &responses = root.children.at(i);
+
+        if (responses.tag != 1)
+            continue;
+
+        for (int j = 0; j < responses.children.count(); j++)
+        {
+            const MatterTLV::Element &item = responses.children.at(j);
+            CommandResponse response;
+
+            for (int k = 0; k < item.children.count(); k++)
+            {
+                const MatterTLV::Element &field = item.children.at(k);
+
+                if (field.tag > 1)
+                    continue;
+
+                // command data contains path and fields, command status contains path and status
+                for (int l = 0; l < field.children.count(); l++)
+                {
+                    const MatterTLV::Element &element = field.children.at(l);
+
+                    switch (element.tag)
+                    {
+                        case 0: response.path = decodeCommandPath(element); break;
+
+                        case 1:
+
+                            if (field.tag)
+                                response.status = decodeStatus(element);
+                            else
+                                response.data = element;
+
+                            break;
+                    }
+                }
+            }
+
+            list.append(response);
+        }
+    }
+
+    return list;
+}
+
+quint8 InteractionModel::status(const QByteArray &payload)
+{
+    MatterTLV::Element root = MatterTLV::Decoder(payload).decode();
+
+    for (int i = 0; i < root.children.count(); i++)
+    {
+        if (root.children.at(i).tag)
+            continue;
+
+        return static_cast <quint8> (root.children.at(i).value.toUInt());
+    }
+
+    return 0xFF;
+}
 
 void InteractionModel::encodeAttributePath(MatterTLV::Encoder &encoder, const AttributePath &path)
 {
@@ -11,6 +329,19 @@ void InteractionModel::encodeAttributePath(MatterTLV::Encoder &encoder, const At
     encoder.encodeUnsignedInt(2, path.endpointId);
     encoder.encodeUnsignedInt(3, path.clusterId);
     encoder.encodeUnsignedInt(4, path.attributeId);
+    encoder.closeContainer();
+}
+
+void InteractionModel::encodeEventPath(MatterTLV::Encoder &encoder, const EventPath &path)
+{
+    encoder.openList();
+    encoder.encodeUnsignedInt(1, path.endpointId);
+    encoder.encodeUnsignedInt(2, path.clusterId);
+    encoder.encodeUnsignedInt(3, path.eventId);
+
+    if (path.urgent)
+        encoder.encodeBool(4, true);
+
     encoder.closeContainer();
 }
 
@@ -23,33 +354,33 @@ void InteractionModel::encodeCommandPath(MatterTLV::Encoder &encoder, const Comm
     encoder.closeContainer();
 }
 
-// EventPathIB (Matter §10.6.2.2): tag 0=node (opt), tag 1=endpoint, tag 2=cluster, tag 3=event, tag 4=isUrgent (opt)
-void InteractionModel::encodeEventPath(MatterTLV::Encoder &encoder, const EventPath &path)
+void InteractionModel::encodeElement(MatterTLV::Encoder &encoder, int tag, const MatterTLV::Element &element)
 {
-    encoder.openList();
-    encoder.encodeUnsignedInt(1, path.endpointId);
-    encoder.encodeUnsignedInt(2, path.clusterId);
-    encoder.encodeUnsignedInt(3, path.eventId);
-
-    if (path.isUrgent)
-        encoder.encodeBool(4, true);
-
-    encoder.closeContainer();
+    switch (element.type)
+    {
+        case MatterTLV::Type::SignedInt:   encoder.encodeSignedInt(tag, element.value.toLongLong()); break;
+        case MatterTLV::Type::UnsignedInt: encoder.encodeUnsignedInt(tag, element.value.toULongLong()); break;
+        case MatterTLV::Type::Boolean:     encoder.encodeBool(tag, element.value.toBool()); break;
+        case MatterTLV::Type::UTF8String:  encoder.encodeUTF8String(tag, element.value.toString()); break;
+        case MatterTLV::Type::ByteString:  encoder.encodeByteString(tag, element.value.toByteArray()); break;
+        case MatterTLV::Type::Null:        encoder.encodeNull(tag); break;
+        default:                           break;
+    }
 }
-
-// --- Path decoding ---
 
 AttributePath InteractionModel::decodeAttributePath(const MatterTLV::Element &element)
 {
     AttributePath path;
 
-    for (const MatterTLV::Element &el : element.children)
+    for (int i = 0; i < element.children.count(); i++)
     {
-        switch (el.tag)
+        const MatterTLV::Element &item = element.children.at(i);
+
+        switch (item.tag)
         {
-            case 2: path.endpointId = el.value.toUInt(); break;
-            case 3: path.clusterId = el.value.toUInt(); break;
-            case 4: path.attributeId = el.value.toUInt(); break;
+            case 2: path.endpointId = static_cast <quint16> (item.value.toUInt()); break;
+            case 3: path.clusterId = item.value.toUInt(); break;
+            case 4: path.attributeId = item.value.toUInt(); break;
         }
     }
 
@@ -60,14 +391,16 @@ EventPath InteractionModel::decodeEventPath(const MatterTLV::Element &element)
 {
     EventPath path;
 
-    for (const MatterTLV::Element &el : element.children)
+    for (int i = 0; i < element.children.count(); i++)
     {
-        switch (el.tag)
+        const MatterTLV::Element &item = element.children.at(i);
+
+        switch (item.tag)
         {
-            case 1: path.endpointId = el.value.toUInt(); break;
-            case 2: path.clusterId = el.value.toUInt(); break;
-            case 3: path.eventId = el.value.toUInt(); break;
-            case 4: path.isUrgent = el.value.toBool(); break;
+            case 1: path.endpointId = static_cast <quint16> (item.value.toUInt()); break;
+            case 2: path.clusterId = item.value.toUInt(); break;
+            case 3: path.eventId = item.value.toUInt(); break;
+            case 4: path.urgent = item.value.toBool(); break;
         }
     }
 
@@ -78,412 +411,32 @@ CommandPath InteractionModel::decodeCommandPath(const MatterTLV::Element &elemen
 {
     CommandPath path;
 
-    for (const MatterTLV::Element &el : element.children)
+    for (int i = 0; i < element.children.count(); i++)
     {
-        switch (el.tag)
+        const MatterTLV::Element &item = element.children.at(i);
+
+        switch (item.tag)
         {
-            case 0: path.endpointId = el.value.toUInt(); break;
-            case 1: path.clusterId = el.value.toUInt(); break;
-            case 2: path.commandId = el.value.toUInt(); break;
+            case 0: path.endpointId = static_cast <quint16> (item.value.toUInt()); break;
+            case 1: path.clusterId = item.value.toUInt(); break;
+            case 2: path.commandId = item.value.toUInt(); break;
         }
     }
 
     return path;
 }
 
-// --- Read Request ---
-
-QByteArray InteractionModel::encodeReadRequest(const QList <AttributePath> &paths)
+quint8 InteractionModel::decodeStatus(const MatterTLV::Element &element)
 {
-    MatterTLV::Encoder encoder;
-    encoder.openStructure();
+    quint8 status = 0;
 
-    // tag 0: AttributeRequests (array of AttributePathIB)
-    encoder.openArray(0);
-
-    for (const AttributePath &path : paths)
-        encodeAttributePath(encoder, path);
-
-    encoder.closeContainer();
-
-    // tag 3: FabricFiltered (required)
-    encoder.encodeBool(3, false);
-
-    // tag 0xFF: InteractionModelRevision (must be last)
-    encoder.encodeUnsignedInt(0xFF, 11);
-
-    encoder.closeContainer();
-    return encoder.data();
-}
-
-// --- Write Request ---
-
-QByteArray InteractionModel::encodeWriteRequest(quint16 endpointId, quint32 clusterId, quint32 attributeId, const MatterTLV::Encoder &valueEncoder)
-{
-    MatterTLV::Encoder encoder;
-    encoder.openStructure();
-
-    encoder.encodeBool(0, false); // suppressResponse
-    encoder.encodeBool(1, false); // timedRequest
-
-    // tag 2: WriteRequests (array of AttributeDataIB)
-    encoder.openArray(2);
-
-    // AttributeDataIB
-    encoder.openStructure();
-
-    // tag 0: DataVersion (optional, skip)
-
-    // tag 1: AttributePathIB
-    encoder.openList(1);
-    encoder.encodeUnsignedInt(2, endpointId);
-    encoder.encodeUnsignedInt(3, clusterId);
-    encoder.encodeUnsignedInt(4, attributeId);
-    encoder.closeContainer();
-
-    // tag 2: Data — caller passes the value encoded with tag 0; decode + re-emit under tag 2 so the
-    // AttributeDataIB carries the data with the spec-required context tag (same trick encodeInvokeRequest
-    // uses for command fields)
-    MatterTLV::Decoder decoder(valueEncoder.data());
-    MatterTLV::Element value = decoder.decode();
-
-    switch (value.type)
+    for (int i = 0; i < element.children.count(); i++)
     {
-        case MatterTLV::Type::UnsignedInt: encoder.encodeUnsignedInt(2, value.value.toULongLong()); break;
-        case MatterTLV::Type::SignedInt:   encoder.encodeSignedInt(2, value.value.toLongLong());    break;
-        case MatterTLV::Type::Boolean:     encoder.encodeBool(2, value.value.toBool());             break;
-        case MatterTLV::Type::UTF8String:  encoder.encodeUTF8String(2, value.value.toString());     break;
-        case MatterTLV::Type::ByteString:  encoder.encodeByteString(2, value.value.toByteArray());  break;
-        case MatterTLV::Type::Null:        encoder.encodeNull(2);                                   break;
-        default: break;
-    }
-
-    encoder.closeContainer(); // AttributeDataIB
-    encoder.closeContainer(); // WriteRequests array
-
-    // tag 0xFF: InteractionModelRevision
-    encoder.encodeUnsignedInt(0xFF, 11);
-
-    encoder.closeContainer();
-    return encoder.data();
-}
-
-// --- Invoke Request ---
-
-QByteArray InteractionModel::encodeInvokeRequest(const CommandPath &path, const MatterTLV::Encoder &fieldsEncoder, bool timedRequest)
-{
-    MatterTLV::Encoder encoder;
-    encoder.openStructure();
-
-    encoder.encodeBool(0, false);        // suppressResponse
-    encoder.encodeBool(1, timedRequest); // timedRequest
-
-    // tag 2: InvokeRequests (array of CommandDataIB)
-    encoder.openArray(2);
-
-    // CommandDataIB
-    encoder.openStructure();
-
-    // tag 0: CommandPathIB
-    encodeCommandPath(encoder, path);
-
-    // tag 1: CommandFields (structure with command-specific fields)
-    QByteArray fields = fieldsEncoder.data();
-
-    if (!fields.isEmpty())
-    {
-        // Embed the fields as raw bytes after tag 1 marker
-        encoder.openStructure(1);
-
-        // Parse and re-emit the fields from the encoder
-        MatterTLV::Decoder decoder(fields);
-        QList <MatterTLV::Element> elements = decoder.decodeAll();
-
-        // The fields encoder typically contains a structure — unwrap its children
-        if (!elements.isEmpty() && elements.first().type == MatterTLV::Type::Structure)
-        {
-            for (const MatterTLV::Element &el : elements.first().children)
-            {
-                switch (el.type)
-                {
-                    case MatterTLV::Type::UnsignedInt:
-                        encoder.encodeUnsignedInt(el.tag, el.value.toULongLong());
-                        break;
-
-                    case MatterTLV::Type::SignedInt:
-                        encoder.encodeSignedInt(el.tag, el.value.toLongLong());
-                        break;
-
-                    case MatterTLV::Type::Boolean:
-                        encoder.encodeBool(el.tag, el.value.toBool());
-                        break;
-
-                    case MatterTLV::Type::UTF8String:
-                        encoder.encodeUTF8String(el.tag, el.value.toString());
-                        break;
-
-                    case MatterTLV::Type::ByteString:
-                        encoder.encodeByteString(el.tag, el.value.toByteArray());
-                        break;
-
-                    case MatterTLV::Type::Null:
-                        encoder.encodeNull(el.tag);
-                        break;
-
-                    default:
-                        break;
-                }
-            }
-        }
-
-        encoder.closeContainer(); // CommandFields
-    }
-
-    encoder.closeContainer(); // CommandDataIB
-    encoder.closeContainer(); // InvokeRequests array
-
-    // tag 0xFF: InteractionModelRevision
-    encoder.encodeUnsignedInt(0xFF, 11);
-
-    encoder.closeContainer();
-    return encoder.data();
-}
-
-// --- Subscribe Request ---
-
-QByteArray InteractionModel::encodeSubscribeRequest(const QList <AttributePath> &attributePaths, const QList <EventPath> &eventPaths, quint16 minInterval, quint16 maxInterval)
-{
-    MatterTLV::Encoder encoder;
-    encoder.openStructure();
-
-    encoder.encodeBool(0, false); // keepSubscriptions — cancel old subscriptions from this fabric
-    encoder.encodeUnsignedInt(1, minInterval);
-    encoder.encodeUnsignedInt(2, maxInterval);
-
-    // tag 3: AttributeRequests
-    encoder.openArray(3);
-
-    for (const AttributePath &path : attributePaths)
-        encodeAttributePath(encoder, path);
-
-    encoder.closeContainer();
-
-    // tag 4: EventRequests (Matter §8.5.4)
-    if (!eventPaths.isEmpty())
-    {
-        encoder.openArray(4);
-
-        for (const EventPath &path : eventPaths)
-            encodeEventPath(encoder, path);
-
-        encoder.closeContainer();
-    }
-
-    // tag 7: FabricFiltered (required)
-    encoder.encodeBool(7, false);
-
-    // tag 0xFF: InteractionModelRevision
-    encoder.encodeUnsignedInt(0xFF, 11);
-
-    encoder.closeContainer();
-    return encoder.data();
-}
-
-// --- Timed Request ---
-
-QByteArray InteractionModel::encodeTimedRequest(quint16 timeoutMs)
-{
-    MatterTLV::Encoder encoder;
-    encoder.openStructure();
-    encoder.encodeUnsignedInt(0, timeoutMs);    // timeoutMs
-    encoder.encodeUnsignedInt(0xFF, 11);        // InteractionModelRevision
-    encoder.closeContainer();
-    return encoder.data();
-}
-
-// --- Status Response ---
-
-QByteArray InteractionModel::encodeStatusResponse(quint8 status)
-{
-    MatterTLV::Encoder encoder;
-    encoder.openStructure();
-    encoder.encodeUnsignedInt(0, status);
-    encoder.closeContainer();
-    return encoder.data();
-}
-
-// --- Decode Report Data ---
-
-QList <AttributeReport> InteractionModel::decodeReportData(const QByteArray &payload)
-{
-    QList <AttributeReport> reports;
-    MatterTLV::Decoder decoder(payload);
-    MatterTLV::Element root = decoder.decode();
-
-    // Find attributeReports array (tag 1)
-    for (const MatterTLV::Element &el : root.children)
-    {
-        if (el.tag != 1)
+        if (element.children.at(i).tag)
             continue;
 
-        // Each child is an AttributeReportIB
-        for (const MatterTLV::Element &reportIB : el.children)
-        {
-            AttributeReport report;
-
-            for (const MatterTLV::Element &field : reportIB.children)
-            {
-                if (field.tag == 0) // AttributeStatusIB (error)
-                {
-                    report.hasError = true;
-
-                    for (const MatterTLV::Element &statusField : field.children)
-                    {
-                        if (statusField.tag == 0) // AttributePathIB
-                            report.path = decodeAttributePath(statusField);
-                        else if (statusField.tag == 1) // StatusIB
-                        {
-                            for (const MatterTLV::Element &s : statusField.children)
-                            {
-                                if (s.tag == 0)
-                                    report.status = s.value.toUInt();
-                            }
-                        }
-                    }
-                }
-                else if (field.tag == 1) // AttributeDataIB (success)
-                {
-                    for (const MatterTLV::Element &dataField : field.children)
-                    {
-                        if (dataField.tag == 1) // AttributePathIB
-                            report.path = decodeAttributePath(dataField);
-                        else if (dataField.tag == 2) // Data
-                        {
-                            report.rawValue = dataField;
-                            report.value = dataField.value;
-                        }
-                    }
-                }
-            }
-
-            reports.append(report);
-        }
+        status = static_cast <quint8> (element.children.at(i).value.toUInt());
     }
 
-    return reports;
+    return status;
 }
-
-// EventReports live at tag 2 of ReportData. Each EventReportIB has tag 0 (EventStatusIB, error) or
-// tag 1 (EventDataIB, normal). EventDataIB: tag 0=path, tag 1=eventNumber, tag 2=priority,
-// tag 3..6 = timestamps (we ignore — peer-side time, not useful), tag 7=Data (cluster-specific TLV).
-QList <EventReport> InteractionModel::decodeEventReports(const QByteArray &payload)
-{
-    QList <EventReport> reports;
-    MatterTLV::Decoder decoder(payload);
-    MatterTLV::Element root = decoder.decode();
-
-    for (const MatterTLV::Element &el : root.children)
-    {
-        if (el.tag != 2)
-            continue;
-
-        for (const MatterTLV::Element &reportIB : el.children)
-        {
-            EventReport report;
-
-            for (const MatterTLV::Element &field : reportIB.children)
-            {
-                if (field.tag != 1) // skip EventStatusIB (errors); we only handle data
-                    continue;
-
-                for (const MatterTLV::Element &dataField : field.children)
-                {
-                    switch (dataField.tag)
-                    {
-                        case 0: report.path = decodeEventPath(dataField); break;
-                        case 1: report.eventNumber = dataField.value.toULongLong(); break;
-                        case 2: report.priority = static_cast <quint8> (dataField.value.toUInt()); break;
-                        case 7: report.data = dataField; break;
-                    }
-                }
-            }
-
-            if (report.path.clusterId)
-                reports.append(report);
-        }
-    }
-
-    return reports;
-}
-
-// --- Decode Invoke Response ---
-
-QList <CommandResponse> InteractionModel::decodeInvokeResponse(const QByteArray &payload)
-{
-    QList <CommandResponse> responses;
-    MatterTLV::Decoder decoder(payload);
-    MatterTLV::Element root = decoder.decode();
-
-    // Find invokeResponses array (tag 1)
-    for (const MatterTLV::Element &el : root.children)
-    {
-        if (el.tag != 1)
-            continue;
-
-        for (const MatterTLV::Element &responseIB : el.children)
-        {
-            CommandResponse response;
-
-            for (const MatterTLV::Element &field : responseIB.children)
-            {
-                if (field.tag == 0) // CommandDataIB (command response with data)
-                {
-                    for (const MatterTLV::Element &dataField : field.children)
-                    {
-                        if (dataField.tag == 0) // CommandPathIB
-                            response.path = decodeCommandPath(dataField);
-                        else if (dataField.tag == 1) // CommandFields
-                            response.data = dataField;
-                    }
-                }
-                else if (field.tag == 1) // CommandStatusIB (status only)
-                {
-                    for (const MatterTLV::Element &statusField : field.children)
-                    {
-                        if (statusField.tag == 0) // CommandPathIB
-                            response.path = decodeCommandPath(statusField);
-                        else if (statusField.tag == 1) // StatusIB
-                        {
-                            for (const MatterTLV::Element &s : statusField.children)
-                            {
-                                if (s.tag == 0)
-                                    response.status = s.value.toUInt();
-                            }
-                        }
-                    }
-                }
-            }
-
-            responses.append(response);
-        }
-    }
-
-    return responses;
-}
-
-// --- Decode Status Response ---
-
-quint8 InteractionModel::decodeStatusResponse(const QByteArray &payload)
-{
-    MatterTLV::Decoder decoder(payload);
-    MatterTLV::Element root = decoder.decode();
-
-    for (const MatterTLV::Element &el : root.children)
-    {
-        if (el.tag == 0)
-            return el.value.toUInt();
-    }
-
-    return 0xFF;
-}
-

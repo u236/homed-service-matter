@@ -3,13 +3,14 @@
 #ifndef DEVICE_H
 #define DEVICE_H
 
-#define DEFAULT_ENDPOINT        1
-#define STORE_DATABASE_DELAY    20
+#define MATTER_PORT                 5540
+#define STORE_DATABASE_DELAY        20
 
-#include <QMetaEnum>
 #include <QHostAddress>
 #include "action.h"
+#include "case.h"
 #include "endpoint.h"
+#include "expose.h"
 #include "property.h"
 
 class EndpointObject : public AbstractEndpointObject
@@ -17,7 +18,8 @@ class EndpointObject : public AbstractEndpointObject
 
 public:
 
-    EndpointObject(quint8 id, const Device &device) : AbstractEndpointObject(id, device) {}
+    EndpointObject(quint8 id, const Device &device) :
+        AbstractEndpointObject(id, device) {}
 
     inline QList <quint32> &clusters(void) { return m_clusters; }
     inline QList <Property> &properties(void) { return m_properties; }
@@ -38,20 +40,11 @@ class DeviceObject : public AbstractDeviceObject
 public:
 
     DeviceObject(quint64 nodeId, const QString &name) :
-        AbstractDeviceObject(name), m_nodeId(nodeId), m_fabricIndex(0), m_vendorId(0), m_productId(0), m_networkPort(5540), m_subMaxInterval(0), m_nextReconnectAt(0), m_thread(false), m_batteryPowered(false), m_subscriptionPrimed(true), m_lastSeen(0),
-        m_sessionLocalId(0), m_sessionPeerId(0), m_sessionLocalCounter(0), m_sessionIdleInterval(500), m_sessionActiveInterval(300), m_sessionActiveThreshold(4000) {}
-
-    inline QByteArray resumptionID(void) { return m_resumptionID; }
-    inline void setResumptionID(const QByteArray &value) { m_resumptionID = value; }
-
-    inline QByteArray resumptionSharedSecret(void) { return m_resumptionSharedSecret; }
-    inline void setResumptionSharedSecret(const QByteArray &value) { m_resumptionSharedSecret = value; }
+        AbstractDeviceObject(name), m_nodeId(nodeId), m_vendorId(0), m_productId(0), m_fabricIndex(0), m_networkPort(MATTER_PORT), m_thread(false), m_batteryPowered(false), m_subscriptionPrimed(true), m_subscriptionInterval(0), m_reconnectTime(0), m_lastSeen(0),
+        m_sessionLocalId(0), m_sessionPeerId(0), m_sessionCounter(0), m_sessionIdleInterval(SESSION_IDLE_INTERVAL), m_sessionActiveInterval(SESSION_ACTIVE_INTERVAL), m_sessionActiveThreshold(SESSION_ACTIVE_THRESHOLD) {}
 
     inline quint64 nodeId(void) { return m_nodeId; }
-    inline void setNodeId(quint64 value) { m_nodeId = value; }
-
-    inline quint8 fabricIndex(void) { return m_fabricIndex; }
-    inline void setFabricIndex(quint8 value) { m_fabricIndex = value; }
+    inline QString address(void) { return QString::number(m_nodeId, 16); }
 
     inline quint16 vendorId(void) { return m_vendorId; }
     inline void setVendorId(quint16 value) { m_vendorId = value; }
@@ -59,17 +52,14 @@ public:
     inline quint16 productId(void) { return m_productId; }
     inline void setProductId(quint16 value) { m_productId = value; }
 
+    inline quint8 fabricIndex(void) { return m_fabricIndex; }
+    inline void setFabricIndex(quint8 value) { m_fabricIndex = value; }
+
     inline QHostAddress networkAddress(void) { return m_networkAddress; }
     inline void setNetworkAddress(const QHostAddress &value) { m_networkAddress = value; }
 
     inline quint16 networkPort(void) { return m_networkPort; }
     inline void setNetworkPort(quint16 value) { m_networkPort = value; }
-
-    inline quint16 subMaxInterval(void) { return m_subMaxInterval; }
-    inline void setSubMaxInterval(quint16 value) { m_subMaxInterval = value; }
-
-    inline qint64 nextReconnectAt(void) { return m_nextReconnectAt; }
-    inline void setNextReconnectAt(qint64 value) { m_nextReconnectAt = value; }
 
     inline bool thread(void) { return m_thread; }
     inline void setThread(bool value) { m_thread = value; }
@@ -80,68 +70,67 @@ public:
     inline bool subscriptionPrimed(void) { return m_subscriptionPrimed; }
     inline void setSubscriptionPrimed(bool value) { m_subscriptionPrimed = value; }
 
+    inline quint16 subscriptionInterval(void) { return m_subscriptionInterval; }
+    inline void setSubscriptionInterval(quint16 value) { m_subscriptionInterval = value; }
+
+    inline qint64 reconnectTime(void) { return m_reconnectTime; }
+    inline void setReconnectTime(qint64 value) { m_reconnectTime = value; }
+
     inline qint64 lastSeen(void) { return m_lastSeen; }
     inline void setLastSeen(qint64 value) { m_lastSeen = value; }
     inline void updateLastSeen(void) { m_lastSeen = QDateTime::currentSecsSinceEpoch(); }
 
+    inline QByteArray resumptionId(void) { return m_resumptionId; }
+    inline QByteArray resumptionSecret(void) { return m_resumptionSecret; }
+    inline void setResumption(const QByteArray &id, const QByteArray &secret) { m_resumptionId = id; m_resumptionSecret = secret; }
+
     inline quint16 sessionLocalId(void) { return m_sessionLocalId; }
-    inline void setSessionLocalId(quint16 value) { m_sessionLocalId = value; }
-
     inline quint16 sessionPeerId(void) { return m_sessionPeerId; }
-    inline void setSessionPeerId(quint16 value) { m_sessionPeerId = value; }
 
-    inline QByteArray sessionI2RKey(void) { return m_sessionI2RKey; }
-    inline void setSessionI2RKey(const QByteArray &value) { m_sessionI2RKey = value; }
-
-    inline QByteArray sessionR2IKey(void) { return m_sessionR2IKey; }
-    inline void setSessionR2IKey(const QByteArray &value) { m_sessionR2IKey = value; }
-
+    inline QByteArray sessionEncryptKey(void) { return m_sessionEncryptKey; }
+    inline QByteArray sessionDecryptKey(void) { return m_sessionDecryptKey; }
     inline QByteArray sessionAttestation(void) { return m_sessionAttestation; }
-    inline void setSessionAttestation(const QByteArray &value) { m_sessionAttestation = value; }
 
-    inline quint32 sessionLocalCounter(void) { return m_sessionLocalCounter; }
-    inline void setSessionLocalCounter(quint32 value) { m_sessionLocalCounter = value; }
+    inline quint32 sessionCounter(void) { return m_sessionCounter; }
+    inline void setSessionCounter(quint32 value) { m_sessionCounter = value; }
 
     inline quint32 sessionIdleInterval(void) { return m_sessionIdleInterval; }
-    inline void setSessionIdleInterval(quint32 value) { m_sessionIdleInterval = value; }
-
     inline quint32 sessionActiveInterval(void) { return m_sessionActiveInterval; }
-    inline void setSessionActiveInterval(quint32 value) { m_sessionActiveInterval = value; }
-
     inline quint16 sessionActiveThreshold(void) { return m_sessionActiveThreshold; }
-    inline void setSessionActiveThreshold(quint16 value) { m_sessionActiveThreshold = value; }
 
-    inline bool hasPersistedSession(void) { return m_sessionLocalId && !m_sessionI2RKey.isEmpty() && !m_sessionR2IKey.isEmpty(); }
+    inline bool sessionStored(void) { return m_sessionLocalId && !m_sessionEncryptKey.isEmpty() && !m_sessionDecryptKey.isEmpty(); }
 
-    inline QString address(void) { return QString::number(m_nodeId, 16); }
+    void storeSession(SessionInfo *session);
+    void restoreSession(SessionInfo &session);
+    void parseSession(const QJsonObject &json);
+    QJsonObject serializeSession(void);
 
     void updateEndpoint(quint8 endpointId);
+
+private:
+
+    quint64 m_nodeId;
+    quint16 m_vendorId, m_productId;
+    quint8 m_fabricIndex;
+
+    QHostAddress m_networkAddress;
+    quint16 m_networkPort;
+    bool m_thread, m_batteryPowered, m_subscriptionPrimed;
+
+    quint16 m_subscriptionInterval;
+    qint64 m_reconnectTime, m_lastSeen;
+
+    QByteArray m_resumptionId, m_resumptionSecret;
+
+    quint16 m_sessionLocalId, m_sessionPeerId;
+    QByteArray m_sessionEncryptKey, m_sessionDecryptKey, m_sessionAttestation;
+    quint32 m_sessionCounter, m_sessionIdleInterval, m_sessionActiveInterval;
+    quint16 m_sessionActiveThreshold;
 
 signals:
 
     void deviceUpdated(DeviceObject *device);
     void endpointUpdated(DeviceObject *device, quint8 endpointId);
-
-private:
-
-    quint64 m_nodeId;
-    quint8 m_fabricIndex;
-    quint16 m_vendorId, m_productId;
-    QHostAddress m_networkAddress;
-    quint16 m_networkPort;
-    quint16 m_subMaxInterval;
-    qint64 m_nextReconnectAt;
-    bool m_thread;
-    bool m_batteryPowered;
-    bool m_subscriptionPrimed;
-    qint64 m_lastSeen;
-    QByteArray m_resumptionID;
-    QByteArray m_resumptionSharedSecret;
-    quint16 m_sessionLocalId, m_sessionPeerId;
-    QByteArray m_sessionI2RKey, m_sessionR2IKey, m_sessionAttestation;
-    quint32 m_sessionLocalCounter;
-    quint32 m_sessionIdleInterval, m_sessionActiveInterval;
-    quint16 m_sessionActiveThreshold;
 
 };
 
@@ -155,47 +144,41 @@ public:
     ~DeviceList(void);
 
     inline bool names(void) { return m_names; }
-    inline QMap <QString, QVariant> &exposeOptions(void) { return m_exposeOptions; }
-
-    void init(void);
-    void store(bool sync = false);
-
-    quint64 generateNodeId(void);
 
     inline QByteArray fabricKey(void) { return m_fabricKey; }
-    inline quint64 rootCAId(void) { return m_rootCAId; }
     inline QByteArray ipk(void) { return m_ipk; }
     inline QByteArray operationalKey(void) { return m_operationalKey; }
-    inline QByteArray controllerNOC(void) { return m_controllerNOC; }
-    inline QByteArray controllerRCAC(void) { return m_controllerRCAC; }
+    inline QByteArray controllerNoc(void) { return m_controllerNoc; }
+    inline QByteArray controllerRcac(void) { return m_controllerRcac; }
+    inline quint64 rootCaId(void) { return m_rootCaId; }
 
-    void setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC, const QByteArray &controllerRCAC);
+    void init(void);
+    void storeDatabase(bool sync = false);
+    void setFabricCredentials(const QByteArray &fabricKey, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNoc, const QByteArray &controllerRcac, quint64 rootCaId);
 
-    void addEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters);
-    void setupEndpoint(DeviceObject *device, quint8 endpointId);
-    void updateMultiple(DeviceObject *device);
+    quint64 generateNodeId(void);
 
     Device byName(const QString &name, int *index = nullptr);
     Device byNodeId(quint64 nodeId);
     Device parse(const QJsonObject &json);
 
+    void addEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters);
+    void setupEndpoint(DeviceObject *device, quint8 endpointId);
+    void updateMultiple(DeviceObject *device);
+
 private:
 
-    QTimer *m_timer;
-    QFile m_file;
+    QTimer *m_databaseTimer;
+    QFile m_databaseFile;
     bool m_names, m_sync;
 
-    QByteArray m_fabricKey;
-    quint64 m_rootCAId;
-    QByteArray m_ipk;
-    QByteArray m_operationalKey;
-    QByteArray m_controllerNOC;
-    QByteArray m_controllerRCAC;
+    QByteArray m_fabricKey, m_ipk, m_operationalKey, m_controllerNoc, m_controllerRcac;
+    quint64 m_rootCaId;
 
     QMap <QString, QVariant> m_exposeOptions;
 
-    void unserialize(const QJsonArray &devices);
-    QJsonArray serialize(void);
+    void unserializeDevices(const QJsonArray &devices);
+    QJsonArray serializeDevices(void);
 
 private slots:
 

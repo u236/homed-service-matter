@@ -1,381 +1,84 @@
 // NOT REWIEWED
 
 #include "controller.h"
-#include "device.h"
-#include "expose.h"
-#include "clusters.h"
 #include "logger.h"
+
+void DeviceObject::storeSession(SessionInfo *session)
+{
+    m_sessionLocalId = session->localSessionId;
+    m_sessionPeerId = session->peerSessionId;
+    m_sessionEncryptKey = session->i2rKey;
+    m_sessionDecryptKey = session->r2iKey;
+    m_sessionAttestation = session->attestationChallenge;
+    m_sessionCounter = 0;
+    m_sessionIdleInterval = session->idleInterval;
+    m_sessionActiveInterval = session->activeInterval;
+    m_sessionActiveThreshold = session->activeThreshold;
+}
+
+void DeviceObject::restoreSession(SessionInfo &session)
+{
+    session.localSessionId = m_sessionLocalId;
+    session.peerSessionId = m_sessionPeerId;
+    session.i2rKey = m_sessionEncryptKey;
+    session.r2iKey = m_sessionDecryptKey;
+    session.attestationChallenge = m_sessionAttestation;
+    session.peerAddress = m_networkAddress;
+    session.peerPort = m_networkPort;
+    session.peerNodeId = m_nodeId;
+    session.localMessageCounter = m_sessionCounter;
+    session.idleInterval = m_sessionIdleInterval;
+    session.activeInterval = m_sessionActiveInterval;
+    session.activeThreshold = m_sessionActiveThreshold;
+    session.active = true;
+}
+
+void DeviceObject::parseSession(const QJsonObject &json)
+{
+    m_sessionLocalId = static_cast <quint16> (json.value("localId").toInt());
+    m_sessionPeerId = static_cast <quint16> (json.value("peerId").toInt());
+    m_sessionEncryptKey = QByteArray::fromHex(json.value("i2rKey").toString().toLatin1());
+    m_sessionDecryptKey = QByteArray::fromHex(json.value("r2iKey").toString().toLatin1());
+    m_sessionAttestation = QByteArray::fromHex(json.value("attestation").toString().toLatin1());
+    m_sessionCounter = static_cast <quint32> (json.value("localCounter").toVariant().toULongLong());
+    m_sessionIdleInterval = static_cast <quint32> (json.value("idleInterval").toVariant().toULongLong());
+    m_sessionActiveInterval = static_cast <quint32> (json.value("activeInterval").toVariant().toULongLong());
+    m_sessionActiveThreshold = static_cast <quint16> (json.value("activeThreshold").toInt());
+}
+
+QJsonObject DeviceObject::serializeSession(void)
+{
+    QJsonObject json;
+
+    json.insert("localId", m_sessionLocalId);
+    json.insert("peerId", m_sessionPeerId);
+    json.insert("i2rKey", QString(m_sessionEncryptKey.toHex()));
+    json.insert("r2iKey", QString(m_sessionDecryptKey.toHex()));
+    json.insert("attestation", QString(m_sessionAttestation.toHex()));
+    json.insert("localCounter", static_cast <qint64> (m_sessionCounter));
+    json.insert("idleInterval", static_cast <qint64> (m_sessionIdleInterval));
+    json.insert("activeInterval", static_cast <qint64> (m_sessionActiveInterval));
+    json.insert("activeThreshold", m_sessionActiveThreshold);
+
+    return json;
+}
 
 void DeviceObject::updateEndpoint(quint8 endpointId)
 {
     if (m_endpoints.value(endpointId).isNull())
         return;
 
-    // signal-only — Controller iterates this device's endpoints/properties on receipt and builds the MQTT
-    // payload from each property->value() directly. no per-call name/value side state to keep
     emit endpointUpdated(this, endpointId);
 }
 
-quint64 DeviceList::generateNodeId(void)
-{
-    quint64 nodeId;
-
-    do
-    {
-        QByteArray bytes = Crypto::randomBytes(4);
-
-        // ensure all 4 bytes are non-zero
-        for (int i = 0; i < 4; i++)
-        {
-            if (bytes.at(i) == 0)
-                bytes[i] = static_cast <char> ((static_cast <quint8> (Crypto::randomBytes(1).at(0)) % 254) + 1);
-        }
-
-        nodeId = 0;
-
-        for (int i = 0; i < 4; i++)
-            nodeId |= static_cast <quint64> (static_cast <quint8> (bytes.at(i))) << (i * 8);
-
-    } while (byNodeId(nodeId).data());
-
-    return nodeId;
-}
-
-void DeviceList::addEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters)
-{
-    Device holder;
-
-    for (int i = 0; i < count(); i++)
-    {
-        if (at(i).data() == device)
-        {
-            holder = at(i);
-            break;
-        }
-    }
-
-    if (holder.isNull())
-        return;
-
-    Endpoint endpoint = device->endpoints().value(endpointId);
-
-    if (endpoint.isNull())
-    {
-        endpoint = Endpoint(new EndpointObject(endpointId, holder));
-        device->endpoints().insert(endpointId, endpoint);
-    }
-
-    reinterpret_cast <EndpointObject*> (endpoint.data())->clusters() = clusters;
-}
-
-void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId)
-{
-    Endpoint endpoint = device->endpoints().value(endpointId);
-
-    if (endpoint.isNull())
-        return;
-
-    EndpointObject *ep = reinterpret_cast <EndpointObject*> (endpoint.data());
-    const QList <quint32> &clusters = ep->clusters();
-    quint16 caps = static_cast <quint16> (ep->meta().value("colorCapabilities").toInt());
-
-    if (clusters.contains(Clusters::OnOff::Id))
-    {
-        ep->properties().append(Property(new Properties::Status));
-        ep->actions().append(Action(new Actions::Status));
-
-        if (endpoint->exposes().isEmpty())
-        {
-            if (clusters.contains(Clusters::LevelControl::Id) || clusters.contains(Clusters::ColorControl::Id))
-            {
-                QList <QVariant> options;
-
-                if (clusters.contains(Clusters::LevelControl::Id))
-                    options.append("level");
-
-                // bit 0 (HS) is the only color capability we treat as RGB; some CT-only lamps (e.g. IKEA
-                // TRADFRI WS) misreport bit 3 (XY) without actually supporting color, which used to falsely
-                // promote them to RGB exposes
-                if (caps & 0x0001)
-                    options.append("color");
-
-                if (caps & 0x0010)
-                {
-                    options.append("colorTemperature");
-
-                    if (ep->meta().contains("colorTempMin") && ep->meta().contains("colorTempMax"))
-                        device->options().insert(QString("colorTemperature_%1").arg(endpointId), QMap <QString, QVariant> {{"min", ep->meta().value("colorTempMin")}, {"max", ep->meta().value("colorTempMax")}});
-                }
-
-                if ((caps & 0x0011) == 0x0011)
-                    options.append("colorMode");
-
-                ep->exposes().append(Expose(new LightObject));
-                device->options().insert(QString("light_%1").arg(endpointId), options);
-            }
-            else
-            {
-                ep->exposes().append(Expose(new SwitchObject));
-            }
-        }
-
-        // StartUpOnOff is mandatory only with the LT (Lighting) feature; plain on/off relays may or may not
-        // implement it. expose the powerOnStatus property/action only when LT is advertised — writes to
-        // unsupported attributes would otherwise return errors at runtime
-        if (ep->meta().value("onOffFeatures").toUInt() & Clusters::OnOff::Features::LT)
-        {
-            ep->properties().append(Property(new Properties::PowerOnStatus));
-            ep->actions().append(Action(new Actions::PowerOnStatus));
-            ep->exposes().append(Expose(new SelectObject("powerOnStatus")));
-        }
-    }
-
-    if (clusters.contains(Clusters::LevelControl::Id))
-    {
-        ep->properties().append(Property(new Properties::Level));
-        ep->actions().append(Action(new Actions::Level));
-    }
-
-    if (clusters.contains(Clusters::ColorControl::Id))
-    {
-        if (caps & 0x0001)
-        {
-            ep->properties().append(Property(new Properties::ColorHS));
-            ep->actions().append(Action(new Actions::ColorHS));
-        }
-
-        if (caps & 0x0010)
-        {
-            ep->properties().append(Property(new Properties::ColorTemperature));
-            ep->actions().append(Action(new Actions::ColorTemperature));
-        }
-
-        if ((caps & 0x0011) == 0x0011)
-            ep->properties().append(Property(new Properties::ColorMode));
-    }
-
-    if (clusters.contains(Clusters::DoorLock::Id))
-    {
-        // UNTESTED: no real lock to validate state mapping or command round-trip
-        ep->properties().append(Property(new Properties::Lock));
-        ep->actions().append(Action(new Actions::Lock));
-    }
-
-    if (clusters.contains(Clusters::WindowCovering::Id))
-    {
-        // UNTESTED: no real cover to validate position read-back or command round-trip
-        ep->properties().append(Property(new Properties::CoverPosition));
-        ep->actions().append(Action(new Actions::CoverStatus));
-        ep->actions().append(Action(new Actions::CoverPosition));
-    }
-
-    if (clusters.contains(Clusters::PowerSource::Id))
-    {
-        ep->properties().append(Property(new Properties::Battery));
-        ep->exposes().append(Expose(new SensorObject("battery")));
-        device->setBatteryPowered(true);
-    }
-
-    if (clusters.contains(Clusters::Switch::Id))
-    {
-        ep->properties().append(Property(new Properties::SwitchAction));
-        ep->exposes().append(Expose(new SensorObject("action")));
-
-        // per-endpoint action enum from Switch FeatureMap + MultiPressMax (Matter §1.13); meta is filled
-        // by the discovery follow-up read or loaded from JSON on unserialize before setupEndpoint runs
-        quint32 features = ep->meta().value("switchFeatures").toUInt();
-        quint8 multiPressMax = static_cast <quint8> (ep->meta().value("switchMultiPressMax").toUInt());
-
-        // encoder heuristic: an endpoint that advertises MSM with a high MultiPressMax cap and lacks MSL is
-        // virtually never a real button — it's a rotary encoder where MultiPressComplete.count carries the
-        // detent burst size (e.g. IKEA BILRESA: cap=18, no LongPress). collapse single/double/triple/multi
-        // into a single "step" action and publish the raw count alongside as a numeric "step" property.
-        bool encoder = (features & Clusters::Switch::Features::MSM) && !(features & Clusters::Switch::Features::MSL) && multiPressMax > 5;
-
-        if (encoder)
-        {
-            ep->properties().append(Property(new Properties::SwitchCount));
-            ep->exposes().append(Expose(new SensorObject("count")));
-        }
-
-        if (features)
-        {
-            QList <QVariant> actions;
-
-            if (features & Clusters::Switch::Features::LS)
-                actions.append("latched");
-
-            if (encoder)
-            {
-                actions.append("start");
-                actions.append("stop");
-            }
-            else if (features & Clusters::Switch::Features::MSM)
-            {
-                quint8 cap = multiPressMax ? multiPressMax : 1;
-                if (cap >= 1) actions.append("singleClick");
-                if (cap >= 2) actions.append("doubleClick");
-                if (cap >= 3) actions.append("tripleClick");
-                if (cap >= 4) actions.append("multipleClick");
-            }
-            else if (features & Clusters::Switch::Features::MSR)
-            {
-                actions.append("singleClick");
-            }
-
-            if (features & Clusters::Switch::Features::MSL)
-            {
-                actions.append("hold");
-                actions.append("release");
-            }
-
-            if (!actions.isEmpty())
-            {
-                device->options().insert(QString("action_%1").arg(endpointId), m_exposeOptions.value("action"));
-                device->updateOption(QString("action_%1").arg(endpointId), "enum", actions);
-            }
-        }
-    }
-
-    if (clusters.contains(Clusters::BooleanState::Id))
-    {
-        // BooleanState is generic; the DeviceType from Descriptor tells us what kind of binary sensor this is
-        switch (ep->meta().value("deviceType").toUInt())
-        {
-            case Clusters::DeviceTypes::ContactSensor:
-                ep->properties().append(Property(new Properties::Contact));
-                ep->exposes().append(Expose(new BinaryObject("contact")));
-                break;
-
-            case Clusters::DeviceTypes::WaterLeakDetector:
-                ep->properties().append(Property(new Properties::WaterLeak));
-                ep->exposes().append(Expose(new BinaryObject("waterLeak")));
-                break;
-
-            default:
-                logWarning << device << "endpoint" << endpointId << "has BooleanState but unhandled deviceType:" << QString::asprintf("0x%04X", ep->meta().value("deviceType").toUInt());
-                break;
-        }
-    }
-
-    if (clusters.contains(Clusters::OccupancySensing::Id))
-    {
-        ep->properties().append(Property(new Properties::Occupancy));
-        ep->exposes().append(Expose(new BinaryObject("occupancy")));
-    }
-
-    if (clusters.contains(Clusters::TemperatureMeasurement::Id))
-    {
-        ep->properties().append(Property(new Properties::Temperature));
-        ep->exposes().append(Expose(new SensorObject("temperature")));
-    }
-
-    if (clusters.contains(Clusters::RelativeHumidityMeasurement::Id))
-    {
-        ep->properties().append(Property(new Properties::Humidity));
-        ep->exposes().append(Expose(new SensorObject("humidity")));
-    }
-
-    if (clusters.contains(Clusters::ElectricalPowerMeasurement::Id))
-    {
-        // FeatureMap declares the cluster's measurement domain (DC vs AC). presence of any DIRC/ALTC bit
-        // implies V/A measurements are advertised; AC additionally exposes Frequency. ActivePower is
-        // mandatory in any case (Matter spec §2.13.5)
-        quint32 features = ep->meta().value("powerFeatures").toUInt();
-
-        if (features & (Clusters::ElectricalPowerMeasurement::Features::DIRC | Clusters::ElectricalPowerMeasurement::Features::ALTC))
-        {
-            ep->properties().append(Property(new Properties::Voltage));
-            ep->properties().append(Property(new Properties::Current));
-            ep->exposes().append(Expose(new SensorObject("voltage")));
-            ep->exposes().append(Expose(new SensorObject("current")));
-        }
-
-        ep->properties().append(Property(new Properties::Power));
-        ep->exposes().append(Expose(new SensorObject("power")));
-
-        if (features & Clusters::ElectricalPowerMeasurement::Features::ALTC)
-        {
-            ep->properties().append(Property(new Properties::Frequency));
-            ep->exposes().append(Expose(new SensorObject("frequency")));
-        }
-    }
-
-    if (clusters.contains(Clusters::ElectricalEnergyMeasurement::Id))
-    {
-        ep->properties().append(Property(new Properties::Energy));
-        ep->exposes().append(Expose(new SensorObject("energy")));
-    }
-
-    // single sweep over freshly-attached meta-objects: wire up parent + (for exposes) propagate the option
-    // template from share/homed-common/expose.json into device->options() so HA discovery can pick up icon,
-    // unit, etc. one place to add anything that needs to apply to every Property/Action/Expose
-    for (const Property &property : ep->properties())
-        property->setParent(ep);
-
-    for (const Action &action : ep->actions())
-        action->setParent(ep);
-
-    for (const Expose &expose : ep->exposes())
-    {
-        expose->setParent(ep);
-        device->options().insert(expose->name(), m_exposeOptions.value(expose->name()));
-        logInfo << device << "endpoint" << endpointId << "expose" << expose->name();
-    }
-}
-
-void DeviceList::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC, const QByteArray &controllerRCAC)
-{
-    m_fabricKey = fabricKey;
-    m_rootCAId = rootCAId;
-    m_ipk = ipk;
-    m_operationalKey = operationalKey;
-    m_controllerNOC = controllerNOC;
-    m_controllerRCAC = controllerRCAC;
-}
-
-void DeviceList::updateMultiple(DeviceObject *device)
-{
-    QMap <QString, int> counts;
-
-    for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
-    {
-        EndpointObject *ep = reinterpret_cast <EndpointObject*> (it.value().data());
-
-        for (int i = 0; i < ep->properties().count(); i++)
-            counts[ep->properties().at(i)->name()]++;
-    }
-
-    for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
-    {
-        EndpointObject *ep = reinterpret_cast <EndpointObject*> (it.value().data());
-        bool multiple = false;
-
-        for (int i = 0; i < ep->properties().count(); i++)
-        {
-            if (counts.value(ep->properties().at(i)->name()) < 2)
-                continue;
-
-            multiple = true;
-            break;
-        }
-
-        for (int i = 0; i < it.value()->exposes().count(); i++)
-            it.value()->exposes().at(i)->setMultiple(multiple);
-
-        for (int i = 0; i < ep->properties().count(); i++)
-            ep->properties().at(i)->setMultiple(multiple);
-    }
-}
-
-DeviceList::DeviceList(QSettings *config, QObject *parent) : QObject(parent), m_timer(new QTimer(this)), m_sync(false), m_rootCAId(0)
+DeviceList::DeviceList(QSettings *config, QObject *parent) : QObject(parent), m_databaseTimer(new QTimer(this)), m_sync(false), m_rootCaId(0)
 {
     QFile file(config->value("device/expose", reinterpret_cast <HOMEd*> (parent)->basePath().append("share/homed-common/expose.json")).toString());
 
     ExposeObject::registerMetaTypes();
 
+    m_databaseFile.setFileName(config->value("device/database", "/opt/homed-matter/database.json").toString());
     m_names = config->value("mqtt/names", false).toBool();
-    m_file.setFileName(config->value("device/database", "/opt/homed-matter/database.json").toString());
 
     if (file.open(QFile::ReadOnly))
     {
@@ -383,8 +86,8 @@ DeviceList::DeviceList(QSettings *config, QObject *parent) : QObject(parent), m_
         file.close();
     }
 
-    connect(m_timer, &QTimer::timeout, this, &DeviceList::writeDatabase);
-    m_timer->setSingleShot(true);
+    connect(m_databaseTimer, &QTimer::timeout, this, &DeviceList::writeDatabase);
+    m_databaseTimer->setSingleShot(true);
 }
 
 DeviceList::~DeviceList(void)
@@ -395,31 +98,65 @@ DeviceList::~DeviceList(void)
 
 void DeviceList::init(void)
 {
-    QJsonObject json;
+    QJsonObject json, fabric;
 
-    if (!m_file.open(QFile::ReadOnly))
+    if (!m_databaseFile.open(QFile::ReadOnly))
         return;
 
-    json = QJsonDocument::fromJson(m_file.readAll()).object();
-    unserialize(json.value("devices").toArray());
+    json = QJsonDocument::fromJson(m_databaseFile.readAll()).object();
+    fabric = json.value("fabric").toObject();
 
-    QJsonObject fabric = json.value("fabric").toObject();
+    unserializeDevices(json.value("devices").toArray());
+
     m_fabricKey = QByteArray::fromHex(fabric.value("key").toString().toUtf8());
-    m_rootCAId = fabric.value("rootCAId").toString().toULongLong(nullptr, 16);
     m_ipk = QByteArray::fromHex(fabric.value("ipk").toString().toUtf8());
     m_operationalKey = QByteArray::fromHex(fabric.value("operationalKey").toString().toUtf8());
-    m_controllerNOC = QByteArray::fromHex(fabric.value("controllerNOC").toString().toUtf8());
-    m_controllerRCAC = QByteArray::fromHex(fabric.value("controllerRCAC").toString().toUtf8());
+    m_controllerNoc = QByteArray::fromHex(fabric.value("controllerNOC").toString().toUtf8());
+    m_controllerRcac = QByteArray::fromHex(fabric.value("controllerRCAC").toString().toUtf8());
+    m_rootCaId = fabric.value("rootCAId").toString().toULongLong(nullptr, 16);
 
-    m_file.close();
+    m_databaseFile.close();
 }
 
-void DeviceList::store(bool sync)
+void DeviceList::storeDatabase(bool sync)
 {
     if (sync)
         m_sync = true;
 
-    m_timer->start(STORE_DATABASE_DELAY);
+    m_databaseTimer->start(STORE_DATABASE_DELAY);
+}
+
+void DeviceList::setFabricCredentials(const QByteArray &fabricKey, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNoc, const QByteArray &controllerRcac, quint64 rootCaId)
+{
+    m_fabricKey = fabricKey;
+    m_ipk = ipk;
+    m_operationalKey = operationalKey;
+    m_controllerNoc = controllerNoc;
+    m_controllerRcac = controllerRcac;
+    m_rootCaId = rootCaId;
+}
+
+quint64 DeviceList::generateNodeId(void)
+{
+    while (true)
+    {
+        QByteArray data = Crypto::randomData(4);
+        quint64 nodeId = 0;
+
+        // all bytes must be non-zero
+        for (int i = 0; i < data.length(); i++)
+        {
+            quint8 value = static_cast <quint8> (data.at(i));
+
+            if (!value)
+                value = static_cast <quint8> (static_cast <quint8> (Crypto::randomData(1).at(0)) % 254 + 1);
+
+            nodeId |= static_cast <quint64> (value) << (i * 8);
+        }
+
+        if (byNodeId(nodeId).isNull())
+            return nodeId;
+    }
 }
 
 Device DeviceList::byName(const QString &name, int *index)
@@ -442,8 +179,10 @@ Device DeviceList::byNodeId(quint64 nodeId)
 {
     for (int i = 0; i < count(); i++)
     {
-        if (at(i).staticCast<DeviceObject>()->nodeId() == nodeId)
-            return at(i);
+        if (at(i)->nodeId() != nodeId)
+            continue;
+
+        return at(i);
     }
 
     return Device();
@@ -453,6 +192,8 @@ Device DeviceList::parse(const QJsonObject &json)
 {
     QString name = mqttSafe(json.value("name").toString());
     quint64 nodeId = json.value("nodeId").toString().toULongLong(nullptr, 16);
+    QJsonArray endpoints = json.value("endpoints").toArray();
+    Device device;
 
     if (!nodeId) // TODO: remove after migration from 0.0.4
         nodeId = json.value("id").toString().toULongLong(nullptr, 16);
@@ -460,7 +201,7 @@ Device DeviceList::parse(const QJsonObject &json)
     if (name.isEmpty() || !nodeId)
         return Device();
 
-    Device device(new DeviceObject(nodeId, name));
+    device = Device(new DeviceObject(nodeId, name));
 
     if (json.contains("active"))
         device->setActive(json.value("active").toBool());
@@ -472,76 +213,332 @@ Device DeviceList::parse(const QJsonObject &json)
         device->setCloud(json.value("cloud").toBool());
 
     device->setNote(json.value("note").toString());
-
-    DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
-    obj->setVendorId(static_cast <quint16> (json.value("vendorId").toInt()));
-    obj->setProductId(static_cast <quint16> (json.value("productId").toInt()));
-    obj->setManufacturerName(json.value("manufacturerName").toString());
-    obj->setModelName(json.value("modelName").toString());
-    obj->setFabricIndex(static_cast <quint8> (json.value("fabricIndex").toInt()));
+    device->setVendorId(static_cast <quint16> (json.value("vendorId").toInt()));
+    device->setProductId(static_cast <quint16> (json.value("productId").toInt()));
+    device->setManufacturerName(json.value("manufacturerName").toString());
+    device->setModelName(json.value("modelName").toString());
+    device->setFabricIndex(static_cast <quint8> (json.value("fabricIndex").toInt()));
 
     if (json.contains("networkAddress"))
-        obj->setNetworkAddress(QHostAddress(json.value("networkAddress").toString()));
+        device->setNetworkAddress(QHostAddress(json.value("networkAddress").toString()));
 
     if (json.contains("networkPort"))
-        obj->setNetworkPort(static_cast <quint16> (json.value("networkPort").toInt()));
+        device->setNetworkPort(static_cast <quint16> (json.value("networkPort").toInt()));
 
     if (json.contains("thread"))
-        obj->setThread(json.value("thread").toBool());
-    else if (obj->networkAddress().protocol() == QAbstractSocket::IPv6Protocol)
-        obj->setThread(true);
+        device->setThread(json.value("thread").toBool());
+    else if (device->networkAddress().protocol() == QAbstractSocket::IPv6Protocol)
+        device->setThread(true);
 
     if (json.contains("lastSeen"))
-        obj->setLastSeen(json.value("lastSeen").toVariant().toLongLong());
+        device->setLastSeen(json.value("lastSeen").toVariant().toLongLong());
 
-    if (json.contains("resumptionID"))
-        obj->setResumptionID(QByteArray::fromHex(json.value("resumptionID").toString().toLatin1()));
-
-    if (json.contains("resumptionSharedSecret"))
-        obj->setResumptionSharedSecret(QByteArray::fromHex(json.value("resumptionSharedSecret").toString().toLatin1()));
+    device->setResumption(QByteArray::fromHex(json.value("resumptionID").toString().toLatin1()), QByteArray::fromHex(json.value("resumptionSharedSecret").toString().toLatin1()));
 
     if (json.contains("session"))
+        device->parseSession(json.value("session").toObject());
+
+    for (int i = 0; i < endpoints.count(); i++)
     {
-        QJsonObject session = json.value("session").toObject();
-        obj->setSessionLocalId(static_cast <quint16> (session.value("localId").toInt()));
-        obj->setSessionPeerId(static_cast <quint16> (session.value("peerId").toInt()));
-        obj->setSessionI2RKey(QByteArray::fromHex(session.value("i2rKey").toString().toLatin1()));
-        obj->setSessionR2IKey(QByteArray::fromHex(session.value("r2iKey").toString().toLatin1()));
-        obj->setSessionAttestation(QByteArray::fromHex(session.value("attestation").toString().toLatin1()));
-        obj->setSessionLocalCounter(static_cast <quint32> (session.value("localCounter").toVariant().toULongLong()));
-        obj->setSessionIdleInterval(static_cast <quint32> (session.value("idleInterval").toVariant().toULongLong()));
-        obj->setSessionActiveInterval(static_cast <quint32> (session.value("activeInterval").toVariant().toULongLong()));
-        obj->setSessionActiveThreshold(static_cast <quint16> (session.value("activeThreshold").toInt()));
-    }
-
-    QJsonArray endpoints = json.value("endpoints").toArray();
-
-    for (auto it = endpoints.begin(); it != endpoints.end(); it++)
-    {
-        QJsonObject epJson = it->toObject();
-        quint8 endpointId = static_cast <quint8> (epJson.value("endpointId").toInt());
-
+        QJsonObject item = endpoints.at(i).toObject();
+        QJsonArray clusters = item.value("clusters").toArray();
+        quint8 endpointId = static_cast <quint8> (item.value("endpointId").toInt());
         Endpoint endpoint(new EndpointObject(endpointId, device));
-        EndpointObject *ep = reinterpret_cast <EndpointObject*> (endpoint.data());
 
-        QJsonArray clusters = epJson.value("clusters").toArray();
+        for (int j = 0; j < clusters.count(); j++)
+            endpoint->clusters().append(static_cast <quint32> (clusters.at(j).toVariant().toULongLong()));
 
-        for (auto ci = clusters.begin(); ci != clusters.end(); ci++)
-            ep->clusters().append(static_cast <quint32> (ci->toVariant().toULongLong()));
-
-        ep->meta().insert(epJson.value("meta").toObject().toVariantMap());
-
-        obj->endpoints().insert(endpointId, endpoint);
+        endpoint->meta().insert(item.value("meta").toObject().toVariantMap());
+        device->endpoints().insert(endpointId, endpoint);
     }
 
     return device;
 }
 
-void DeviceList::unserialize(const QJsonArray &devices)
+void DeviceList::addEndpoint(DeviceObject *device, quint8 endpointId, const QList <quint32> &clusters)
 {
-    for (auto it = devices.begin(); it != devices.end(); it++)
+    Endpoint endpoint = device->endpoints().value(endpointId);
+    Device item;
+
+    for (int i = 0; i < count(); i++)
     {
-        QJsonObject json = it->toObject();
+        if (at(i).data() != device)
+            continue;
+
+        item = at(i);
+        break;
+    }
+
+    if (item.isNull())
+        return;
+
+    if (endpoint.isNull())
+    {
+        endpoint = Endpoint(new EndpointObject(endpointId, item));
+        device->endpoints().insert(endpointId, endpoint);
+    }
+
+    endpoint->clusters() = clusters;
+}
+
+void DeviceList::setupEndpoint(DeviceObject *device, quint8 endpointId)
+{
+    const Endpoint &endpoint = device->endpoints().value(endpointId);
+    QList <quint32> clusters;
+    quint32 capabilities;
+    bool hueSaturation, colorTemperature;
+
+    if (endpoint.isNull())
+        return;
+
+    clusters = endpoint->clusters();
+    capabilities = static_cast <quint16> (endpoint->meta().value("colorCapabilities").toInt());
+    hueSaturation = capabilities & Clusters::ColorControl::Capabilities::HueSaturation;
+    colorTemperature = capabilities & Clusters::ColorControl::Capabilities::ColorTemperature;
+
+    if (clusters.contains(Clusters::OnOff::Id))
+    {
+        endpoint->properties().append(Property(new Properties::Status));
+        endpoint->actions().append(Action(new Actions::Status));
+
+        if (endpoint->exposes().isEmpty())
+        {
+            if (clusters.contains(Clusters::LevelControl::Id) || clusters.contains(Clusters::ColorControl::Id))
+            {
+                QList <QVariant> options;
+
+                if (clusters.contains(Clusters::LevelControl::Id))
+                    options.append("level");
+
+                // XY capability is ignored, some color temperature lamps (e.g. IKEA TRADFRI WS) report it without color support
+                if (hueSaturation)
+                    options.append("color");
+
+                if (colorTemperature)
+                {
+                    options.append("colorTemperature");
+
+                    if (endpoint->meta().contains("colorTempMin") && endpoint->meta().contains("colorTempMax"))
+                        device->options().insert(QString("colorTemperature_%1").arg(endpointId), QMap <QString, QVariant> {{"min", endpoint->meta().value("colorTempMin")}, {"max", endpoint->meta().value("colorTempMax")}});
+                }
+
+                if (hueSaturation && colorTemperature)
+                    options.append("colorMode");
+
+                endpoint->exposes().append(Expose(new LightObject));
+                device->options().insert(QString("light_%1").arg(endpointId), options);
+            }
+            else
+                endpoint->exposes().append(Expose(new SwitchObject));
+        }
+
+        // StartUpOnOff attribute is mandatory with lighting feature only
+        if (endpoint->meta().value("onOffFeatures").toUInt() & Clusters::OnOff::Features::LT)
+        {
+            endpoint->properties().append(Property(new Properties::PowerOnStatus));
+            endpoint->actions().append(Action(new Actions::PowerOnStatus));
+            endpoint->exposes().append(Expose(new SelectObject("powerOnStatus")));
+        }
+    }
+
+    if (clusters.contains(Clusters::LevelControl::Id))
+    {
+        endpoint->properties().append(Property(new Properties::Level));
+        endpoint->actions().append(Action(new Actions::Level));
+    }
+
+    if (clusters.contains(Clusters::ColorControl::Id))
+    {
+        if (hueSaturation)
+        {
+            endpoint->properties().append(Property(new Properties::ColorHS));
+            endpoint->actions().append(Action(new Actions::ColorHS));
+        }
+
+        if (colorTemperature)
+        {
+            endpoint->properties().append(Property(new Properties::ColorTemperature));
+            endpoint->actions().append(Action(new Actions::ColorTemperature));
+        }
+
+        if (hueSaturation && colorTemperature)
+            endpoint->properties().append(Property(new Properties::ColorMode));
+    }
+
+    if (clusters.contains(Clusters::DoorLock::Id))
+    {
+        endpoint->properties().append(Property(new Properties::Lock));
+        endpoint->actions().append(Action(new Actions::Lock));
+    }
+
+    if (clusters.contains(Clusters::WindowCovering::Id))
+    {
+        endpoint->properties().append(Property(new Properties::CoverPosition));
+        endpoint->actions().append(Action(new Actions::CoverStatus));
+        endpoint->actions().append(Action(new Actions::CoverPosition));
+    }
+
+    if (clusters.contains(Clusters::PowerSource::Id))
+    {
+        endpoint->properties().append(Property(new Properties::Battery));
+        endpoint->exposes().append(Expose(new SensorObject("battery")));
+        device->setBatteryPowered(true);
+    }
+
+    if (clusters.contains(Clusters::Switch::Id))
+    {
+        quint32 features = endpoint->meta().value("switchFeatures").toUInt();
+        quint8 multiPressMax = static_cast <quint8> (endpoint->meta().value("switchMultiPressMax").toUInt());
+        bool encoder = (features & Clusters::Switch::Features::MSM) && !(features & Clusters::Switch::Features::MSL) && multiPressMax > 5;
+        QList <QVariant> actions;
+
+        endpoint->properties().append(Property(new Properties::SwitchAction));
+        endpoint->exposes().append(Expose(new SensorObject("action")));
+
+        // multi press switch without long press and high multi press maximum is rotary encoder (e.g. IKEA BILRESA)
+        if (encoder)
+        {
+            endpoint->properties().append(Property(new Properties::SwitchCount));
+            endpoint->exposes().append(Expose(new SensorObject("count")));
+        }
+
+        if (features & Clusters::Switch::Features::LS)
+            actions.append("latched");
+
+        if (encoder)
+            actions.append(QList <QVariant> {"start", "stop"});
+        else if (features & Clusters::Switch::Features::MSM)
+        {
+            QList <QVariant> list = {"singleClick", "doubleClick", "tripleClick", "multipleClick"};
+            actions.append(list.mid(0, multiPressMax ? multiPressMax : 1));
+        }
+        else if (features & Clusters::Switch::Features::MSR)
+            actions.append("singleClick");
+
+        if (features & Clusters::Switch::Features::MSL)
+            actions.append(QList <QVariant> {"hold", "release"});
+
+        if (!actions.isEmpty())
+        {
+            device->options().insert(QString("action_%1").arg(endpointId), m_exposeOptions.value("action"));
+            device->updateOption(QString("action_%1").arg(endpointId), "enum", actions);
+        }
+    }
+
+    if (clusters.contains(Clusters::BooleanState::Id))
+    {
+        switch (endpoint->meta().value("deviceType").toUInt())
+        {
+            case Clusters::DeviceTypes::ContactSensor:
+                endpoint->properties().append(Property(new Properties::Contact));
+                endpoint->exposes().append(Expose(new BinaryObject("contact")));
+                break;
+
+            case Clusters::DeviceTypes::WaterLeakDetector:
+                endpoint->properties().append(Property(new Properties::WaterLeak));
+                endpoint->exposes().append(Expose(new BinaryObject("waterLeak")));
+                break;
+
+            default:
+                logWarning << device << "endpoint" << endpointId << "boolean state device type" << QString::asprintf("0x%04x", endpoint->meta().value("deviceType").toUInt()) << "not supported";
+                break;
+        }
+    }
+
+    if (clusters.contains(Clusters::OccupancySensing::Id))
+    {
+        endpoint->properties().append(Property(new Properties::Occupancy));
+        endpoint->exposes().append(Expose(new BinaryObject("occupancy")));
+    }
+
+    if (clusters.contains(Clusters::TemperatureMeasurement::Id))
+    {
+        endpoint->properties().append(Property(new Properties::Temperature));
+        endpoint->exposes().append(Expose(new SensorObject("temperature")));
+    }
+
+    if (clusters.contains(Clusters::RelativeHumidityMeasurement::Id))
+    {
+        endpoint->properties().append(Property(new Properties::Humidity));
+        endpoint->exposes().append(Expose(new SensorObject("humidity")));
+    }
+
+    if (clusters.contains(Clusters::ElectricalPowerMeasurement::Id))
+    {
+        quint32 features = endpoint->meta().value("powerFeatures").toUInt();
+
+        if (features & (Clusters::ElectricalPowerMeasurement::Features::DIRC | Clusters::ElectricalPowerMeasurement::Features::ALTC))
+        {
+            endpoint->properties().append(Property(new Properties::Voltage));
+            endpoint->properties().append(Property(new Properties::Current));
+            endpoint->exposes().append(Expose(new SensorObject("voltage")));
+            endpoint->exposes().append(Expose(new SensorObject("current")));
+        }
+
+        endpoint->properties().append(Property(new Properties::Power));
+        endpoint->exposes().append(Expose(new SensorObject("power")));
+
+        if (features & Clusters::ElectricalPowerMeasurement::Features::ALTC)
+        {
+            endpoint->properties().append(Property(new Properties::Frequency));
+            endpoint->exposes().append(Expose(new SensorObject("frequency")));
+        }
+    }
+
+    if (clusters.contains(Clusters::ElectricalEnergyMeasurement::Id))
+    {
+        endpoint->properties().append(Property(new Properties::Energy));
+        endpoint->exposes().append(Expose(new SensorObject("energy")));
+    }
+
+    for (int i = 0; i < endpoint->properties().count(); i++)
+        endpoint->properties().at(i)->setParent(endpoint.data());
+
+    for (int i = 0; i < endpoint->actions().count(); i++)
+        endpoint->actions().at(i)->setParent(endpoint.data());
+
+    for (int i = 0; i < endpoint->exposes().count(); i++)
+    {
+        const Expose &expose = endpoint->exposes().at(i);
+
+        expose->setParent(endpoint.data());
+        device->options().insert(expose->name(), m_exposeOptions.value(expose->name()));
+
+        logInfo << device << "endpoint" << endpointId << "expose" << expose->name() << "added";
+    }
+}
+
+void DeviceList::updateMultiple(DeviceObject *device)
+{
+    QMap <QString, int> map;
+
+    for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
+    {
+        for (int i = 0; i < it.value()->properties().count(); i++)
+            map[it.value()->properties().at(i)->name()]++;
+    }
+
+    for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
+    {
+        const Endpoint &endpoint = it.value();
+        bool multiple = false;
+
+        for (int i = 0; i < endpoint->properties().count() && !multiple; i++)
+            multiple = map.value(endpoint->properties().at(i)->name()) > 1;
+
+        for (int i = 0; i < endpoint->exposes().count(); i++)
+            endpoint->exposes().at(i)->setMultiple(multiple);
+
+        for (int i = 0; i < endpoint->properties().count(); i++)
+            endpoint->properties().at(i)->setMultiple(multiple);
+    }
+}
+
+void DeviceList::unserializeDevices(const QJsonArray &devices)
+{
+    for (int i = 0; i < devices.count(); i++)
+    {
+        QJsonObject json = devices.at(i).toObject();
         Device device;
 
         if (!byName(json.value("name").toString()).isNull())
@@ -554,13 +551,10 @@ void DeviceList::unserialize(const QJsonArray &devices)
 
         append(device);
 
-        // recreate exposes from restored endpoints + clusters
-        DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
+        for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
+            setupEndpoint(device.data(), it.key());
 
-        for (auto ep = obj->endpoints().begin(); ep != obj->endpoints().end(); ep++)
-            setupEndpoint(obj, ep.key());
-
-        updateMultiple(obj);
+        updateMultiple(device.data());
     }
 
     if (!count())
@@ -569,24 +563,23 @@ void DeviceList::unserialize(const QJsonArray &devices)
     logInfo << count() << "devices loaded";
 }
 
-QJsonArray DeviceList::serialize(void)
+QJsonArray DeviceList::serializeDevices(void)
 {
     QJsonArray array;
 
     for (int i = 0; i < count(); i++)
     {
         const Device &device = at(i);
-        DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
-        QJsonObject json = {{"nodeId", QString::number(obj->nodeId(), 16)}, {"name", device->name()}, {"active", device->active()}, {"discovery", device->discovery()}, {"cloud", device->cloud()}};
+        QJsonObject json = {{"nodeId", device->address()}, {"name", device->name()}, {"active", device->active()}, {"discovery", device->discovery()}, {"cloud", device->cloud()}};
 
-        if (obj->vendorId())
-            json.insert("vendorId", obj->vendorId());
+        if (device->vendorId())
+            json.insert("vendorId", device->vendorId());
 
-        if (obj->productId())
-            json.insert("productId", obj->productId());
+        if (device->productId())
+            json.insert("productId", device->productId());
 
-        if (obj->fabricIndex())
-            json.insert("fabricIndex", obj->fabricIndex());
+        if (device->fabricIndex())
+            json.insert("fabricIndex", device->fabricIndex());
 
         if (!device->manufacturerName().isEmpty())
             json.insert("manufacturerName", device->manufacturerName());
@@ -597,63 +590,50 @@ QJsonArray DeviceList::serialize(void)
         if (!device->note().isEmpty())
             json.insert("note", device->note());
 
-        if (!obj->networkAddress().isNull())
-            json.insert("networkAddress", obj->networkAddress().toString());
+        if (!device->networkAddress().isNull())
+            json.insert("networkAddress", device->networkAddress().toString());
 
-        if (obj->networkPort() != 5540)
-            json.insert("networkPort", obj->networkPort());
+        if (device->networkPort() != MATTER_PORT)
+            json.insert("networkPort", device->networkPort());
 
-        if (obj->thread())
+        if (device->thread())
             json.insert("thread", true);
 
-        if (obj->lastSeen())
-            json.insert("lastSeen", obj->lastSeen());
+        if (device->lastSeen())
+            json.insert("lastSeen", device->lastSeen());
 
-        if (!obj->resumptionID().isEmpty())
-            json.insert("resumptionID", QString::fromLatin1(obj->resumptionID().toHex()));
+        if (!device->resumptionId().isEmpty())
+            json.insert("resumptionID", QString(device->resumptionId().toHex()));
 
-        if (!obj->resumptionSharedSecret().isEmpty())
-            json.insert("resumptionSharedSecret", QString::fromLatin1(obj->resumptionSharedSecret().toHex()));
+        if (!device->resumptionSecret().isEmpty())
+            json.insert("resumptionSharedSecret", QString(device->resumptionSecret().toHex()));
 
-        if (obj->hasPersistedSession())
-        {
-            QJsonObject session = {
-                {"localId", obj->sessionLocalId()},
-                {"peerId", obj->sessionPeerId()},
-                {"i2rKey", QString::fromLatin1(obj->sessionI2RKey().toHex())},
-                {"r2iKey", QString::fromLatin1(obj->sessionR2IKey().toHex())},
-                {"attestation", QString::fromLatin1(obj->sessionAttestation().toHex())},
-                {"localCounter", static_cast <qint64> (obj->sessionLocalCounter())},
-                {"idleInterval", static_cast <qint64> (obj->sessionIdleInterval())},
-                {"activeInterval", static_cast <qint64> (obj->sessionActiveInterval())},
-                {"activeThreshold", obj->sessionActiveThreshold()}
-            };
-            json.insert("session", session);
-        }
+        if (device->sessionStored())
+            json.insert("session", device->serializeSession());
 
-        if (!obj->endpoints().isEmpty())
+        if (!device->endpoints().isEmpty())
         {
             QJsonArray endpoints;
 
-            for (auto it = obj->endpoints().begin(); it != obj->endpoints().end(); it++)
+            for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
             {
-                EndpointObject *ep = reinterpret_cast <EndpointObject*> (it.value().data());
-                QJsonObject epJson = {{"endpointId", ep->id()}};
+                const Endpoint &endpoint = it.value();
+                QJsonObject item = {{"endpointId", endpoint->id()}};
 
-                if (!ep->clusters().isEmpty())
+                if (!endpoint->clusters().isEmpty())
                 {
                     QJsonArray clusters;
 
-                    for (int i = 0; i < ep->clusters().count(); i++)
-                        clusters.append(static_cast <qint64> (ep->clusters().at(i)));
+                    for (int j = 0; j < endpoint->clusters().count(); j++)
+                        clusters.append(static_cast <qint64> (endpoint->clusters().at(j)));
 
-                    epJson.insert("clusters", clusters);
+                    item.insert("clusters", clusters);
                 }
 
-                if (!ep->meta().isEmpty())
-                    epJson.insert("meta", QJsonObject::fromVariantMap(ep->meta()));
+                if (!endpoint->meta().isEmpty())
+                    item.insert("meta", QJsonObject::fromVariantMap(endpoint->meta()));
 
-                endpoints.append(epJson);
+                endpoints.append(item);
             }
 
             json.insert("endpoints", endpoints);
@@ -667,22 +647,21 @@ QJsonArray DeviceList::serialize(void)
 
 void DeviceList::writeDatabase(void)
 {
-    QJsonObject fabric;
+    HOMEd *controller = reinterpret_cast <HOMEd*> (parent());
+    QJsonObject json, fabric;
 
     if (!m_fabricKey.isEmpty())
     {
         fabric.insert("key", QString(m_fabricKey.toHex()));
-        fabric.insert("rootCAId", QString::number(m_rootCAId, 16));
+        fabric.insert("rootCAId", QString::number(m_rootCaId, 16));
         fabric.insert("ipk", QString(m_ipk.toHex()));
         fabric.insert("operationalKey", QString(m_operationalKey.toHex()));
-        fabric.insert("controllerNOC", QString(m_controllerNOC.toHex()));
-        fabric.insert("controllerRCAC", QString(m_controllerRCAC.toHex()));
+        fabric.insert("controllerNOC", QString(m_controllerNoc.toHex()));
+        fabric.insert("controllerRCAC", QString(m_controllerRcac.toHex()));
     }
 
-    HOMEd *homed = reinterpret_cast <HOMEd*> (parent());
-    QJsonObject json = {{"devices", serialize()}, {"fabric", fabric}, {"names", m_names}, {"timestamp", QDateTime::currentSecsSinceEpoch()}, {"version", SERVICE_VERSION}};
-
-    homed->mqttPublishStatus(json);
+    json = {{"devices", serializeDevices()}, {"fabric", fabric}, {"names", m_names}, {"timestamp", QDateTime::currentSecsSinceEpoch()}, {"version", SERVICE_VERSION}};
+    controller->mqttPublishStatus(json);
 
     if (!m_sync)
         return;
@@ -690,7 +669,7 @@ void DeviceList::writeDatabase(void)
     json.remove("names");
     m_sync = false;
 
-    if (homed->writeFile(m_file, QJsonDocument(json).toJson(QJsonDocument::Compact)))
+    if (controller->writeFile(m_databaseFile, QJsonDocument(json).toJson(QJsonDocument::Compact)))
         return;
 
     logWarning << "Database not stored";

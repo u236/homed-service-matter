@@ -3,44 +3,41 @@
 #ifndef CRYPTO_H
 #define CRYPTO_H
 
+#define MATTER_OID_NODE_ID          "1.3.6.1.4.1.37244.1.1"
+#define MATTER_OID_RCAC_ID          "1.3.6.1.4.1.37244.1.4"
+#define MATTER_OID_FABRIC_ID        "1.3.6.1.4.1.37244.1.5"
+
+#define MATTER_TAG_NODE_ID          0x11
+#define MATTER_TAG_RCAC_ID          0x14
+#define MATTER_TAG_FABRIC_ID        0x15
+
+#define CERTIFICATE_VALIDITY        315360000
+#define TIME_OFFSET                 946684800
+
 #include <openssl/ec.h>
 #include <openssl/hmac.h>
 #include <QByteArray>
 
-/*
-    Crypto utilities for Matter protocol using OpenSSL:
-    - PBKDF2-HMAC-SHA256: derive w0, w1 from passcode
-    - HKDF-SHA256: key derivation for session keys
-    - HMAC-SHA256: key confirmation in SPAKE2+
-    - AES-128-CCM: message encryption/decryption
-    - EC P-256: SPAKE2+ point operations
-*/
-
 namespace Crypto
 {
-    QByteArray pbkdf2(const QByteArray &password, const QByteArray &salt, quint32 iterations, quint32 keyLength);
-    QByteArray hkdfSha256(const QByteArray &ikm, const QByteArray &salt, const QByteArray &info, quint32 length);
-    QByteArray hmacSha256(const QByteArray &key, const QByteArray &data);
+    QByteArray pbkdf2(const QByteArray &password, const QByteArray &salt, quint32 iterations, quint32 length);
+    QByteArray hkdf(const QByteArray &key, const QByteArray &salt, const QByteArray &info, quint32 length);
+    QByteArray hmac(const QByteArray &key, const QByteArray &data);
+    QByteArray sha1(const QByteArray &data);
     QByteArray sha256(const QByteArray &data);
 
-    QByteArray aesCcmEncrypt(const QByteArray &key, const QByteArray &nonce, const QByteArray &aad, const QByteArray &plaintext, quint8 tagLength = 16);
-    QByteArray aesCcmDecrypt(const QByteArray &key, const QByteArray &nonce, const QByteArray &aad, const QByteArray &ciphertext, quint8 tagLength = 16);
+    QByteArray encrypt(const QByteArray &key, const QByteArray &nonce, const QByteArray &aad, const QByteArray &data, quint8 tagLength = 16);
+    QByteArray decrypt(const QByteArray &key, const QByteArray &nonce, const QByteArray &aad, const QByteArray &data, quint8 tagLength = 16);
 
-    QByteArray sha1(const QByteArray &data);
-    QByteArray ecdsaSign(const QByteArray &privateKey, const QByteArray &message);
-    bool ecdsaVerify(const QByteArray &publicKey, const QByteArray &message, const QByteArray &signature);
-    QByteArray parseCSRPublicKey(const QByteArray &derCSR);
+    QByteArray sign(const QByteArray &privateKey, const QByteArray &data);
+    bool verify(const QByteArray &publicKey, const QByteArray &data, const QByteArray &signature);
 
-    QByteArray generateX509Cert(quint64 rootCAId, quint64 fabricId, quint64 nodeId, const QByteArray &subjectPubKey, const QByteArray &signerPrivKey, const QByteArray &signerPubKey, bool isRCAC);
-    QByteArray x509DerToMatterTLV(const QByteArray &derCert);
+    QByteArray csrPublicKey(const QByteArray &csr);
+    QByteArray generateCertificate(quint64 rootCaId, quint64 fabricId, quint64 nodeId, const QByteArray &publicKey, const QByteArray &signerPrivateKey, const QByteArray &signerPublicKey, bool root);
+    QByteArray convertCertificate(const QByteArray &certificate);
 
-    QByteArray randomBytes(quint32 length);
+    QByteArray randomData(quint32 length);
 }
-
-/*
-    EC P-256 point wrapper for SPAKE2+ operations.
-    Matter uses NIST P-256 (secp256r1) curve.
-*/
 
 class ECPoint
 {
@@ -51,26 +48,23 @@ public:
     ECPoint(const ECPoint &other);
     ~ECPoint(void);
 
-    ECPoint &operator=(const ECPoint &other);
+    ECPoint &operator = (const ECPoint &other);
 
-    bool isValid(void) const;
-    bool setFromUncompressed(const QByteArray &data);
-    QByteArray toUncompressed(void) const;
+    inline EC_POINT *point(void) { return m_point; }
 
-    static ECPoint generator(void);
-    static ECPoint fromMultiply(const ECPoint &point, const BIGNUM *scalar);
-    static ECPoint add(const ECPoint &a, const ECPoint &b);
-    static ECPoint subtract(const ECPoint &a, const ECPoint &b);
-
-    EC_POINT *point(void) const { return m_point; }
+    bool fromData(const QByteArray &data);
+    QByteArray toData(void);
 
     static EC_GROUP *group(void);
-    static void initGroup(void);
+    static ECPoint generator(void);
+
+    static ECPoint multiply(const ECPoint &point, const BIGNUM *scalar);
+    static ECPoint add(const ECPoint &a, const ECPoint &b);
+    static ECPoint subtract(const ECPoint &a, const ECPoint &b);
 
 private:
 
     EC_POINT *m_point;
-
     static EC_GROUP *s_group;
 
 };
@@ -85,13 +79,13 @@ public:
     BigNum(const BigNum &other);
     ~BigNum(void);
 
-    BigNum &operator=(const BigNum &other);
+    BigNum &operator = (const BigNum &other);
 
-    BIGNUM *bn(void) const { return m_bn; }
-    QByteArray toByteArray(int length = 0) const;
+    inline BIGNUM *bn(void) { return m_bn; }
+    QByteArray toData(int length = 0);
 
     static BigNum mod(const BigNum &a, const BigNum &m);
-    static BigNum fromOrder(void);
+    static BigNum order(void);
 
 private:
 

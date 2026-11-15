@@ -4,57 +4,88 @@
 #include "logger.h"
 #include "mdns.h"
 
-#define MATTER_COMMISSION_SERVICE   "_matterc._udp.local"
-#define MATTER_OPERATIVE_SERVICE    "_matter._tcp.local"
-
-MDNS::MDNS(QObject *parent) : QObject(parent), m_socket(new QUdpSocket(this)), m_socket6(new QUdpSocket(this)), m_browseTimer(new QTimer(this))
+MDNS::MDNS(QObject *parent) : QObject(parent), m_socket4(new QUdpSocket(this)), m_socket6(new QUdpSocket(this)), m_timer(new QTimer(this))
 {
-    connect(m_socket, &QUdpSocket::readyRead, this, &MDNS::readyRead);
+    connect(m_socket4, &QUdpSocket::readyRead, this, &MDNS::readyRead);
     connect(m_socket6, &QUdpSocket::readyRead, this, &MDNS::readyRead);
-    connect(m_browseTimer, &QTimer::timeout, this, &MDNS::browseTimeout);
+    connect(m_timer, &QTimer::timeout, this, &MDNS::browse);
 
-    m_browseTimer->setSingleShot(true);
+    m_timer->setSingleShot(true);
 
-    if (m_socket->bind(QHostAddress::AnyIPv4, MDNS_PORT, QAbstractSocket::ShareAddress | QAbstractSocket::ReuseAddressHint))
+    if (m_socket4->bind(QHostAddress::AnyIPv4, MDNS_PORT, QAbstractSocket::ShareAddress | QAbstractSocket::ReuseAddressHint))
     {
-        m_socket->joinMulticastGroup(QHostAddress(MDNS_MULTICAST_ADDR4));
-        logInfo << "MDNS listening on" << MDNS_MULTICAST_ADDR4 << ":" << MDNS_PORT;
+        m_socket4->joinMulticastGroup(QHostAddress(MDNS_ADDRESS_IPV4));
+        logInfo << "mDNS listening on" << MDNS_ADDRESS_IPV4 << "port" << MDNS_PORT;
     }
 
     if (m_socket6->bind(QHostAddress::AnyIPv6, MDNS_PORT, QAbstractSocket::ShareAddress | QAbstractSocket::ReuseAddressHint))
     {
-        m_socket6->joinMulticastGroup(QHostAddress(MDNS_MULTICAST_ADDR6));
-        logInfo << "MDNS listening on" << MDNS_MULTICAST_ADDR6 << ":" << MDNS_PORT;
+        m_socket6->joinMulticastGroup(QHostAddress(MDNS_ADDRESS_IPV6));
+        logInfo << "mDNS listening on" << MDNS_ADDRESS_IPV6 << "port" << MDNS_PORT;
+    }
+}
+
+void MDNS::browse(void)
+{
+    QList <QString> list = {MATTER_COMMISSIONABLE_SERVICE, MATTER_OPERATIONAL_SERVICE};
+
+    for (int i = 0; i < list.count(); i++)
+    {
+        QByteArray query = encodeQuery(list.at(i), DNS::Type::PTR);
+        m_socket4->writeDatagram(query, QHostAddress(MDNS_ADDRESS_IPV4), MDNS_PORT);
+        m_socket6->writeDatagram(query, QHostAddress(MDNS_ADDRESS_IPV6), MDNS_PORT);
+    }
+
+    logInfo << "mDNS browsing for commissionable and operational Matter devices...";
+    m_timer->start(MDNS_BROWSE_INTERVAL);
+}
+
+void MDNS::stop(void)
+{
+    m_timer->stop();
+}
+
+void MDNS::purgeOperational(const QHostAddress &address)
+{
+    // some peers (e.g. Shelly 1PM) keep advertising themselves after removal from the fabric, drop the cache entry so subsequent browses don't find the ghost
+    for (auto it = m_services.begin(); it != m_services.end(); )
+    {
+        if (!it.value().operational || it.value().address != address)
+        {
+            it++;
+            continue;
+        }
+
+        logInfo << "mDNS operational entry" << it.value().instanceName << "purged";
+        it = m_services.erase(it);
     }
 }
 
 QByteArray MDNS::encodeName(const QString &name)
 {
-    QByteArray result;
-    QList <QString> labels = name.split('.');
+    QList <QString> list = name.split('.');
+    QByteArray data;
 
-    for (const QString &label : labels)
+    for (int i = 0; i < list.count(); i++)
     {
-        QByteArray utf8 = label.toUtf8();
-        result.append(static_cast <char> (utf8.length()));
-        result.append(utf8);
+        QByteArray label = list.at(i).toUtf8();
+        data.append(static_cast <char> (label.length())).append(label);
     }
 
-    result.append('\0');
-    return result;
+    return data.append('\0');
 }
 
 QString MDNS::decodeName(const QByteArray &data, quint32 &offset)
 {
-    QList <QString> labels;
-    quint32 saved = 0;
+    QList <QString> list;
+    quint32 position = 0;
     bool jumped = false;
 
     while (offset < static_cast <quint32> (data.length()))
     {
         quint8 length = static_cast <quint8> (data.at(offset));
 
-        if (length == 0)
+        if (!length)
         {
             offset++;
             break;
@@ -63,136 +94,177 @@ QString MDNS::decodeName(const QByteArray &data, quint32 &offset)
         if ((length & 0xC0) == 0xC0)
         {
             if (!jumped)
-                saved = offset + 2;
+                position = offset + 2;
 
-            quint16 pointer = (static_cast <quint16> (length & 0x3F) << 8) | static_cast <quint8> (data.at(offset + 1));
-            offset = pointer;
+            offset = static_cast <quint16> ((length & 0x3F) << 8) | static_cast <quint8> (data.at(offset + 1));
             jumped = true;
             continue;
         }
 
-        offset++;
-
-        if (offset + length > static_cast <quint32> (data.length()))
+        if (++offset + length > static_cast <quint32> (data.length()))
             break;
 
-        labels.append(QString::fromUtf8(data.mid(offset, length)));
+        list.append(QString::fromUtf8(data.mid(offset, length)));
         offset += length;
     }
 
     if (jumped)
-        offset = saved;
+        offset = position;
 
-    return labels.join('.');
+    return list.join('.');
 }
 
 QByteArray MDNS::encodeQuery(const QString &name, DNS::Type type)
 {
-    QByteArray data;
-    quint16 value;
+    dnsHeaderStruct header;
+    dnsQuestionStruct question;
 
-    value = 0; data.append(reinterpret_cast <const char*> (&value), 2);
-    value = 0; data.append(reinterpret_cast <const char*> (&value), 2);
-    value = qToBigEndian <quint16> (1); data.append(reinterpret_cast <const char*> (&value), 2);
-    value = 0; data.append(reinterpret_cast <const char*> (&value), 2);
-    value = 0; data.append(reinterpret_cast <const char*> (&value), 2);
-    value = 0; data.append(reinterpret_cast <const char*> (&value), 2);
+    memset(&header, 0, sizeof(header));
+    header.questions = qToBigEndian <quint16> (1);
 
-    data.append(encodeName(name));
+    question.type = qToBigEndian(static_cast <quint16> (type));
+    question.recordClass = qToBigEndian(static_cast <quint16> (DNS::Class::IN));
 
-    value = qToBigEndian(static_cast <quint16> (type));
-    data.append(reinterpret_cast <const char*> (&value), 2);
+    return QByteArray(reinterpret_cast <char*> (&header), sizeof(header)).append(encodeName(name)).append(reinterpret_cast <char*> (&question), sizeof(question));
+}
 
-    value = qToBigEndian(static_cast <quint16> (DNS::Class::IN));
-    data.append(reinterpret_cast <const char*> (&value), 2);
+DNS::Message MDNS::decodeMessage(const QByteArray &data)
+{
+    DNS::Message message;
+    dnsHeaderStruct header;
+    quint32 offset = sizeof(header);
 
-    return data;
+    if (static_cast <size_t> (data.length()) < sizeof(header))
+        return message;
+
+    memcpy(&header, data.constData(), sizeof(header));
+
+    message.id = qFromBigEndian(header.id);
+    message.flags = qFromBigEndian(header.flags);
+
+    for (quint16 i = 0; i < qFromBigEndian(header.questions) && offset < static_cast <quint32> (data.length()); i++)
+    {
+        DNS::Record record;
+        parseRecord(data, offset, record, true);
+        message.questions.append(record);
+    }
+
+    for (quint16 i = 0; i < qFromBigEndian(header.answers) && offset < static_cast <quint32> (data.length()); i++)
+    {
+        DNS::Record record;
+        parseRecord(data, offset, record);
+        message.answers.append(record);
+    }
+
+    for (quint16 i = 0; i < qFromBigEndian(header.authority) && offset < static_cast <quint32> (data.length()); i++)
+    {
+        DNS::Record record;
+        parseRecord(data, offset, record);
+        message.authority.append(record);
+    }
+
+    for (quint16 i = 0; i < qFromBigEndian(header.additional) && offset < static_cast <quint32> (data.length()); i++)
+    {
+        DNS::Record record;
+        parseRecord(data, offset, record);
+        message.additional.append(record);
+    }
+
+    return message;
 }
 
 void MDNS::parseRecord(const QByteArray &data, quint32 &offset, DNS::Record &record, bool question)
 {
+    dnsQuestionStruct header;
+    quint32 ttl;
+    quint16 length;
+
     record.name = decodeName(data, offset);
 
-    if (offset + 4 > static_cast <quint32> (data.length()))
+    if (offset + sizeof(header) > static_cast <size_t> (data.length()))
         return;
 
-    record.type = static_cast <DNS::Type> (qFromBigEndian <quint16> (data.constData() + offset));
-    offset += 2;
+    memcpy(&header, data.constData() + offset, sizeof(header));
+    offset += sizeof(header);
 
-    record.rrclass = qFromBigEndian <quint16> (data.constData() + offset) & 0x7FFF;
-    offset += 2;
+    record.type = static_cast <DNS::Type> (qFromBigEndian(header.type));
+    record.recordClass = qFromBigEndian(header.recordClass) & MDNS_CLASS_MASK;
 
-    if (question)
+    if (question || offset + sizeof(ttl) + sizeof(length) > static_cast <size_t> (data.length()))
         return;
 
-    if (offset + 6 > static_cast <quint32> (data.length()))
+    memcpy(&ttl, data.constData() + offset, sizeof(ttl));
+    memcpy(&length, data.constData() + offset + sizeof(ttl), sizeof(length));
+
+    record.ttl = qFromBigEndian(ttl);
+    length = qFromBigEndian(length);
+    offset += sizeof(ttl) + sizeof(length);
+
+    if (offset + length > static_cast <quint32> (data.length()))
         return;
 
-    record.ttl = qFromBigEndian <quint32> (data.constData() + offset);
-    offset += 4;
-
-    quint16 rdlength = qFromBigEndian <quint16> (data.constData() + offset);
-    offset += 2;
-
-    if (offset + rdlength > static_cast <quint32> (data.length()))
-        return;
-
-    record.rdata = data.mid(offset, rdlength);
-    quint32 rdataEnd = offset + rdlength;
+    record.data = data.mid(offset, length);
 
     switch (record.type)
     {
         case DNS::Type::PTR:
-            record.ptrName = decodeName(data, offset);
+        {
+            quint32 position = offset;
+            record.pointer = decodeName(data, position);
             break;
+        }
 
         case DNS::Type::SRV:
+        {
+            dnsServiceStruct service;
+            quint32 position = offset + sizeof(service);
 
-            if (rdlength >= 6)
-            {
-                record.srvPriority = qFromBigEndian <quint16> (data.constData() + offset);
-                offset += 2;
-                record.srvWeight = qFromBigEndian <quint16> (data.constData() + offset);
-                offset += 2;
-                record.srvPort = qFromBigEndian <quint16> (data.constData() + offset);
-                offset += 2;
-                record.srvTarget = decodeName(data, offset);
-            }
+            if (length < sizeof(service))
+                break;
 
+            memcpy(&service, data.constData() + offset, sizeof(service));
+
+            record.priority = qFromBigEndian(service.priority);
+            record.weight = qFromBigEndian(service.weight);
+            record.port = qFromBigEndian(service.port);
+            record.target = decodeName(data, position);
             break;
+        }
 
         case DNS::Type::A:
 
-            if (rdlength == 4)
-                record.address = QHostAddress(qFromBigEndian <quint32> (reinterpret_cast <const uchar*> (record.rdata.constData())));
+            if (length == 4)
+                record.address = QHostAddress(qFromBigEndian <quint32> (record.data.constData()));
 
             break;
 
         case DNS::Type::AAAA:
 
-            if (rdlength == 16)
-                record.address = QHostAddress(reinterpret_cast <const quint8*> (record.rdata.constData()));
+            if (length == 16)
+                record.address = QHostAddress(reinterpret_cast <const quint8*> (record.data.constData()));
 
             break;
 
         case DNS::Type::TXT:
         {
-            quint32 pos = 0;
+            quint32 position = 0;
 
-            while (pos < static_cast <quint32> (record.rdata.length()))
+            while (position < static_cast <quint32> (record.data.length()))
             {
-                quint8 len = static_cast <quint8> (record.rdata.at(pos++));
+                quint8 size = static_cast <quint8> (record.data.at(position++));
+                QString item;
+                int index;
 
-                if (pos + len > static_cast <quint32> (record.rdata.length()))
+                if (position + size > static_cast <quint32> (record.data.length()))
                     break;
 
-                QString entry = QString::fromUtf8(record.rdata.mid(pos, len));
-                int eq = entry.indexOf('=');
+                item = QString::fromUtf8(record.data.mid(position, size));
+                index = item.indexOf('=');
 
-                if (eq > 0)
-                    record.txt.insert(entry.left(eq), entry.mid(eq + 1));
+                if (index > 0)
+                    record.text.insert(item.left(index), item.mid(index + 1));
 
-                pos += len;
+                position += size;
             }
 
             break;
@@ -202,110 +274,68 @@ void MDNS::parseRecord(const QByteArray &data, quint32 &offset, DNS::Record &rec
             break;
     }
 
-    offset = rdataEnd;
+    offset += length;
 }
 
-DNS::Message MDNS::decodeMessage(const QByteArray &data)
+void MDNS::parseText(const DNS::Record &record, MatterService &service)
 {
-    DNS::Message msg;
+    QList <QString> list = {"D", "VP", "CM", "DN"};
 
-    if (data.length() < 12)
-        return msg;
-
-    quint32 offset = 0;
-
-    msg.id = qFromBigEndian <quint16> (data.constData() + offset); offset += 2;
-    msg.flags = qFromBigEndian <quint16> (data.constData() + offset); offset += 2;
-
-    quint16 qdcount = qFromBigEndian <quint16> (data.constData() + offset); offset += 2;
-    quint16 ancount = qFromBigEndian <quint16> (data.constData() + offset); offset += 2;
-    quint16 nscount = qFromBigEndian <quint16> (data.constData() + offset); offset += 2;
-    quint16 arcount = qFromBigEndian <quint16> (data.constData() + offset); offset += 2;
-
-    for (quint16 i = 0; i < qdcount && offset < static_cast <quint32> (data.length()); i++)
+    for (auto it = record.text.begin(); it != record.text.end(); it++)
     {
-        DNS::Record record;
-        parseRecord(data, offset, record, true);
-        msg.questions.append(record);
-    }
-
-    for (quint16 i = 0; i < ancount && offset < static_cast <quint32> (data.length()); i++)
-    {
-        DNS::Record record;
-        parseRecord(data, offset, record);
-        msg.answers.append(record);
-    }
-
-    for (quint16 i = 0; i < nscount && offset < static_cast <quint32> (data.length()); i++)
-    {
-        DNS::Record record;
-        parseRecord(data, offset, record);
-        msg.authority.append(record);
-    }
-
-    for (quint16 i = 0; i < arcount && offset < static_cast <quint32> (data.length()); i++)
-    {
-        DNS::Record record;
-        parseRecord(data, offset, record);
-        msg.additional.append(record);
-    }
-
-    return msg;
-}
-
-void MDNS::parseTxtRecord(const DNS::Record &record, MatterService &service)
-{
-    for (auto it = record.txt.begin(); it != record.txt.end(); it++)
-    {
-        if (it.key() == "D")
-            service.discriminator = it.value().toUShort();
-        else if (it.key() == "VP")
+        switch (list.indexOf(it.key()))
         {
-            QList <QString> parts = it.value().split('+');
-            service.vendorId = parts.value(0).toUShort();
-            service.productId = parts.value(1).toUShort();
+            case 0: service.discriminator = it.value().toUShort(); break;
+
+            case 1:
+            {
+                QList <QString> item = it.value().split('+');
+                service.vendorId = item.value(0).toUShort();
+                service.productId = item.value(1).toUShort();
+                break;
+            }
+
+            case 2: service.commissioningMode = static_cast <quint8> (it.value().toUShort()); break;
+            case 3: service.deviceName = it.value(); break;
         }
-        else if (it.key() == "CM")
-            service.commissioningMode = static_cast <quint8> (it.value().toUShort());
-        else if (it.key() == "DN")
-            service.deviceName = it.value();
     }
 }
 
-void MDNS::processMdnsResponse(const DNS::Message &message)
+void MDNS::parseResponse(const DNS::Message &message)
 {
-    QList <DNS::Record> allRecords;
-    allRecords.append(message.answers);
-    allRecords.append(message.additional);
+    QList <DNS::Record> list = message.answers + message.additional;
 
-    for (const DNS::Record &record : allRecords)
+    for (int i = 0; i < list.count(); i++)
     {
-        if (record.type == DNS::Type::PTR && record.name == MATTER_COMMISSION_SERVICE)
-        {
-            MatterService &service = m_services[record.ptrName];
-            service.instanceName = record.ptrName;
-        }
-        else if (record.type == DNS::Type::PTR && record.name == MATTER_OPERATIVE_SERVICE)
-        {
-            MatterService &service = m_services[record.ptrName];
-            service.instanceName = record.ptrName;
-            service.operational = true;
-        }
+        const DNS::Record &record = list.at(i);
+        bool operational = record.name == MATTER_OPERATIONAL_SERVICE;
+
+        if (record.type != DNS::Type::PTR || (!operational && record.name != MATTER_COMMISSIONABLE_SERVICE))
+            continue;
+
+        m_services[record.pointer].instanceName = record.pointer;
+
+        if (!operational)
+            continue;
+
+        m_services[record.pointer].operational = true;
     }
 
-    for (const DNS::Record &record : allRecords)
+    for (int i = 0; i < list.count(); i++)
     {
+        const DNS::Record &record = list.at(i);
+
         for (auto it = m_services.begin(); it != m_services.end(); it++)
         {
             MatterService &service = it.value();
 
             if (record.type == DNS::Type::SRV && record.name == service.instanceName)
             {
-                service.hostName = record.srvTarget;
-                service.port = record.srvPort;
+                service.hostName = record.target;
+                service.port = record.port;
             }
             else if (record.type == DNS::Type::TXT && record.name == service.instanceName)
-                parseTxtRecord(record, service);
+                parseText(record, service);
             else if (record.type == DNS::Type::A && record.name == service.hostName)
                 service.address = record.address;
             else if (record.type == DNS::Type::AAAA && record.name == service.hostName && service.address.isNull())
@@ -315,82 +345,34 @@ void MDNS::processMdnsResponse(const DNS::Message &message)
 
     for (auto it = m_services.begin(); it != m_services.end(); it++)
     {
-        const MatterService &service = it.value();
-
-        if (!service.address.isNull() && service.port)
-        {
-            emit serviceFound(service);
-        }
-    }
-}
-
-void MDNS::browse(void)
-{
-    QByteArray query = encodeQuery(MATTER_COMMISSION_SERVICE, DNS::Type::PTR);
-    m_socket->writeDatagram(query, QHostAddress(MDNS_MULTICAST_ADDR4), MDNS_PORT);
-    m_socket6->writeDatagram(query, QHostAddress(MDNS_MULTICAST_ADDR6), MDNS_PORT);
-
-    QByteArray query2 = encodeQuery(MATTER_OPERATIVE_SERVICE, DNS::Type::PTR);
-    m_socket->writeDatagram(query2, QHostAddress(MDNS_MULTICAST_ADDR4), MDNS_PORT);
-    m_socket6->writeDatagram(query2, QHostAddress(MDNS_MULTICAST_ADDR6), MDNS_PORT);
-
-    logInfo << "MDNS browse for Matter devices (commissionable + operational)";
-    m_browseTimer->start(5000);
-}
-
-void MDNS::stop(void)
-{
-    m_browseTimer->stop();
-}
-
-void MDNS::resolve(const QString &instanceName)
-{
-    Q_UNUSED(instanceName)
-    // TODO: send targeted SRV/TXT/A queries for specific instance
-}
-
-void MDNS::purgeOperational(const QHostAddress &address)
-{
-    // peers that get removed from the fabric should withdraw their mDNS announcement, but some don't
-    // (Shelly 1PM stays on the network and keeps advertising) — drop the cache entry locally so
-    // subsequent browses don't keep finding the ghost
-    for (auto it = m_services.begin(); it != m_services.end(); )
-    {
-        if (it.value().operational && it.value().address == address)
-        {
-            logInfo << "Purging stale operational mDNS entry:" << it.value().instanceName;
-            it = m_services.erase(it);
+        if (it.value().address.isNull() || !it.value().port)
             continue;
-        }
 
-        it++;
+        emit serviceFound(it.value());
     }
 }
 
 void MDNS::readyRead(void)
 {
-    QList <QUdpSocket*> sockets = {m_socket, m_socket6};
+    QList <QUdpSocket*> list = {m_socket4, m_socket6};
 
-    for (QUdpSocket *socket : sockets)
+    for (int i = 0; i < list.count(); i++)
     {
-    while (socket->hasPendingDatagrams())
-    {
-        QByteArray datagram;
-        QHostAddress sender;
-        quint16 senderPort;
+        QUdpSocket *socket = list.at(i);
 
-        datagram.resize(socket->pendingDatagramSize());
-        socket->readDatagram(datagram.data(), datagram.size(), &sender, &senderPort);
+        while (socket->hasPendingDatagrams())
+        {
+            QByteArray data;
+            DNS::Message message;
 
-        DNS::Message msg = decodeMessage(datagram);
+            data.resize(static_cast <int> (socket->pendingDatagramSize()));
+            socket->readDatagram(data.data(), data.size());
+            message = decodeMessage(data);
 
-        if (msg.isResponse())
-            processMdnsResponse(msg);
+            if (!(message.flags & MDNS_FLAG_RESPONSE))
+                continue;
+
+            parseResponse(message);
+        }
     }
-    }
-}
-
-void MDNS::browseTimeout(void)
-{
-    browse();
 }

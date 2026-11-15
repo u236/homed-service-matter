@@ -1,145 +1,294 @@
 // NOT REWIEWED
 
 #include <QProcess>
-#include <QRandomGenerator>
 #include <QtEndian>
-#include "matter.h"
+#include <QRandomGenerator>
 #include "logger.h"
-#include "clusters.h"
+#include "matter.h"
 
 using namespace MatterProtocol;
 
-Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_udp(new QUdpSocket(this)), m_mrp(new MRP(this)), m_mdns(new MDNS(this)), m_ble(new BLE(this)), m_btp(new BTP(this)), m_sessions(new SessionManager(this)), m_searchTimer(new QTimer(this)), m_reconnectTimer(new QTimer(this)), m_pingTimer(new QTimer(this)), m_port(5540), m_debug(false), m_searching(false), m_searchShortDiscriminator(false), m_searchPasscode(0), m_searchDiscriminator(0), m_messageCounter(0), m_exchangeCounter(0), m_sessionCounter(1), m_fabricId(1), m_nodeId(1), m_devices(new DeviceList(config, parent)), m_events(QMetaEnum::fromType <Event> ()), m_threadReady(false), m_threadDatasetTimer(new QTimer(this)), m_bleCommissioning(false)
+static const char base38Alphabet[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-.";
+
+static const int verhoeffD[10][10] = {{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, {1, 2, 3, 4, 0, 6, 7, 8, 9, 5}, {2, 3, 4, 0, 1, 7, 8, 9, 5, 6}, {3, 4, 0, 1, 2, 8, 9, 5, 6, 7}, {4, 0, 1, 2, 3, 9, 5, 6, 7, 8}, {5, 9, 8, 7, 6, 0, 4, 3, 2, 1}, {6, 5, 9, 8, 7, 1, 0, 4, 3, 2}, {7, 6, 5, 9, 8, 2, 1, 0, 4, 3}, {8, 7, 6, 5, 9, 3, 2, 1, 0, 4}, {9, 8, 7, 6, 5, 4, 3, 2, 1, 0}};
+static const int verhoeffP[8][10] = {{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, {1, 5, 7, 6, 2, 8, 3, 0, 9, 4}, {5, 8, 0, 3, 7, 9, 6, 1, 4, 2}, {8, 9, 1, 6, 0, 4, 3, 5, 2, 7}, {9, 4, 5, 3, 1, 2, 6, 8, 7, 0}, {4, 2, 8, 6, 5, 7, 3, 9, 0, 1}, {2, 7, 9, 3, 8, 0, 6, 4, 1, 5}, {7, 0, 4, 6, 9, 1, 3, 2, 5, 8}};
+static const int verhoeffInv[10] = {0, 4, 3, 2, 1, 5, 6, 7, 8, 9};
+
+static QByteArray base38Decode(const QString &string)
 {
-    QByteArray counterBytes = Crypto::randomBytes(sizeof(m_messageCounter));
+    QByteArray data;
 
-    // start message counter from random value to avoid replay detection after restart
-    memcpy(&m_messageCounter, counterBytes.constData(), sizeof(m_messageCounter));
-
-    m_debug = config->value("debug/matter", false).toBool();
-    m_mrp->setDebug(m_debug); // TODO: separate config parameters
-
-    m_wifiSSID = config->value("wifi/ssid").toString();
-    m_wifiPassword = config->value("wifi/password").toString();
-
-    m_otbrUrl = config->value("thread/otbr").toString();
-
-    // probe OTBR right away; if it isn't up yet (matter started before otbr after host reboot), start a 5s
-    // retry timer. m_threadReady stays false until we successfully fetch a dataset — that flag gates outgoing
-    // traffic to Thread peers so we don't pile MRP retransmits onto a dead route, and gates startup subscribe
-    // for restored Thread sessions so we don't burst-flood peers when the radio finally comes up
-    if (!m_otbrUrl.isEmpty() && !fetchThreadDataset())
+    for (int i = 0; i < string.length(); i += 5)
     {
-        connect(m_threadDatasetTimer, &QTimer::timeout, this, &Matter::threadDatasetTimeout);
-        m_threadDatasetTimer->start(5000);
+        int length = qMin(string.length() - i, 5);
+        quint32 value = 0, base = 1;
+
+        for (int j = 0; j < length; j++)
+        {
+            const char *pointer = strchr(base38Alphabet, string.at(i + j).toLatin1());
+
+            if (!pointer)
+                return QByteArray();
+
+            value += static_cast <quint32> (pointer - base38Alphabet) * base;
+            base *= 38;
+        }
+
+        for (int j = 0; j < (length == 5 ? 3 : length == 4 ? 2 : 1); j++)
+        {
+            data.append(static_cast <char> (value & 0xFF));
+            value >>= 8;
+        }
     }
 
-    connect(m_udp, &QUdpSocket::readyRead, this, &Matter::readyRead);
+    return data;
+}
+
+static QString base38Encode(const QByteArray &data)
+{
+    QString string;
+
+    for (int i = 0; i < data.length(); i += 3)
+    {
+        int length = qMin(data.length() - i, 3);
+        quint32 value = 0;
+
+        for (int j = length - 1; j >= 0; j--)
+            value = (value << 8) | static_cast <quint8> (data.at(i + j));
+
+        for (int j = 0; j < (length == 3 ? 5 : length == 2 ? 4 : 2); j++)
+        {
+            string.append(QLatin1Char(base38Alphabet[value % 38]));
+            value /= 38;
+        }
+    }
+
+    return string;
+}
+
+static int verhoeffChecksum(const QString &digits)
+{
+    int value = 0;
+
+    for (int i = digits.length() - 1; i >= 0; i--)
+        value = verhoeffD[value][verhoeffP[(digits.length() - i) % 8][digits.at(i).digitValue()]];
+
+    return verhoeffInv[value];
+}
+
+static bool parseQrCode(const QString &code, quint32 &passcode, quint16 &discriminator)
+{
+    QByteArray data = base38Decode(code.mid(3));
+    quint64 low;
+    quint32 high = 0;
+
+    if (!code.startsWith("MT:") || data.length() < 11)
+        return false;
+
+    // 88-bit payload: version (3), vendor id (16), product id (16), commissioning flow (2), rendezvous flags (8), discriminator (12), passcode (27), padding (4)
+    memcpy(&low, data.constData(), sizeof(low));
+    memcpy(&high, data.constData() + 8, 3);
+
+    low = qFromLittleEndian(low);
+    high = qFromLittleEndian(high);
+
+    discriminator = static_cast <quint16> ((low >> 45) & 0xFFF);
+    passcode = static_cast <quint32> (((low >> 57) | (static_cast <quint64> (high) << 7)) & 0x7FFFFFF);
+
+    return passcode && passcode <= 99999998;
+}
+
+static bool parseManualCode(const QString &code, quint32 &passcode, quint16 &discriminator)
+{
+    QString digits;
+    quint32 chunk1, chunk2, chunk3;
+
+    for (int i = 0; i < code.length(); i++)
+    {
+        if (!code.at(i).isDigit())
+            continue;
+
+        digits.append(code.at(i));
+    }
+
+    if (digits.length() != 11 && digits.length() != 21)
+        return false;
+
+    chunk1 = digits.mid(0, 1).toUInt();
+    chunk2 = digits.mid(1, 5).toUInt();
+    chunk3 = digits.mid(6, 4).toUInt();
+
+    // 4-bit short discriminator and 27-bit passcode
+    discriminator = static_cast <quint16> (((chunk1 & 0x03) << 2) | ((chunk2 >> 14) & 0x03));
+    passcode = (chunk2 & 0x3FFF) | (chunk3 << 14);
+
+    return passcode && passcode <= 99999998;
+}
+
+static QString generateManualCode(quint32 passcode, quint16 discriminator)
+{
+    quint8 shortDiscriminator = (discriminator >> 8) & 0x0F;
+    quint32 chunk1 = (shortDiscriminator >> 2) & 0x03, chunk2 = ((shortDiscriminator & 0x03) << 14) | (passcode & 0x3FFF), chunk3 = (passcode >> 14) & 0x1FFF;
+    QString digits = QString("%1%2%3").arg(chunk1, 1, 10, QLatin1Char('0')).arg(chunk2, 5, 10, QLatin1Char('0')).arg(chunk3, 4, 10, QLatin1Char('0'));
+
+    return digits.append(QString::number(verhoeffChecksum(digits)));
+}
+
+static QString generateQrCode(quint32 passcode, quint16 discriminator)
+{
+    quint64 low = static_cast <quint64> (2) << 35 | static_cast <quint64> (4) << 37 | static_cast <quint64> (discriminator & 0xFFF) << 45 | static_cast <quint64> (passcode & 0x7F) << 57;
+    quint32 high = qToLittleEndian <quint32> ((passcode >> 7) & 0xFFFFF);
+
+    // version, vendor id and product id are zero, commissioning flow is enhanced, rendezvous is BLE
+    low = qToLittleEndian(low);
+    return QString("MT:").append(base38Encode(QByteArray(reinterpret_cast <char*> (&low), sizeof(low)).append(reinterpret_cast <char*> (&high), 3)));
+}
+
+static QByteArray threadExtendedPanId(const QByteArray &dataset)
+{
+    int offset = 0;
+
+    // MeshCoP TLV, type 2 is extended PAN ID
+    while (offset + 1 < dataset.length())
+    {
+        quint8 type = static_cast <quint8> (dataset.at(offset++));
+        quint16 length = static_cast <quint8> (dataset.at(offset++));
+
+        if (length == 0xFF)
+        {
+            if (offset + 2 > dataset.length())
+                return QByteArray();
+
+            length = static_cast <quint16> (static_cast <quint8> (dataset.at(offset)) << 8 | static_cast <quint8> (dataset.at(offset + 1)));
+            offset += 2;
+        }
+
+        if (offset + length > dataset.length())
+            return QByteArray();
+
+        if (type == 2 && length == 8)
+            return dataset.mid(offset, 8);
+
+        offset += length;
+    }
+
+    return QByteArray();
+}
+
+static QByteArray otbrRequest(const QString &url, const QString &path)
+{
+    QProcess process;
+
+    process.start("curl", {"-fsS", "-H", "Accept: text/plain", "--max-time", "5", QString("http://%1%2").arg(url, path)});
+    process.waitForFinished(THREAD_DATASET_TIMEOUT);
+
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode())
+        return QByteArray();
+
+    return process.readAllStandardOutput().trimmed();
+}
+
+Matter::Matter(QSettings *config, QObject *parent) : QObject(parent), m_searchTimer(new QTimer(this)), m_reconnectTimer(new QTimer(this)), m_pingTimer(new QTimer(this)), m_threadTimer(new QTimer(this)), m_socket(new QUdpSocket(this)), m_mrp(new MRP(this)), m_mdns(new MDNS(this)), m_ble(new BLE(this)), m_btp(new BTP(this)), m_sessions(new SessionManager(this)), m_devices(new DeviceList(config, parent)), m_events(QMetaEnum::fromType <Event> ()), m_threadReady(false), m_fabricId(1), m_nodeId(1), m_rootCaId(0), m_exchangeCounter(0), m_sessionCounter(1), m_searching(false), m_shortDiscriminator(false), m_bleCommissioning(false), m_commissioning(false), m_passcode(0), m_discriminator(0), m_searchNodeId(0), m_commissionDevice(nullptr), m_removeDevice(nullptr)
+{
+    QByteArray data = Crypto::randomData(sizeof(m_messageCounter));
+
+    // random message counter avoids replay detection after restart
+    memcpy(&m_messageCounter, data.constData(), sizeof(m_messageCounter));
+
+    m_debug = config->value("debug/matter", false).toBool();
+    m_wifiSsid = config->value("wifi/ssid").toString();
+    m_wifiPassword = config->value("wifi/password").toString();
+    m_otbrUrl = config->value("thread/otbr").toString();
+
+    m_mrp->setDebug(m_debug); // TODO: separate config parameters
+
     connect(m_searchTimer, &QTimer::timeout, this, &Matter::searchTimeout);
     connect(m_reconnectTimer, &QTimer::timeout, this, &Matter::reconnectTimeout);
     connect(m_pingTimer, &QTimer::timeout, this, &Matter::pingTimeout);
+    connect(m_threadTimer, &QTimer::timeout, this, &Matter::threadTimeout);
+    connect(m_socket, &QUdpSocket::readyRead, this, &Matter::readyRead);
 
-    connect(m_mrp, &MRP::retransmit, this, &Matter::mrpRetransmit);
-    connect(m_mrp, &MRP::retransmitFailed, this, &Matter::mrpRetransmitFailed);
-    connect(m_mrp, &MRP::sendStandaloneAck, this, &Matter::mrpSendStandaloneAck);
-    connect(m_mdns, &MDNS::serviceFound, this, &Matter::mdnsServiceFound);
+    connect(m_mrp, &MRP::retransmit, this, &Matter::retransmit);
+    connect(m_mrp, &MRP::retransmitFailed, this, &Matter::retransmitFailed);
+    connect(m_mrp, &MRP::sendStandaloneAck, this, &Matter::sendStandaloneAck);
+    connect(m_mdns, &MDNS::serviceFound, this, &Matter::serviceFound);
 
     connect(m_ble, &BLE::deviceFound, this, &Matter::bleDeviceFound);
     connect(m_ble, &BLE::connected, this, &Matter::bleConnected);
     connect(m_ble, &BLE::disconnected, this, &Matter::bleDisconnected);
     connect(m_ble, &BLE::dataReceived, this, &Matter::bleDataReceived);
-    connect(m_btp, &BTP::handshakeComplete, this, &Matter::btpHandshakeComplete);
+
+    connect(m_btp, &BTP::handshakeFinished, this, &Matter::btpHandshakeFinished);
     connect(m_btp, &BTP::messageReceived, this, &Matter::btpMessageReceived);
     connect(m_btp, &BTP::writeData, this, &Matter::btpWriteData);
 
     m_searchTimer->setSingleShot(true);
     m_reconnectTimer->setSingleShot(true);
-    m_pingTimer->start(10000);
+    m_pingTimer->start(PING_INTERVAL);
 
-    m_caseNeedsCommissioningComplete = false;
-    m_pendingCommissionDevice = nullptr;
-    m_pendingRemoveDevice = nullptr;
+    // OTBR may start later than this service, Thread peers are not reachable until it's ready
+    if (!m_otbrUrl.isEmpty() && !fetchThreadDataset())
+        m_threadTimer->start(THREAD_DATASET_INTERVAL);
 
-    if (!m_udp->bind(QHostAddress::Any, m_port))
+    if (!m_socket->bind(QHostAddress::Any, MATTER_PORT))
     {
-        logWarning << "Failed to bind UDP port" << m_port;
+        logWarning << "Matter UDP port" << MATTER_PORT << "bind failed";
         return;
     }
 
-    logInfo << "Matter controller listening on port" << m_port;
-
+    logInfo << "Matter controller listening on port" << MATTER_PORT;
     m_devices->init();
 
     for (int i = 0; i < m_devices->count(); i++)
-        connectDeviceSignals(m_devices->at(i).data());
-
-    // restore persisted secure sessions ONLY for battery-powered devices: for them CASE on restart wakes the radio
-    // (battery hit) and waits tens of seconds on slow MRP intervals; mains devices fall through to normal CASE +
-    // resumption which is ~200ms anyway, with no risk of stale-session MRP timeout
-    for (int i = 0; i < m_devices->count(); i++)
     {
-        DeviceObject *device = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
+        const Device &device = m_devices->at(i);
+        SessionInfo session;
 
-        if (!device->hasPersistedSession() || !device->batteryPowered())
+        connect(device.data(), &DeviceObject::deviceUpdated, this, &Matter::deviceUpdated, Qt::UniqueConnection);
+        connect(device.data(), &DeviceObject::endpointUpdated, this, &Matter::endpointUpdated, Qt::UniqueConnection);
+
+        // sessions are restored for battery powered devices only, CASE handshake wakes up their radio and takes long time
+        if (!device->sessionStored() || !device->batteryPowered())
             continue;
 
-        SessionInfo session;
-        session.localSessionId = device->sessionLocalId();
-        session.peerSessionId = device->sessionPeerId();
-        session.i2rKey = device->sessionI2RKey();
-        session.r2iKey = device->sessionR2IKey();
-        session.attestationChallenge = device->sessionAttestation();
-        session.peerNodeId = device->nodeId();
-        session.peerAddress = device->networkAddress();
-        session.peerPort = device->networkPort();
-        // safety margin: counter must be strictly monotonic across restarts; bump past anything that may have been used
-        // since the last persist. 10000 is overkill for our tx rate but cheap (32-bit space ~4B values).
-        session.localMessageCounter = device->sessionLocalCounter() + 10000;
-        session.idleInterval = device->sessionIdleInterval();
-        session.activeInterval = device->sessionActiveInterval();
-        session.activeThreshold = device->sessionActiveThreshold();
-        session.active = true;
-
+        device->restoreSession(session);
+        session.localMessageCounter += SESSION_COUNTER_MARGIN; // message counter must be strictly monotonic across restarts
         m_sessions->addSession(session);
 
-        // bump counter so a new CASE (if needed later) won't collide with the restored localSessionId
         if (m_sessionCounter <= session.localSessionId)
             m_sessionCounter = session.localSessionId + 1;
 
-        logInfo << device << "restored secure session, local:" << session.localSessionId << "peer:" << session.peerSessionId << "counter from:" << session.localMessageCounter;
+        logInfo << device << "secure session" << session.localSessionId << "restored, peer session" << session.peerSessionId << "message counter" << session.localMessageCounter;
 
-        // peer's subscription state may have timed out while we were down (max interval passed without our acks),
-        // re-subscribe to be safe — if the old subscription still exists peer will replace it. Thread-routed
-        // peers wait for OTBR readiness: until m_threadReady flips we have no route to mesh-local addresses,
-        // so subscribing now would just queue MRP retransmits that would all storm out at once when the route
-        // appears, prompting BUSY responses from peers
         if (device->endpoints().isEmpty())
             continue;
 
+        // Thread peers stay offline until OTBR is ready, otherwise MRP retransmits storm out when route appears
         if (device->thread() && !m_threadReady)
         {
-            // device stays Offline until the first packet round-trip succeeds via resumeThreadDevices()
             device->setAvailability(Availability::Offline);
             continue;
         }
 
-        subscribeDevice(device, m_sessions->findByLocalId(session.localSessionId));
+        // peer subscription may expire while service is down
+        subscribeDevice(device.data(), m_sessions->byLocalId(session.localSessionId));
     }
 
     if (m_devices->fabricKey().isEmpty())
     {
-        QByteArray fabricKey = Crypto::randomBytes(32), ipk = Crypto::randomBytes(16), operationalKey = Crypto::randomBytes(32), rcacIdBytes = Crypto::randomBytes(8);
-        quint64 rootCAId;
+        QByteArray fabricKey = Crypto::randomData(32), ipk = Crypto::randomData(16), operationalKey = Crypto::randomData(32), id = Crypto::randomData(8);
+        quint64 rootCaId;
 
-        logInfo << "Generated new fabric credentials";
-        memcpy(&rootCAId, rcacIdBytes.constData(), 8);
+        logInfo << "New fabric credentials generated";
+        memcpy(&rootCaId, id.constData(), sizeof(rootCaId));
 
-        setFabricCredentials(fabricKey, rootCAId, ipk, operationalKey);
-        m_devices->setFabricCredentials(fabricKey, rootCAId, ipk, operationalKey, m_controllerNOC, m_controllerRCAC);
-        m_devices->store(true);
+        setFabricCredentials(fabricKey, ipk, operationalKey, QByteArray(), QByteArray(), rootCaId);
+        m_devices->setFabricCredentials(m_fabricKey, m_ipk, m_operationalKey, m_controllerNoc, m_controllerRcac, m_rootCaId);
+        m_devices->storeDatabase(true);
+        return;
     }
-    else
-        setFabricCredentials(m_devices->fabricKey(), m_devices->rootCAId(), m_devices->ipk(), m_devices->operationalKey(), m_devices->controllerNOC(), m_devices->controllerRCAC());
+
+    setFabricCredentials(m_devices->fabricKey(), m_devices->ipk(), m_devices->operationalKey(), m_devices->controllerNoc(), m_devices->controllerRcac(), m_devices->rootCaId());
 }
 
 Matter::~Matter(void)
@@ -147,389 +296,71 @@ Matter::~Matter(void)
     delete m_devices;
 }
 
-bool Matter::fetchThreadDataset(void)
+void Matter::connectDevice(const QString &code)
 {
-    auto probe = [this](const QString &path) -> QByteArray
+    bool qrCode = code.startsWith("MT:");
+    quint32 passcode;
+    quint16 discriminator;
+    quint64 nodeId;
+
+    if (qrCode ? !parseQrCode(code, passcode, discriminator) : !parseManualCode(code, passcode, discriminator))
     {
-        QProcess curl;
-
-        curl.start("curl", {"-fsS", "-H", "Accept: text/plain", "--max-time", "5", QString("http://%1%2").arg(m_otbrUrl, path)});
-        curl.waitForFinished(6000);
-
-        if (curl.exitStatus() != QProcess::NormalExit || curl.exitCode() != 0)
-            return QByteArray();
-
-        return curl.readAllStandardOutput().trimmed();
-    };
-
-    // dataset alone isn't enough: OTBR's REST replies as soon as it loaded the active operational dataset from disk,
-    // but the radio may still be in detached/disabled state with no wpan0 routes installed. talking to peers in that
-    // window gets nowhere — packets either go to a missing route or sit in MRP retransmits that storm out when
-    // routing finally appears, which is exactly what triggers the BUSY-CASE death loop on ICDs. wait for Thread
-    // state to be in mesh (child/router/leader) before declaring ready
-    QByteArray state = probe("/node/state");
-
-    if (state.isEmpty())
-        return false;
-
-    // state body is JSON-quoted ("leader") under Accept: text/plain too; strip quotes for the comparison
-    if (state.startsWith('"') && state.endsWith('"'))
-        state = state.mid(1, state.size() - 2);
-
-    if (!QList <QByteArray> {"child", "router", "leader"}.contains(state))
-    {
-        logDebug(m_debug) << "Thread state not ready:" << state;
-        return false;
-    }
-
-    QByteArray dataset = QByteArray::fromHex(probe("/node/dataset/active"));
-    QByteArray extPanId = extractThreadExtPanId(dataset);
-
-    if (extPanId.isEmpty())
-        return false;
-
-    m_threadDataset = dataset;
-    m_threadExtPanId = extPanId;
-    m_threadReady = true;
-
-    logInfo << "Thread dataset fetched from" << m_otbrUrl << ", state:" << state << "ExtPanId:" << m_threadExtPanId.toHex();
-
-    return true;
-}
-
-void Matter::threadDatasetTimeout(void)
-{
-    if (!fetchThreadDataset())
+        logWarning << "Invalid" << (qrCode ? "QR" : "manual") << "code" << code;
         return;
-
-    m_threadDatasetTimer->stop();
-    resumeThreadDevices();
-}
-
-void Matter::resumeThreadDevices(void)
-{
-    // OTBR just came up and the host now has a route into the Thread mesh. Wake Thread peers the same way
-    // cold start does: peers with a session restored from disk get a subscribe directly, peers without get
-    // a fresh CASE via reconnect-pipeline. No stagger — burst at startup has never been a problem here.
-    bool needReconnect = false;
-
-    for (int i = 0; i < m_devices->count(); i++)
-    {
-        DeviceObject *device = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
-
-        if (!device->thread() || device->endpoints().isEmpty())
-            continue;
-
-        SessionInfo *session = m_sessions->findByPeerNodeId(device->nodeId());
-
-        if (session)
-            subscribeDevice(device, session);
-        else
-        {
-            device->setNextReconnectAt(0);
-            needReconnect = true;
-        }
     }
 
-    if (needReconnect)
-        scheduleReconnect();
-}
+    nodeId = m_devices->generateNodeId();
 
-void Matter::setFabricCredentials(const QByteArray &fabricKey, quint64 rootCAId, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNOC, const QByteArray &controllerRCAC)
-{
-    m_fabricKey = fabricKey;
-    m_rootCAId = rootCAId;
-    m_ipk = ipk;
-    m_operationalKey = operationalKey;
-
-    ECPoint fabricPub = ECPoint::fromMultiply(ECPoint::generator(), BigNum(m_fabricKey).bn());
-    m_fabricPublicKey = fabricPub.toUncompressed();
-
-    ECPoint opPub = ECPoint::fromMultiply(ECPoint::generator(), BigNum(m_operationalKey).bn());
-    m_operationalPubKey = opPub.toUncompressed();
-
-    if (!controllerNOC.isEmpty() && !controllerRCAC.isEmpty())
-    {
-        m_controllerNOC = controllerNOC;
-        m_controllerRCAC = controllerRCAC;
-    }
-    else
-    {
-        m_controllerRCAC = generateFabricCert(m_fabricId, 0, m_fabricPublicKey, true);
-        m_controllerNOC = generateFabricCert(m_fabricId, m_nodeId, m_operationalPubKey, false);
-    }
-
-    logInfo << "Fabric credentials loaded, rootCAId:" << QString::number(m_rootCAId, 16);
+    logInfo << "Adding device with passcode" << passcode << "and" << (qrCode ? "full" : "short") << "discriminator" << discriminator << "as node" << QString::number(nodeId, 16) << "...";
+    searchDevice(passcode, discriminator, !qrCode, nodeId);
 }
 
 void Matter::connectDevice(DeviceObject *device)
 {
-    // OTBR not up yet — Thread mesh has no route from this host, CASE Sigma1 would queue MRP retransmits
-    // and storm out when the route appears, prompting peer BUSY. resumeThreadDevices() will retry once ready
+    PendingCase pending;
+
+    // Thread peers are not reachable until OTBR is ready, resumeThreadDevices will retry later
     if (device->thread() && !m_threadReady)
     {
-        logDebug(m_debug) << device << "Thread not ready, deferring CASE";
+        logDebug(m_debug) << device << "CASE deferred, Thread network is not ready";
         return;
     }
 
-    SessionInfo *existing = m_sessions->findByPeerNodeId(device->nodeId());
-
-    if (existing && existing->active)
+    if (m_sessions->byPeerNodeId(device->nodeId()))
     {
-        logDebug(m_debug) << device << "already have active session";
+        logDebug(m_debug) << device << "already has active session";
         return;
     }
 
-    // already a CASE in flight for this device — don't pile up another
-    for (auto it = m_pendingCASEs.begin(); it != m_pendingCASEs.end(); it++)
+    if (caseInProgress(device))
     {
-        if (it.value().device == device)
-        {
-            logDebug(m_debug) << device << "CASE already in progress";
-            return;
-        }
-    }
-
-    QHostAddress address = device->networkAddress();
-    quint16 port = device->networkPort();
-
-    if (address.isNull())
-    {
-        logWarning << device << "no address known";
+        logDebug(m_debug) << device << "CASE already in progress";
         return;
     }
 
-    CASESession *session = new CASESession(this);
+    if (device->networkAddress().isNull())
+    {
+        logWarning << device << "network address is unknown";
+        return;
+    }
 
-    connect(session, &CASESession::sendSigma1, this, &Matter::caseSendSigma1);
-    connect(session, &CASESession::sendSigma3, this, &Matter::caseSendSigma3);
-    connect(session, &CASESession::established, this, &Matter::caseEstablished);
-    connect(session, &CASESession::failed, this, &Matter::caseFailed);
-
-    PendingCASE pending;
-    pending.session = session;
+    pending.session = new CASESession(this);
     pending.device = device;
+    pending.address = device->networkAddress();
+    pending.port = device->networkPort();
     pending.exchangeId = m_exchangeCounter++;
-    pending.address = address;
-    pending.port = port;
-    pending.needsCommissioningComplete = m_caseNeedsCommissioningComplete;
-    m_pendingCASEs.insert(pending.exchangeId, pending);
+    pending.commissioning = m_commissioning;
 
-    // global "post-commissioning CASE pending" flag is now consumed by this PendingCASE entry
-    m_caseNeedsCommissioningComplete = false;
+    connect(pending.session, &CASESession::sendSigma1, this, &Matter::caseSendSigma1);
+    connect(pending.session, &CASESession::sendSigma3, this, &Matter::caseSendSigma3);
+    connect(pending.session, &CASESession::established, this, &Matter::caseEstablished);
+    connect(pending.session, &CASESession::failed, this, &Matter::caseFailed);
 
-    quint16 sessionId = m_sessionCounter++;
+    m_pendingCases.insert(pending.exchangeId, pending);
+    m_commissioning = false;
 
-    logInfo << device << "starting CASE at" << address.toString() << ":" << port;
-
-    session->start(sessionId, device->nodeId(),
-                   m_fabricKey, m_fabricPublicKey,
-                   m_operationalKey, m_operationalPubKey,
-                   m_fabricId, m_nodeId, m_rootCAId,
-                   m_ipk, m_controllerNOC, m_controllerRCAC,
-                   device->resumptionID(), device->resumptionSharedSecret());
-}
-
-void Matter::discoverDevice(DeviceObject *device)
-{
-    SessionInfo *session = m_sessions->findByPeerNodeId(device->nodeId());
-
-    if (!session || !session->active)
-        return;
-
-    logInfo << device << "discovering endpoints";
-
-    // step 1: read PartsList from endpoint 0
-    QList <AttributePath> paths;
-    paths.append(AttributePath(0, Clusters::Descriptor::Id, Clusters::Descriptor::Attributes::PartsList));
-
-    QByteArray payload = InteractionModel::encodeReadRequest(paths);
-    sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
-}
-
-QList <AttributePath> Matter::buildSubscribePaths(DeviceObject *device)
-{
-    QList <AttributePath> paths;
-
-    for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
-    {
-        quint8 epId = it.key();
-        EndpointObject *ep = reinterpret_cast <EndpointObject*> (it.value().data());
-        const QList <quint32> &clusters = ep->clusters();
-        quint16 caps = static_cast <quint16> (ep->meta().value("colorCapabilities").toInt());
-
-        if (clusters.contains(Clusters::OnOff::Id))
-        {
-            paths.append(AttributePath(epId, Clusters::OnOff::Id, Clusters::OnOff::Attributes::OnOff));
-
-            // StartUpOnOff is mandatory only when the LT (Lighting) feature is advertised; on plain on/off
-            // relays it's optional and reading it would risk UNSUPPORTED_ATTRIBUTE on the whole subscription
-            if (ep->meta().value("onOffFeatures").toUInt() & Clusters::OnOff::Features::LT)
-                paths.append(AttributePath(epId, Clusters::OnOff::Id, Clusters::OnOff::Attributes::StartUpOnOff));
-        }
-
-        if (clusters.contains(Clusters::LevelControl::Id))
-            paths.append(AttributePath(epId, Clusters::LevelControl::Id, Clusters::LevelControl::Attributes::CurrentLevel));
-
-        if (clusters.contains(Clusters::ColorControl::Id))
-        {
-            if (caps & 0x0001)
-            {
-                paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentHue));
-                paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentSaturation));
-            }
-
-            if (caps & 0x0010)
-                paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTemperatureMireds));
-
-            if ((caps & 0x0011) == 0x0011)
-                paths.append(AttributePath(epId, Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorMode));
-        }
-
-        if (clusters.contains(Clusters::PowerSource::Id))
-            paths.append(AttributePath(epId, Clusters::PowerSource::Id, Clusters::PowerSource::Attributes::BatPercentRemaining));
-
-        if (clusters.contains(Clusters::BooleanState::Id))
-            paths.append(AttributePath(epId, Clusters::BooleanState::Id, Clusters::BooleanState::Attributes::StateValue));
-
-        if (clusters.contains(Clusters::OccupancySensing::Id))
-            paths.append(AttributePath(epId, Clusters::OccupancySensing::Id, Clusters::OccupancySensing::Attributes::Occupancy));
-
-        if (clusters.contains(Clusters::TemperatureMeasurement::Id))
-            paths.append(AttributePath(epId, Clusters::TemperatureMeasurement::Id, Clusters::TemperatureMeasurement::Attributes::MeasuredValue));
-
-        if (clusters.contains(Clusters::RelativeHumidityMeasurement::Id))
-            paths.append(AttributePath(epId, Clusters::RelativeHumidityMeasurement::Id, Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue));
-
-        if (clusters.contains(Clusters::ElectricalPowerMeasurement::Id))
-        {
-            quint32 powerFeatures = ep->meta().value("powerFeatures").toUInt();
-
-            // AC peers report RMS variants (V/A); DC peers use generic Voltage/ActiveCurrent — pick whichever
-            // matches the cluster's declared domain
-            if (powerFeatures & Clusters::ElectricalPowerMeasurement::Features::ALTC)
-            {
-                paths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::RMSVoltage));
-                paths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::RMSCurrent));
-                paths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::Frequency));
-            }
-            else if (powerFeatures & Clusters::ElectricalPowerMeasurement::Features::DIRC)
-            {
-                paths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::Voltage));
-                paths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::ActiveCurrent));
-            }
-
-            paths.append(AttributePath(epId, Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::ActivePower));
-        }
-
-        if (clusters.contains(Clusters::ElectricalEnergyMeasurement::Id))
-            paths.append(AttributePath(epId, Clusters::ElectricalEnergyMeasurement::Id, Clusters::ElectricalEnergyMeasurement::Attributes::CumulativeEnergyImported));
-    }
-
-    return paths;
-}
-
-QList <EventPath> Matter::buildSubscribeEvents(DeviceObject *device)
-{
-    QList <EventPath> events;
-
-    // subscribe only to events the action handler actually consumes for the FeatureMap advertised by the
-    // endpoint. over-subscribing inflates path count (IKEA BILRESA with 9 Switch endpoints rejects 9×7=63
-    // paths with PathsExhausted) and we don't synthesize anything from the events we drop anyway.
-    for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
-    {
-        EndpointObject *ep = reinterpret_cast <EndpointObject*> (it.value().data());
-
-        if (!ep->clusters().contains(Clusters::Switch::Id))
-            continue;
-
-        quint32 features = ep->meta().value("switchFeatures").toUInt();
-        quint8 cap = static_cast <quint8> (ep->meta().value("switchMultiPressMax").toUInt());
-        bool encoder = (features & Clusters::Switch::Features::MSM) && !(features & Clusters::Switch::Features::MSL) && cap > 5;
-
-        if (features & Clusters::Switch::Features::LS)
-            events.append(EventPath(it.key(), Clusters::Switch::Id, Clusters::Switch::Events::SwitchLatched, true));
-
-        // encoder endpoints want a "start" indication when rotation begins (InitialPress fires once at the
-        // beginning of a burst before MultiPressComplete reports the total). regular buttons don't need it —
-        // we synthesize their action from ShortRelease/MultiPressComplete only.
-        if (encoder)
-            events.append(EventPath(it.key(), Clusters::Switch::Id, Clusters::Switch::Events::InitialPress, true));
-
-        // ShortRelease is emitted only when MSM is absent (Matter §1.13.6.4); with MSM the peer reports
-        // press counts via MultiPressComplete instead and we map each count to a click action there.
-        if ((features & Clusters::Switch::Features::MSR) && !(features & Clusters::Switch::Features::MSM))
-            events.append(EventPath(it.key(), Clusters::Switch::Id, Clusters::Switch::Events::ShortRelease, true));
-
-        if (features & Clusters::Switch::Features::MSL)
-        {
-            events.append(EventPath(it.key(), Clusters::Switch::Id, Clusters::Switch::Events::LongPress, true));
-            events.append(EventPath(it.key(), Clusters::Switch::Id, Clusters::Switch::Events::LongRelease, true));
-        }
-
-        if (features & Clusters::Switch::Features::MSM)
-            events.append(EventPath(it.key(), Clusters::Switch::Id, Clusters::Switch::Events::MultiPressComplete, true));
-    }
-
-    return events;
-}
-
-void Matter::subscribeDevice(DeviceObject *device, SessionInfo *session)
-{
-    if (!session)
-        return;
-
-    QList <AttributePath> paths = buildSubscribePaths(device);
-    QList <EventPath> events = buildSubscribeEvents(device);
-
-    if (paths.isEmpty() && events.isEmpty())
-        return;
-
-    logInfo << device << "subscribing to" << paths.count() << "attributes," << events.count() << "events";
-    // peer dumps its event history in the priming ReportData (Matter §8.5.7 — priming arrives before SubscribeResponse).
-    // we don't want those replayed buffered clicks to fire automations on every restart, so flag the device as
-    // "not yet primed" and drop event reports until SubscribeResponse confirms we're past the priming dump.
-    device->setSubscriptionPrimed(false);
-    QByteArray subPayload = InteractionModel::encodeSubscribeRequest(paths, events, 0, 60);
-    sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::SubscribeRequest), static_cast <quint16> (ProtocolId::InteractionModel), subPayload, m_exchangeCounter++, true);
-}
-
-void Matter::connectDeviceSignals(DeviceObject *device)
-{
-    connect(device, &DeviceObject::deviceUpdated, this, &Matter::deviceUpdated, Qt::UniqueConnection);
-    connect(device, &DeviceObject::endpointUpdated, this, &Matter::endpointUpdated, Qt::UniqueConnection);
-}
-
-void Matter::connectDevice(const QString &code)
-{
-    quint32 passcode;
-    quint16 discriminator;
-    bool shortDiscriminator;
-
-    if (code.startsWith("MT:"))
-    {
-        if (!parseQRCode(code, passcode, discriminator))
-        {
-            logWarning << "Invalid QR code:" << code;
-            return;
-        }
-
-        shortDiscriminator = false;
-    }
-    else
-    {
-        if (!parseManualCode(code, passcode, discriminator))
-        {
-            logWarning << "Invalid manual code:" << code;
-            return;
-        }
-
-        shortDiscriminator = true;
-    }
-
-    quint64 nodeId = m_devices->generateNodeId();
-    logInfo << "Adding device, passcode:" << passcode << "discriminator:" << discriminator << (shortDiscriminator ? "(short)" : "(full)") << "nodeId:" << QString::number(nodeId, 16);
-    connectDevice(passcode, discriminator, shortDiscriminator, nodeId);
+    logInfo << device << "starting CASE with" << pending.address.toString() << "port" << pending.port << "...";
+    pending.session->start(m_sessionCounter++, device->nodeId(), m_fabricId, m_fabricPublicKey, m_operationalKey, m_ipk, m_controllerNoc, device->resumptionId(), device->resumptionSecret());
 }
 
 void Matter::discoverDevice(const QString &deviceName)
@@ -542,12 +373,12 @@ void Matter::discoverDevice(const QString &deviceName)
         return;
     }
 
-    DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
+    emit deviceEvent(device.data(), Event::aboutToUpdate);
 
-    emit deviceEvent(obj, Event::aboutToUpdate);
-    obj->endpoints().clear();
-    m_devices->store(true);
-    discoverDevice(obj);
+    device->endpoints().clear();
+    m_devices->storeDatabase(true);
+
+    discoverDevice(device.data());
 }
 
 void Matter::shareDevice(const QString &deviceName, quint16 timeout)
@@ -556,14 +387,11 @@ void Matter::shareDevice(const QString &deviceName, quint16 timeout)
 
     if (device.isNull() || !device->active())
     {
-        logWarning << "Device" << deviceName << "share failed, not found or offline";
+        logWarning << "Device" << deviceName << "share failed, device not found or inactive";
         return;
     }
 
-    if (timeout < 180) timeout = 180;
-    if (timeout > 900) timeout = 900;
-
-    shareDevice(reinterpret_cast <DeviceObject*> (device.data()), timeout);
+    shareDevice(device.data(), timeout < SHARE_TIMEOUT_MIN ? SHARE_TIMEOUT_MIN : timeout > SHARE_TIMEOUT_MAX ? SHARE_TIMEOUT_MAX : timeout);
 }
 
 void Matter::updateDevice(const QString &deviceName, const QString &name, const QString &note, bool active, bool discovery, bool cloud)
@@ -598,7 +426,7 @@ void Matter::updateDevice(const QString &deviceName, const QString &name, const 
 
     logInfo << device << "successfully updated";
     emit deviceEvent(device.data(), Event::updated);
-    m_devices->store(true);
+    m_devices->storeDatabase(true);
 }
 
 void Matter::removeDevice(const QString &deviceName)
@@ -611,7 +439,7 @@ void Matter::removeDevice(const QString &deviceName)
         return;
     }
 
-    removeDevice(reinterpret_cast <DeviceObject*> (device.data()));
+    removeDevice(device.data());
 }
 
 void Matter::getProperties(const QString &deviceName)
@@ -637,1289 +465,510 @@ void Matter::deviceAction(const QString &deviceName, quint8 endpointId, const QS
     if (device.isNull() || !device->active())
         return;
 
-    DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
-
     if (endpointId)
     {
-        sendCommand(obj, endpointId, name, value);
+        deviceCommand(device.data(), endpointId, name, value);
         return;
     }
 
     for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
-        sendCommand(obj, it.key(), name, value);
+        deviceCommand(device.data(), it.key(), name, value);
+}
+
+void Matter::setFabricCredentials(const QByteArray &fabricKey, const QByteArray &ipk, const QByteArray &operationalKey, const QByteArray &controllerNoc, const QByteArray &controllerRcac, quint64 rootCaId)
+{
+    m_fabricKey = fabricKey;
+    m_ipk = ipk;
+    m_operationalKey = operationalKey;
+    m_rootCaId = rootCaId;
+
+    m_fabricPublicKey = ECPoint::multiply(ECPoint::generator(), BigNum(m_fabricKey).bn()).toData();
+    m_operationalPublicKey = ECPoint::multiply(ECPoint::generator(), BigNum(m_operationalKey).bn()).toData();
+
+    if (!controllerNoc.isEmpty() && !controllerRcac.isEmpty())
+    {
+        m_controllerNoc = controllerNoc;
+        m_controllerRcac = controllerRcac;
+    }
+    else
+    {
+        m_controllerRcac = generateCertificate(0, m_fabricPublicKey, true);
+        m_controllerNoc = generateCertificate(m_nodeId, m_operationalPublicKey, false);
+    }
+
+    logInfo << "Fabric credentials loaded, root CA id" << QString::number(m_rootCaId, 16);
+}
+
+QByteArray Matter::generateCertificate(quint64 nodeId, const QByteArray &publicKey, bool root)
+{
+    QByteArray certificate = Crypto::generateCertificate(m_rootCaId, m_fabricId, nodeId, publicKey, m_fabricKey, m_fabricPublicKey, root), data;
+
+    if (certificate.isEmpty())
+    {
+        logWarning << "X.509 certificate generation failed";
+        return QByteArray();
+    }
+
+    data = Crypto::convertCertificate(certificate);
+    logDebug(m_debug) << (root ? "RCAC" : "NOC") << "certificate generated, DER length" << certificate.length() << "and TLV length" << data.length();
+
+    return data;
+}
+
+bool Matter::fetchThreadDataset(void)
+{
+    QByteArray state = otbrRequest(m_otbrUrl, "/node/state"), dataset, extendedPanId;
+
+    // dataset is available before radio joins the mesh, so Thread state must be checked first
+    if (state.isEmpty())
+        return false;
+
+    if (state.startsWith('"') && state.endsWith('"'))
+        state = state.mid(1, state.length() - 2);
+
+    if (!QList <QByteArray> {"child", "router", "leader"}.contains(state))
+    {
+        logDebug(m_debug) << "Thread state" << state << "is not ready";
+        return false;
+    }
+
+    dataset = QByteArray::fromHex(otbrRequest(m_otbrUrl, "/node/dataset/active"));
+    extendedPanId = threadExtendedPanId(dataset);
+
+    if (extendedPanId.isEmpty())
+        return false;
+
+    m_threadDataset = dataset;
+    m_threadExtendedPanId = extendedPanId;
+    m_threadReady = true;
+
+    logInfo << "Thread dataset received from" << m_otbrUrl << "with state" << state << "and extended PAN ID" << m_threadExtendedPanId.toHex();
+    return true;
+}
+
+void Matter::resumeThreadDevices(void)
+{
+    bool reconnect = false;
+
+    for (int i = 0; i < m_devices->count(); i++)
+    {
+        const Device &device = m_devices->at(i);
+        SessionInfo *session;
+
+        if (!device->thread() || device->endpoints().isEmpty())
+            continue;
+
+        session = m_sessions->byPeerNodeId(device->nodeId());
+
+        if (session)
+        {
+            subscribeDevice(device.data(), session);
+            continue;
+        }
+
+        device->setReconnectTime(0);
+        reconnect = true;
+    }
+
+    if (!reconnect)
+        return;
+
+    scheduleReconnect();
+}
+
+void Matter::searchDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator, quint64 nodeId)
+{
+    m_searching = true;
+    m_passcode = passcode;
+    m_discriminator = discriminator;
+    m_shortDiscriminator = shortDiscriminator;
+    m_searchNodeId = nodeId;
+    m_bleCommissioning = false;
+
+    m_searchTimer->start(SEARCH_TIMEOUT);
+    m_mdns->browse();
+
+    logInfo << "Searching for commissionable device with" << (shortDiscriminator ? "short" : "full") << "discriminator" << discriminator << "...";
+
+    if (!m_ble->available() || m_wifiSsid.isEmpty())
+        return;
+
+    logInfo << "BLE and mDNS scanning in parallel...";
+    m_ble->scan();
+}
+
+void Matter::discoverDevice(DeviceObject *device)
+{
+    SessionInfo *session = m_sessions->byPeerNodeId(device->nodeId());
+
+    if (!session)
+        return;
+
+    logInfo << device << "discovering endpoints...";
+    sendRequest(session, InteractionModelOpcode::ReadRequest, InteractionModel::readRequest(QList <AttributePath> {AttributePath(0, Clusters::Descriptor::Id, Clusters::Descriptor::Attributes::PartsList)}));
 }
 
 void Matter::removeDevice(DeviceObject *device)
 {
-    SessionInfo *session = m_sessions->findByPeerNodeId(device->nodeId());
+    SessionInfo *session = m_sessions->byPeerNodeId(device->nodeId());
+    MatterTLV::Encoder fields;
 
-    if (!session || !session->active)
+    if (!session)
     {
-        int index = -1;
-        m_devices->byName(device->name(), &index);
-
-        logWarning << device << "no active session, removing forcefully";
-        emit deviceEvent(device, Event::removed, {{"success", false}});
-
-        // tear down any in-flight CASE for this device before m_devices->removeAt drops the last shared pointer ref
-        for (auto it = m_pendingCASEs.begin(); it != m_pendingCASEs.end(); )
-        {
-            if (it.value().device == device)
-            {
-                it.value().session->deleteLater();
-                it = m_pendingCASEs.erase(it);
-                continue;
-            }
-
-            it++;
-        }
-
-        m_mdns->purgeOperational(device->networkAddress());
-
-        if (index >= 0)
-        {
-            m_devices->removeAt(index);
-            m_devices->store(true);
-        }
-
+        logWarning << device << "has no active session, removing forcefully";
+        releaseDevice(device, false);
         return;
     }
 
-    logInfo << device << "sending RemoveFabric, fabricIndex:" << device->fabricIndex();
+    logInfo << device << "sending RemoveFabric request with fabric index" << device->fabricIndex() << "...";
+    m_removeDevice = device;
 
-    m_pendingRemoveDevice = device;
-
-    MatterTLV::Encoder fields;
     fields.openStructure();
     fields.encodeUnsignedInt(0, device->fabricIndex());
     fields.closeContainer();
 
-    QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::RemoveFabric), fields);
-    sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
-
+    sendRequest(session, InteractionModelOpcode::InvokeRequest, InteractionModel::invokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::RemoveFabric), fields));
     session->active = false;
 }
 
-void Matter::connectDevice(quint32 passcode, quint16 discriminator, bool shortDiscriminator, quint64 nodeId)
+void Matter::releaseDevice(DeviceObject *device, bool success)
 {
-    m_searching = true;
-    m_searchPasscode = passcode;
-    m_searchDiscriminator = discriminator;
-    m_searchShortDiscriminator = shortDiscriminator;
-    m_searchNodeId = nodeId;
-    m_bleCommissioning = false;
+    SessionInfo *session = m_sessions->byPeerNodeId(device->nodeId());
+    int index = -1;
 
-    m_searchTimer->start(60000);
-    logInfo << "Searching for commissionable device, discriminator:" << discriminator << (shortDiscriminator ? "(short)" : "(full)") << "nodeId:" << nodeId;
+    m_devices->byName(device->name(), &index);
+    emit deviceEvent(device, Event::removed, {{"success", success}});
 
-    m_mdns->browse();
-
-    if (m_ble->available() && !m_wifiSSID.isEmpty())
+    // pending CASE keeps raw device pointer, so it must be dropped before device removal
+    for (auto it = m_pendingCases.begin(); it != m_pendingCases.end(); )
     {
-        logInfo << "Scanning BLE and mDNS in parallel...";
-        m_ble->scan();
+        if (it.value().device != device)
+        {
+            it++;
+            continue;
+        }
+
+        it.value().session->deleteLater();
+        it = m_pendingCases.erase(it);
     }
+
+    if (session)
+        m_sessions->removeSession(session->localSessionId);
+
+    // some peers (e.g. Shelly 1PM) keep advertising themselves after removal from the fabric
+    m_mdns->purgeOperational(device->networkAddress());
+
+    if (index < 0)
+        return;
+
+    m_devices->removeAt(index);
+    m_devices->storeDatabase(true);
 }
 
-// --- Send command to a commissioned device ---
-
-void Matter::sendCommand(DeviceObject *device, quint8 endpointId, const QString &name, const QVariant &value)
+void Matter::shareDevice(DeviceObject *device, quint16 timeout)
 {
-    SessionInfo *session = m_sessions->findByPeerNodeId(device->nodeId());
+    SessionInfo *session = m_sessions->byPeerNodeId(device->nodeId());
+    QList <quint32> invalid = {11111111, 22222222, 33333333, 44444444, 55555555, 66666666, 77777777, 88888888, 12345678, 87654321};
+    PendingShare share;
+    QByteArray data;
 
     if (!session)
     {
-        logWarning << device << "no active session, starting CASE";
-        connectDevice(device);
+        logWarning << device << "has no active session to share";
         return;
     }
 
-    Endpoint endpoint = device->endpoints().value(endpointId);
+    if (m_pendingShares.contains(device->nodeId()))
+    {
+        logWarning << device << "sharing already in progress";
+        return;
+    }
+
+    while (true)
+    {
+        data = Crypto::randomData(sizeof(share.passcode));
+        memcpy(&share.passcode, data.constData(), sizeof(share.passcode));
+        share.passcode = share.passcode % 99999998 + 1;
+
+        if (!invalid.contains(share.passcode))
+            break;
+    }
+
+    data = Crypto::randomData(2);
+
+    share.device = device;
+    share.exchangeId = m_exchangeCounter++;
+    share.discriminator = (static_cast <quint8> (data.at(0)) | static_cast <quint8> (data.at(1)) << 8) & 0xFFF;
+    share.timeout = timeout;
+    share.salt = Crypto::randomData(32);
+    share.verifier = PASESession::verifier(share.passcode, share.salt, SHARE_ITERATIONS);
+    share.timedRequest = true;
+
+    logInfo << device << "sharing with passcode" << share.passcode << "discriminator" << share.discriminator << "and timeout" << timeout << "...";
+    m_pendingShares.insert(device->nodeId(), share);
+
+    // OpenCommissioningWindow is sent after timed request acknowledgement
+    sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::TimedRequest), static_cast <quint16> (ProtocolId::InteractionModel), InteractionModel::timedRequest(TIMED_REQUEST_TIMEOUT), share.exchangeId, true);
+}
+
+void Matter::deviceCommand(DeviceObject *device, quint8 endpointId, const QString &name, const QVariant &value)
+{
+    SessionInfo *session = m_sessions->byPeerNodeId(device->nodeId());
+    const Endpoint &endpoint = device->endpoints().value(endpointId);
+
+    if (!session)
+    {
+        logWarning << device << "has no active session, starting CASE...";
+        connectDevice(device);
+        return;
+    }
 
     if (endpoint.isNull())
         return;
 
-    EndpointObject *epObj = reinterpret_cast <EndpointObject*> (endpoint.data());
-
-    // walk the endpoint's actions and ask the matching one to encode the InvokeRequest payload. broadcast
-    // (deviceAction with endpointId=0) iterates ALL endpoints; those without the targeted cluster simply
-    // don't carry the matching Action and the loop below produces nothing — that's the cluster-membership
-    // gate, no longer hardcoded as a separate check
-    for (const Action &action : epObj->actions())
+    // endpoints without matching action are skipped, so broadcast request is sent to suitable endpoints only
+    for (int i = 0; i < endpoint->actions().count(); i++)
     {
-        if (action->name() != name)
+        const Action &action = endpoint->actions().at(i);
+        QByteArray payload;
+
+        if (action->name() != name || !endpoint->clusters().contains(action->clusterId()))
             continue;
 
-        if (!epObj->clusters().contains(action->clusterId()))
-            continue;
-
-        QByteArray payload = action->request(endpointId, value);
+        payload = action->request(endpointId, value);
 
         if (payload.isEmpty())
             continue;
 
-        logInfo << device << "sending command" << name << "to endpoint" << endpointId;
-        sendEncrypted(session, action->opcode(), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+        logInfo << device << "endpoint" << endpointId << "command" << name << "sent";
+        sendEncrypted(session, static_cast <quint8> (action->opcode()), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
         return;
     }
 }
 
-void Matter::readAttributes(DeviceObject *device, const QList <AttributePath> &paths)
+bool Matter::subscribeDevice(DeviceObject *device, SessionInfo *session)
 {
-    SessionInfo *session = m_sessions->findByPeerNodeId(device->nodeId());
+    QList <AttributePath> attributes;
+    QList <EventPath> events;
 
     if (!session)
+        return false;
+
+    attributes = subscriptionAttributes(device);
+    events = subscriptionEvents(device);
+
+    if (attributes.isEmpty() && events.isEmpty())
+        return false;
+
+    // priming report contains buffered event history, events are ignored until subscribe response is received
+    device->setSubscriptionPrimed(false);
+
+    logInfo << device << "subscribing to" << attributes.count() << "attributes and" << events.count() << "events...";
+    sendRequest(session, InteractionModelOpcode::SubscribeRequest, InteractionModel::subscribeRequest(attributes, events, 0, SUBSCRIPTION_MAX_INTERVAL));
+    return true;
+}
+
+QList <AttributePath> Matter::subscriptionAttributes(DeviceObject *device)
+{
+    QList <AttributePath> list;
+
+    for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
     {
-        logWarning << device << "no active session, starting CASE";
-        connectDevice(device);
+        const Endpoint &endpoint = it.value();
+        quint32 capabilities = static_cast <quint16> (endpoint->meta().value("colorCapabilities").toInt());
+        bool hueSaturation = capabilities & Clusters::ColorControl::Capabilities::HueSaturation, colorTemperature = capabilities & Clusters::ColorControl::Capabilities::ColorTemperature;
+
+        if (endpoint->clusters().contains(Clusters::OnOff::Id))
+        {
+            list.append(AttributePath(it.key(), Clusters::OnOff::Id, Clusters::OnOff::Attributes::OnOff));
+
+            // StartUpOnOff attribute is optional without lighting feature, unsupported attribute may break the whole subscription
+            if (endpoint->meta().value("onOffFeatures").toUInt() & Clusters::OnOff::Features::LT)
+                list.append(AttributePath(it.key(), Clusters::OnOff::Id, Clusters::OnOff::Attributes::StartUpOnOff));
+        }
+
+        if (endpoint->clusters().contains(Clusters::LevelControl::Id))
+            list.append(AttributePath(it.key(), Clusters::LevelControl::Id, Clusters::LevelControl::Attributes::CurrentLevel));
+
+        if (endpoint->clusters().contains(Clusters::ColorControl::Id))
+        {
+            if (hueSaturation)
+            {
+                list.append(AttributePath(it.key(), Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentHue));
+                list.append(AttributePath(it.key(), Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::CurrentSaturation));
+            }
+
+            if (colorTemperature)
+                list.append(AttributePath(it.key(), Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTemperatureMireds));
+
+            if (hueSaturation && colorTemperature)
+                list.append(AttributePath(it.key(), Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorMode));
+        }
+
+        if (endpoint->clusters().contains(Clusters::PowerSource::Id))
+            list.append(AttributePath(it.key(), Clusters::PowerSource::Id, Clusters::PowerSource::Attributes::BatPercentRemaining));
+
+        if (endpoint->clusters().contains(Clusters::BooleanState::Id))
+            list.append(AttributePath(it.key(), Clusters::BooleanState::Id, Clusters::BooleanState::Attributes::StateValue));
+
+        if (endpoint->clusters().contains(Clusters::OccupancySensing::Id))
+            list.append(AttributePath(it.key(), Clusters::OccupancySensing::Id, Clusters::OccupancySensing::Attributes::Occupancy));
+
+        if (endpoint->clusters().contains(Clusters::TemperatureMeasurement::Id))
+            list.append(AttributePath(it.key(), Clusters::TemperatureMeasurement::Id, Clusters::TemperatureMeasurement::Attributes::MeasuredValue));
+
+        if (endpoint->clusters().contains(Clusters::RelativeHumidityMeasurement::Id))
+            list.append(AttributePath(it.key(), Clusters::RelativeHumidityMeasurement::Id, Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue));
+
+        if (endpoint->clusters().contains(Clusters::ElectricalPowerMeasurement::Id))
+        {
+            quint32 features = endpoint->meta().value("powerFeatures").toUInt();
+
+            // AC peers report RMS values, DC peers report generic ones
+            if (features & Clusters::ElectricalPowerMeasurement::Features::ALTC)
+            {
+                list.append(AttributePath(it.key(), Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::RMSVoltage));
+                list.append(AttributePath(it.key(), Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::RMSCurrent));
+                list.append(AttributePath(it.key(), Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::Frequency));
+            }
+            else if (features & Clusters::ElectricalPowerMeasurement::Features::DIRC)
+            {
+                list.append(AttributePath(it.key(), Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::Voltage));
+                list.append(AttributePath(it.key(), Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::ActiveCurrent));
+            }
+
+            list.append(AttributePath(it.key(), Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::ActivePower));
+        }
+
+        if (endpoint->clusters().contains(Clusters::ElectricalEnergyMeasurement::Id))
+            list.append(AttributePath(it.key(), Clusters::ElectricalEnergyMeasurement::Id, Clusters::ElectricalEnergyMeasurement::Attributes::CumulativeEnergyImported));
+    }
+
+    return list;
+}
+
+QList <EventPath> Matter::subscriptionEvents(DeviceObject *device)
+{
+    QList <EventPath> list;
+
+    // only consumed events are subscribed, too many paths are rejected (e.g. IKEA BILRESA with 9 switch endpoints)
+    for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
+    {
+        const Endpoint &endpoint = it.value();
+        quint32 features = endpoint->meta().value("switchFeatures").toUInt();
+        bool encoder = (features & Clusters::Switch::Features::MSM) && !(features & Clusters::Switch::Features::MSL) && static_cast <quint8> (endpoint->meta().value("switchMultiPressMax").toUInt()) > 5;
+
+        if (!endpoint->clusters().contains(Clusters::Switch::Id))
+            continue;
+
+        if (features & Clusters::Switch::Features::LS)
+            list.append(EventPath(it.key(), Clusters::Switch::Id, Clusters::Switch::Events::SwitchLatched, true));
+
+        // initial press is used by encoders only to report rotation start
+        if (encoder)
+            list.append(EventPath(it.key(), Clusters::Switch::Id, Clusters::Switch::Events::InitialPress, true));
+
+        // short release is not reported with MSM feature, multi press complete is used instead
+        if ((features & Clusters::Switch::Features::MSR) && !(features & Clusters::Switch::Features::MSM))
+            list.append(EventPath(it.key(), Clusters::Switch::Id, Clusters::Switch::Events::ShortRelease, true));
+
+        if (features & Clusters::Switch::Features::MSL)
+        {
+            list.append(EventPath(it.key(), Clusters::Switch::Id, Clusters::Switch::Events::LongPress, true));
+            list.append(EventPath(it.key(), Clusters::Switch::Id, Clusters::Switch::Events::LongRelease, true));
+        }
+
+        if (features & Clusters::Switch::Features::MSM)
+            list.append(EventPath(it.key(), Clusters::Switch::Id, Clusters::Switch::Events::MultiPressComplete, true));
+    }
+
+    return list;
+}
+
+void Matter::deviceUnreachable(DeviceObject *device)
+{
+    SessionInfo *session = m_sessions->byPeerNodeId(device->nodeId());
+    qint64 time = QDateTime::currentMSecsSinceEpoch();
+
+    if (session)
+        m_sessions->removeSession(session->localSessionId);
+
+    if (device->availability() == Availability::Online)
+    {
+        logWarning << device << "is unreachable";
+        device->setAvailability(Availability::Offline);
+        emit availabilityUpdated(device);
+    }
+
+    // first failure leads to immediate CASE, next ones are spaced to avoid spamming sleeping peer
+    if (!device->reconnectTime())
+        device->setReconnectTime(time);
+    else if (device->reconnectTime() < time)
+        device->setReconnectTime(time + RECONNECT_DELAY + QRandomGenerator::global()->bounded(RECONNECT_JITTER));
+
+    scheduleReconnect();
+}
+
+void Matter::retryConnection(DeviceObject *device)
+{
+    device->setReconnectTime(QDateTime::currentMSecsSinceEpoch() + RECONNECT_DELAY + QRandomGenerator::global()->bounded(RECONNECT_JITTER));
+    scheduleReconnect();
+}
+
+void Matter::scheduleReconnect(void)
+{
+    qint64 time = QDateTime::currentMSecsSinceEpoch(), nearest = -1;
+
+    for (int i = 0; i < m_devices->count(); i++)
+    {
+        const Device &device = m_devices->at(i);
+        qint64 value = device->reconnectTime() ? device->reconnectTime() : time;
+
+        // devices with restored session or with CASE in progress are skipped, MRP or CASE failure will schedule reconnect
+        if (device->availability() == Availability::Online || device->networkAddress().isNull() || m_sessions->byPeerNodeId(device->nodeId()) || caseInProgress(device.data()))
+            continue;
+
+        if (nearest < 0 || value < nearest)
+            nearest = value;
+    }
+
+    if (nearest < 0)
+    {
+        logDebug(m_debug) << "No offline devices to reconnect";
         return;
     }
 
-    QByteArray payload = InteractionModel::encodeReadRequest(paths);
-    sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+    logDebug(m_debug) << "Reconnect scheduled in" << qMax <qint64> (0, nearest - time) << "ms";
+    m_reconnectTimer->start(static_cast <int> (qMax <qint64> (0, nearest - time)));
 }
 
-// --- Low-level message sending ---
-
-void Matter::sendRawDatagram(const QByteArray &data, const QHostAddress &address, quint16 port)
+bool Matter::caseInProgress(DeviceObject *device)
 {
-    m_udp->writeDatagram(data, address, port);
-}
-
-void Matter::sendUnencrypted(quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, const QHostAddress &address, quint16 port, bool initiator, quint32 ackCounter)
-{
-    MessageHeader msgHeader;
-    msgHeader.flags = 0x04; // source node ID present
-    msgHeader.securityFlags = 0x00;
-    msgHeader.sessionId = 0;
-    msgHeader.messageCounter = ++m_messageCounter;
-    msgHeader.sourceNodeId = m_nodeId;
-
-    ProtocolHeader protoHeader;
-    protoHeader.exchangeFlags = static_cast <quint8> (ExchangeFlag::Reliability);
-
-    if (initiator)
-        protoHeader.exchangeFlags |= static_cast <quint8> (ExchangeFlag::Initiator);
-
-    if (ackCounter)
+    for (auto it = m_pendingCases.begin(); it != m_pendingCases.end(); it++)
     {
-        protoHeader.exchangeFlags |= static_cast <quint8> (ExchangeFlag::Acknowledgement);
-        protoHeader.ackCounter = ackCounter;
-        m_mrp->cancelPendingAck(ackCounter);
+        if (it.value().device != device)
+            continue;
+
+        return true;
     }
 
-    protoHeader.opcode = opcode;
-    protoHeader.exchangeId = exchangeId;
-    protoHeader.protocolId = protocolId;
-
-    QByteArray data = MessageCodec::encodeMessage(msgHeader, protoHeader, payload);
-    sendRawDatagram(data, address, port);
-    m_mrp->messageSent(data, address, port, msgHeader.messageCounter, protoHeader.exchangeId, true);
+    return false;
 }
 
-void Matter::sendEncrypted(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator, quint32 ackCounter)
+PendingCase *Matter::pendingCase(CASESession *session)
 {
-    session->localMessageCounter++;
-
-    MessageHeader msgHeader;
-    msgHeader.flags = 0x00;
-    msgHeader.securityFlags = 0x00;
-    msgHeader.sessionId = session->peerSessionId;
-    msgHeader.messageCounter = session->localMessageCounter;
-
-    QByteArray header = MessageCodec::encodeHeader(msgHeader);
-
-    // build protocol header + payload (this is what gets encrypted)
-    ProtocolHeader protoHeader;
-    protoHeader.exchangeFlags = static_cast <quint8> (ExchangeFlag::Reliability);
-
-    if (initiator)
-        protoHeader.exchangeFlags |= static_cast <quint8> (ExchangeFlag::Initiator);
-
-    if (ackCounter)
+    for (auto it = m_pendingCases.begin(); it != m_pendingCases.end(); it++)
     {
-        protoHeader.exchangeFlags |= static_cast <quint8> (ExchangeFlag::Acknowledgement);
-        protoHeader.ackCounter = ackCounter;
-        m_mrp->cancelPendingAck(ackCounter);
+        if (it.value().session != session)
+            continue;
+
+        return &it.value();
     }
 
-    protoHeader.opcode = opcode;
-    protoHeader.exchangeId = exchangeId;
-    protoHeader.protocolId = protocolId;
-
-    QByteArray plaintext = MessageCodec::encodeProtocolHeader(protoHeader);
-    plaintext.append(payload);
-
-    QByteArray nonce = SessionManager::buildNonce(msgHeader.securityFlags, msgHeader.messageCounter, session->active ? m_nodeId : 0);
-    QByteArray encrypted = Crypto::aesCcmEncrypt(session->i2rKey, nonce, header, plaintext, SESSION_TAG_LENGTH);
-
-    QByteArray data = header;
-    data.append(encrypted);
-
-    sendRawDatagram(data, session->peerAddress, session->peerPort);
-    m_mrp->messageSent(data, session->peerAddress, session->peerPort, msgHeader.messageCounter, exchangeId, true, session->idleInterval);
+    return nullptr;
 }
 
-void Matter::sendEncryptedBle(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator)
-{
-    session->localMessageCounter++;
-
-    MessageHeader msgHeader;
-    msgHeader.flags = 0x00;
-    msgHeader.securityFlags = 0x00;
-    msgHeader.sessionId = session->peerSessionId;
-    msgHeader.messageCounter = session->localMessageCounter;
-
-    QByteArray header = MessageCodec::encodeHeader(msgHeader);
-
-    ProtocolHeader protoHeader;
-    protoHeader.exchangeFlags = 0;
-
-    if (initiator)
-        protoHeader.exchangeFlags |= static_cast <quint8> (ExchangeFlag::Initiator);
-
-    protoHeader.opcode = opcode;
-    protoHeader.exchangeId = exchangeId;
-    protoHeader.protocolId = protocolId;
-
-    QByteArray plaintext = MessageCodec::encodeProtocolHeader(protoHeader);
-    plaintext.append(payload);
-
-    QByteArray nonce = SessionManager::buildNonce(msgHeader.securityFlags, msgHeader.messageCounter, 0);
-    QByteArray encrypted = Crypto::aesCcmEncrypt(session->i2rKey, nonce, header, plaintext, SESSION_TAG_LENGTH);
-
-    QByteArray data = header;
-    data.append(encrypted);
-
-    m_btp->sendMessage(data);
-}
-
-// --- Incoming message handling ---
-
-void Matter::handleSecureChannel(const MessageHeader &msgHeader, const ProtocolHeader &protoHeader, const QByteArray &payload, const QHostAddress &address, quint16 port)
-{
-    Q_UNUSED(address)
-    Q_UNUSED(port)
-
-    switch (static_cast <SecureChannelOpcode> (protoHeader.opcode))
-    {
-        case SecureChannelOpcode::PBKDFParamResponse:
-        {
-            for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
-            {
-                if (it.value().exchangeId == protoHeader.exchangeId)
-                {
-                    it.value().pase->setLastPeerMessageCounter(msgHeader.messageCounter);
-                    it.value().pase->handlePBKDFParamResponse(payload);
-                    break;
-                }
-            }
-
-            break;
-        }
-
-        case SecureChannelOpcode::PASEPake2:
-        {
-            for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
-            {
-                if (it.value().exchangeId == protoHeader.exchangeId)
-                {
-                    it.value().pase->setLastPeerMessageCounter(msgHeader.messageCounter);
-                    it.value().pase->handlePake2(payload);
-                    break;
-                }
-            }
-
-            break;
-        }
-
-        case SecureChannelOpcode::StatusReport:
-        {
-            // check if this is for a PASE session
-            for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
-            {
-                if (it.value().exchangeId == protoHeader.exchangeId && it.value().state == CommissioningState::PASE)
-                {
-                    it.value().pase->handleStatusReport(payload);
-                    return;
-                }
-            }
-
-            // check if this is for a CASE session
-            if (m_pendingCASEs.contains(protoHeader.exchangeId))
-            {
-                m_pendingCASEs.value(protoHeader.exchangeId).session->handleStatusReport(payload);
-                return;
-            }
-
-            logDebug(m_debug) << "StatusReport from session" << msgHeader.sessionId;
-            break;
-        }
-
-        case SecureChannelOpcode::CASESigma1:
-            logDebug(m_debug) << "CASE Sigma1 from" << msgHeader.sourceNodeId;
-            break;
-
-        case SecureChannelOpcode::CASESigma2:
-        {
-            if (m_pendingCASEs.contains(protoHeader.exchangeId))
-            {
-                CASESession *session = m_pendingCASEs.value(protoHeader.exchangeId).session;
-                session->setLastPeerMessageCounter(msgHeader.messageCounter);
-                session->handleSigma2(payload);
-            }
-            else
-            {
-                logDebug(m_debug) << "Sigma2 from unknown exchange" << protoHeader.exchangeId << ", ignoring";
-            }
-
-            break;
-        }
-
-        case SecureChannelOpcode::CASESigma2Resume:
-        {
-            if (m_pendingCASEs.contains(protoHeader.exchangeId))
-            {
-                CASESession *session = m_pendingCASEs.value(protoHeader.exchangeId).session;
-                session->setLastPeerMessageCounter(msgHeader.messageCounter);
-                session->handleSigma2Resume(payload);
-            }
-            else
-            {
-                logDebug(m_debug) << "Sigma2_Resume from unknown exchange" << protoHeader.exchangeId << ", ignoring";
-            }
-
-            break;
-        }
-
-        case SecureChannelOpcode::MRPStandaloneAck:
-            break;
-
-        default:
-            logWarning << "Unknown secure channel opcode:" << QString::number(protoHeader.opcode, 16);
-            break;
-    }
-}
-
-void Matter::handleInteractionModel(const MessageHeader &msgHeader, const ProtocolHeader &protoHeader, const QByteArray &payload, const QHostAddress &address, quint16 port)
-{
-    Q_UNUSED(address)
-    Q_UNUSED(port)
-
-    switch (static_cast <InteractionModelOpcode> (protoHeader.opcode))
-    {
-        case InteractionModelOpcode::ReportData:
-        {
-            QList <AttributeReport> reports = InteractionModel::decodeReportData(payload);
-            QList <AttributePath> pendingSubPaths;
-            QList <EventPath> pendingSubEvents;
-            SessionInfo *pendingSubSession = nullptr;
-            DeviceObject *pendingSubDevice = nullptr;
-
-            // check for subscriptionId and suppressResponse in ReportData
-            bool hasSubscriptionId = false;
-            bool suppressResponse = false;
-
-            {
-                MatterTLV::Decoder rdDecoder(payload);
-                MatterTLV::Element rdRoot = rdDecoder.decode();
-
-                for (const MatterTLV::Element &el : rdRoot.children)
-                {
-                    if (el.tag == 0)
-                    {
-                        hasSubscriptionId = true;
-                        logDebug(m_debug) << "ReportData subscriptionId:" << el.value.toUInt();
-                    }
-
-                    if (el.tag == 3)
-                    {
-                        suppressResponse = el.value.toBool();
-                        logDebug(m_debug) << "ReportData suppressResponse:" << suppressResponse;
-                    }
-                }
-            }
-
-            for (const AttributeReport &report : reports)
-            {
-                if (report.hasError)
-                {
-                    logWarning << "Attribute error, cluster:" << QString::number(report.path.clusterId, 16) << "attr:" << QString::number(report.path.attributeId, 16) << "status:" << report.status;
-                    continue;
-                }
-
-                logDebug(m_debug) << "Attribute, ep:" << report.path.endpointId << "cluster:" << QString::number(report.path.clusterId, 16) << "attr:" << QString::number(report.path.attributeId, 16) << "value:" << report.value;
-
-                // update device state from subscription reports — dispatch through endpoint's properties
-                {
-                    SessionInfo *attrSession = m_sessions->findByLocalId(msgHeader.sessionId);
-
-                    if (attrSession)
-                    {
-                        for (int i = 0; i < m_devices->count(); i++)
-                        {
-                            DeviceObject *dev = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
-
-                            if (dev->nodeId() != attrSession->peerNodeId)
-                                continue;
-
-                            Endpoint endpoint = dev->endpoints().value(report.path.endpointId);
-
-                            if (endpoint.isNull())
-                                break;
-
-                            EndpointObject *epObj = reinterpret_cast <EndpointObject*> (endpoint.data());
-
-                            for (const Property &property : epObj->properties())
-                            {
-                                if (property->clusterId() != report.path.clusterId)
-                                    continue;
-
-                                property->parseAttribute(report.path.attributeId, report.rawValue);
-                            }
-
-                            dev->updateEndpoint(report.path.endpointId);
-
-                            break;
-                        }
-                    }
-                }
-
-                // check if this is part of commissioning (BasicInformation read)
-                for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
-                {
-                    PendingCommission &commission = it.value();
-
-                    if (commission.state == CommissioningState::ReadBasicInfo && commission.device)
-                    {
-                        if (report.path.clusterId == Clusters::BasicInformation::Id)
-                        {
-                            switch (report.path.attributeId)
-                            {
-                                case Clusters::BasicInformation::Attributes::VendorName:
-                                    commission.device->setManufacturerName(report.value.toString());
-                                    break;
-
-                                case Clusters::BasicInformation::Attributes::ProductName:
-                                    commission.device->setModelName(report.value.toString());
-                                    break;
-
-                                case Clusters::BasicInformation::Attributes::VendorID:
-                                    commission.device->setVendorId(report.value.toUInt());
-                                    break;
-
-                                case Clusters::BasicInformation::Attributes::ProductID:
-                                    commission.device->setProductId(report.value.toUInt());
-                                    break;
-                            }
-                        }
-                    }
-
-                    if (commission.state == CommissioningState::ReadNetworkType && report.path.clusterId == Clusters::NetworkCommissioning::Id && report.path.attributeId == Clusters::NetworkCommissioning::Attributes::FeatureMap)
-                    {
-                        commission.networkFeatureMap = report.value.toUInt();
-                    }
-                }
-            }
-
-            // process event reports — currently used for Switch cluster button actions (Matter §1.13)
-            {
-                SessionInfo *evSession = m_sessions->findByLocalId(msgHeader.sessionId);
-                DeviceObject *evDevice = nullptr;
-
-                if (evSession)
-                {
-                    for (int i = 0; i < m_devices->count(); i++)
-                    {
-                        DeviceObject *dev = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
-
-                        if (dev->nodeId() == evSession->peerNodeId)
-                        {
-                            evDevice = dev;
-                            break;
-                        }
-                    }
-                }
-
-                if (evDevice)
-                {
-                    QList <EventReport> events = InteractionModel::decodeEventReports(payload);
-
-                    for (const EventReport &event : events)
-                    {
-                        logDebug(m_debug) << "Event, ep:" << event.path.endpointId << "cluster:" << QString::number(event.path.clusterId, 16) << "event:" << QString::number(event.path.eventId, 16) << "number:" << event.eventNumber;
-
-                        // drop events arriving in the priming ReportData (peer dumps its event buffer there);
-                        // we only care about events that occur after subscribe is established
-                        if (!evDevice->subscriptionPrimed())
-                            continue;
-
-                        Endpoint endpoint = evDevice->endpoints().value(static_cast <quint8> (event.path.endpointId));
-
-                        if (endpoint.isNull())
-                            continue;
-
-                        EndpointObject *epObj = reinterpret_cast <EndpointObject*> (endpoint.data());
-
-                        for (const Property &property : epObj->properties())
-                        {
-                            if (property->clusterId() != event.path.clusterId)
-                                continue;
-
-                            property->parseEvent(event.path.eventId, event.data);
-                        }
-
-                        // single endpointUpdated emit covers all properties that just fired; Controller iterates
-                        // them, builds one MQTT payload, and clears transient props ("action") afterwards
-                        evDevice->updateEndpoint(static_cast <quint8> (event.path.endpointId));
-                    }
-                }
-            }
-
-            // process Descriptor cluster reports — build endpoints and exposes
-            {
-                SessionInfo *reportSession = m_sessions->findByLocalId(msgHeader.sessionId);
-                DeviceObject *reportDevice = nullptr;
-
-                if (reportSession)
-                {
-                    for (int i = 0; i < m_devices->count(); i++)
-                    {
-                        DeviceObject *dev = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
-
-                        if (dev->nodeId() == reportSession->peerNodeId)
-                        {
-                            reportDevice = dev;
-                            break;
-                        }
-                    }
-                }
-
-                if (reportDevice)
-                {
-                    Device reportDeviceHolder; // keep shared pointer alive
-
-                    for (int di = 0; di < m_devices->count(); di++)
-                    {
-                        if (m_devices->at(di).data() == reportDevice)
-                        {
-                            reportDeviceHolder = m_devices->at(di);
-                            break;
-                        }
-                    }
-
-                    // step 1 response: PartsList — request ServerList for discovered endpoints
-                    QList <quint8> discoveredEndpoints;
-
-                    for (const AttributeReport &report : reports)
-                    {
-                        if (!report.hasError && report.path.clusterId == Clusters::Descriptor::Id && report.path.attributeId == Clusters::Descriptor::Attributes::PartsList && report.path.endpointId == 0)
-                        {
-                            // PartsList — complete array or individual list items
-                            for (const MatterTLV::Element &child : report.rawValue.children)
-                                discoveredEndpoints.append(static_cast <quint8> (child.value.toUInt()));
-
-                            if (report.value.isValid() && report.value.canConvert <uint> ())
-                                discoveredEndpoints.append(static_cast <quint8> (report.value.toUInt()));
-                        }
-                    }
-
-                    if (!discoveredEndpoints.isEmpty() && reportDevice->endpoints().isEmpty())
-                    {
-                        logInfo << reportDevice << "found" << discoveredEndpoints.count() << "endpoints";
-
-                        QList <quint8> queryEndpoints = QList <quint8> {0} + discoveredEndpoints; // include root in case PowerSource lives there
-                        QList <AttributePath> serverPaths;
-
-                        for (quint8 ep : queryEndpoints)
-                            serverPaths.append(AttributePath(ep, Clusters::Descriptor::Id, Clusters::Descriptor::Attributes::ServerList));
-
-                        QByteArray serverPayload = InteractionModel::encodeReadRequest(serverPaths);
-                        sendEncrypted(reportSession, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), serverPayload, m_exchangeCounter++, true);
-                    }
-
-                    // discovery is split across two reads to keep the path count bounded for multi-endpoint peers
-                    // (Aqara W100 hits PathsExhausted otherwise): step 2 collects ServerList per endpoint, step 3
-                    // collects cluster-specific attrs (Switch features, Color caps) only on endpoints that need them.
-                    // setupEndpoint runs ONCE per endpoint at the end — only after both stages have populated clusters
-                    // and meta — so exposes and their option enums are built in a single pass and published once.
-                    QMap <quint8, QList <quint32>> endpointClusters;
-                    bool wroteFollowupMeta = false;
-
-                    for (const AttributeReport &report : reports)
-                    {
-                        if (report.hasError)
-                            continue;
-
-                        if (report.path.clusterId == Clusters::Descriptor::Id && report.path.attributeId == Clusters::Descriptor::Attributes::ServerList)
-                        {
-                            // ServerList — complete array or individual list items
-                            for (const MatterTLV::Element &child : report.rawValue.children)
-                                endpointClusters[report.path.endpointId].append(child.value.toUInt());
-
-                            if (report.value.isValid() && report.value.canConvert <uint> ())
-                                endpointClusters[report.path.endpointId].append(report.value.toUInt());
-                        }
-                        else
-                        {
-                            // step 3 follow-up: write attribute value to endpoint meta. expose-building is deferred
-                            // to the finalize block below so meta is fully populated when setupEndpoint runs.
-                            QString metaKey;
-
-                            switch (report.path.clusterId)
-                            {
-                                case Clusters::Descriptor::Id:
-                                    if (report.path.attributeId == Clusters::Descriptor::Attributes::DeviceTypeList)
-                                        metaKey = "deviceType";
-                                    break;
-
-                                case Clusters::OnOff::Id:
-                                    if (report.path.attributeId == Clusters::OnOff::Attributes::FeatureMap)
-                                        metaKey = "onOffFeatures";
-                                    break;
-
-                                case Clusters::ColorControl::Id:
-                                    switch (report.path.attributeId)
-                                    {
-                                        case Clusters::ColorControl::Attributes::ColorCapabilities:        metaKey = "colorCapabilities"; break;
-                                        case Clusters::ColorControl::Attributes::ColorTempPhysicalMinMireds: metaKey = "colorTempMin"; break;
-                                        case Clusters::ColorControl::Attributes::ColorTempPhysicalMaxMireds: metaKey = "colorTempMax"; break;
-                                    }
-                                    break;
-
-                                case Clusters::Switch::Id:
-                                    switch (report.path.attributeId)
-                                    {
-                                        case Clusters::Switch::Attributes::FeatureMap:    metaKey = "switchFeatures"; break;
-                                        case Clusters::Switch::Attributes::MultiPressMax: metaKey = "switchMultiPressMax"; break;
-                                    }
-                                    break;
-
-                                case Clusters::ElectricalPowerMeasurement::Id:
-                                    if (report.path.attributeId == Clusters::ElectricalPowerMeasurement::Attributes::FeatureMap)
-                                        metaKey = "powerFeatures";
-                                    break;
-                            }
-
-                            if (!metaKey.isEmpty() && reportDevice)
-                            {
-                                Endpoint endpoint = reportDevice->endpoints().value(static_cast <quint8> (report.path.endpointId));
-
-                                if (!endpoint.isNull())
-                                {
-                                    QVariant value;
-
-                                    // DeviceTypeList is a list of DeviceTypeStruct{ DeviceType uint32 tag 0, Revision uint16 tag 1 };
-                                    // take the first entry's DeviceType — composed endpoints (multi-type) are rare for sensors
-                                    if (metaKey == "deviceType")
-                                    {
-                                        for (const MatterTLV::Element &entry : report.rawValue.children)
-                                        {
-                                            for (const MatterTLV::Element &field : entry.children)
-                                            {
-                                                if (field.tag != 0)
-                                                    continue;
-
-                                                value = field.value.toUInt();
-                                                break;
-                                            }
-
-                                            if (value.isValid())
-                                                break;
-                                        }
-                                    }
-                                    else
-                                    {
-                                        value = report.value.toUInt();
-                                    }
-
-                                    if (value.isValid())
-                                    {
-                                        reinterpret_cast <EndpointObject*> (endpoint.data())->meta().insert(metaKey, value);
-                                        wroteFollowupMeta = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    bool finalizeDiscovery = false;
-
-                    if (!endpointClusters.isEmpty() && reportDevice)
-                    {
-                        // step 2: register endpoints with their clusters (no exposes yet — meta from step 3 isn't in)
-                        for (auto it = endpointClusters.begin(); it != endpointClusters.end(); it++)
-                            m_devices->addEndpoint(reportDevice, it.key(), it.value());
-
-                        // build follow-up paths only for endpoints that actually need cluster-specific attrs
-                        QList <AttributePath> followupPaths;
-
-                        for (auto it = endpointClusters.begin(); it != endpointClusters.end(); it++)
-                        {
-                            if (it.value().contains(Clusters::OnOff::Id))
-                                followupPaths.append(AttributePath(it.key(), Clusters::OnOff::Id, Clusters::OnOff::Attributes::FeatureMap));
-
-                            if (it.value().contains(Clusters::ColorControl::Id))
-                            {
-                                followupPaths.append(AttributePath(it.key(), Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorCapabilities));
-                                followupPaths.append(AttributePath(it.key(), Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTempPhysicalMinMireds));
-                                followupPaths.append(AttributePath(it.key(), Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTempPhysicalMaxMireds));
-                            }
-
-                            if (it.value().contains(Clusters::Switch::Id))
-                            {
-                                followupPaths.append(AttributePath(it.key(), Clusters::Switch::Id, Clusters::Switch::Attributes::FeatureMap));
-                                followupPaths.append(AttributePath(it.key(), Clusters::Switch::Id, Clusters::Switch::Attributes::MultiPressMax));
-                            }
-
-                            if (it.value().contains(Clusters::ElectricalPowerMeasurement::Id))
-                                followupPaths.append(AttributePath(it.key(), Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::FeatureMap));
-
-                            // BooleanState is the same cluster on contact / water-leak / freeze / rain sensors —
-                            // discriminate by the endpoint's DeviceTypeList from Descriptor (Matter §10)
-                            if (it.value().contains(Clusters::BooleanState::Id))
-                                followupPaths.append(AttributePath(it.key(), Clusters::Descriptor::Id, Clusters::Descriptor::Attributes::DeviceTypeList));
-                        }
-
-                        if (!followupPaths.isEmpty() && reportSession)
-                        {
-                            QByteArray followupPayload = InteractionModel::encodeReadRequest(followupPaths);
-                            sendEncrypted(reportSession, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), followupPayload, m_exchangeCounter++, true);
-                        }
-                        else
-                        {
-                            // no step 3 needed for this peer — finalize directly from step 2
-                            finalizeDiscovery = true;
-                        }
-                    }
-
-                    if (wroteFollowupMeta && reportDevice)
-                        finalizeDiscovery = true;
-
-                    if (finalizeDiscovery && reportDevice && reportSession)
-                    {
-                        // single-pass expose-build for every registered endpoint with full clusters + meta
-                        for (auto ep = reportDevice->endpoints().begin(); ep != reportDevice->endpoints().end(); ep++)
-                            m_devices->setupEndpoint(reportDevice, ep.key());
-
-                        m_devices->updateMultiple(reportDevice);
-
-                        // late session persistence: caseEstablished can't tell whether a freshly-commissioned device is
-                        // battery-powered until PowerSource is detected here in discovery. now that the flag is set,
-                        // capture the active CASE keys onto the device so serialize() can write them to disk.
-                        if (reportDevice->batteryPowered() && !reportDevice->hasPersistedSession())
-                        {
-                            SessionInfo *active = m_sessions->findByPeerNodeId(reportDevice->nodeId());
-
-                            if (active)
-                            {
-                                reportDevice->setSessionLocalId(active->localSessionId);
-                                reportDevice->setSessionPeerId(active->peerSessionId);
-                                reportDevice->setSessionI2RKey(active->i2rKey);
-                                reportDevice->setSessionR2IKey(active->r2iKey);
-                                reportDevice->setSessionAttestation(active->attestationChallenge);
-                                reportDevice->setSessionLocalCounter(0);
-                                reportDevice->setSessionIdleInterval(active->idleInterval);
-                                reportDevice->setSessionActiveInterval(active->activeInterval);
-                                reportDevice->setSessionActiveThreshold(active->activeThreshold);
-                            }
-                        }
-
-                        m_devices->store(true);
-
-                        pendingSubPaths = buildSubscribePaths(reportDevice);
-                        pendingSubEvents = buildSubscribeEvents(reportDevice);
-                        pendingSubSession = reportSession;
-                        pendingSubDevice = reportDevice;
-                    }
-                }
-            }
-
-            // send StatusResponse (success) to acknowledge ReportData
-            SessionInfo *session = m_sessions->findByLocalId(msgHeader.sessionId);
-
-            if (session && !suppressResponse && !m_bleCommissioning && (!reports.isEmpty() || hasSubscriptionId))
-            {
-                logDebug(m_debug) << "Sending StatusResponse(0) for ReportData, exchange:" << protoHeader.exchangeId << "ack:" << msgHeader.messageCounter;
-                QByteArray statusPayload = InteractionModel::encodeStatusResponse(0);
-                sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::StatusResponse), static_cast <quint16> (ProtocolId::InteractionModel), statusPayload, protoHeader.exchangeId, !protoHeader.isInitiator(), msgHeader.messageCounter);
-            }
-
-            // send SubscribeRequest after StatusResponse has been sent
-            if ((!pendingSubPaths.isEmpty() || !pendingSubEvents.isEmpty()) && pendingSubSession && pendingSubDevice)
-            {
-                logInfo << pendingSubDevice << "subscribing to" << pendingSubPaths.count() << "attributes," << pendingSubEvents.count() << "events";
-                pendingSubDevice->setSubscriptionPrimed(false);
-                QByteArray subPayload = InteractionModel::encodeSubscribeRequest(pendingSubPaths, pendingSubEvents, 0, 60);
-                sendEncrypted(pendingSubSession, static_cast <quint8> (InteractionModelOpcode::SubscribeRequest), static_cast <quint16> (ProtocolId::InteractionModel), subPayload, m_exchangeCounter++, true);
-                pendingSubDevice->deviceUpdated(pendingSubDevice);
-            }
-
-            // continue commissioning if applicable
-            for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
-            {
-                if (it.value().state == CommissioningState::ReadBasicInfo)
-                {
-                    it.value().state = CommissioningState::RequestPAI;
-                    continueCommissioning(it.value());
-                    break;
-                }
-
-                if (it.value().state == CommissioningState::ReadNetworkType)
-                {
-                    quint32 features = it.value().networkFeatureMap;
-                    bool hasWiFi   = features & 0x01;
-                    bool hasThread = features & 0x02;
-                    bool hasEth    = features & 0x04;
-
-                    logInfo << "Device NetworkCommissioning features:" << QString("WiFi=%1 Thread=%2 Ethernet=%3").arg(hasWiFi).arg(hasThread).arg(hasEth);
-
-                    if (hasThread && !m_threadDataset.isEmpty())
-                    {
-                        logInfo << "Sending Thread Operational Dataset over BLE...";
-                        it.value().useThread = true;
-                        it.value().state = CommissioningState::AddThreadNetwork;
-                    }
-                    else if (hasWiFi && !m_wifiSSID.isEmpty())
-                    {
-                        logInfo << "Sending WiFi credentials over BLE...";
-                        it.value().useThread = false;
-                        it.value().state = CommissioningState::AddWiFiNetwork;
-                    }
-                    else
-                    {
-                        logWarning << "No matching credentials for device features (WiFi=" << hasWiFi << "Thread=" << hasThread << "Ethernet=" << hasEth << "), commissioning will fail";
-                        break;
-                    }
-
-                    continueCommissioning(it.value());
-                    break;
-                }
-            }
-
-            break;
-        }
-
-        case InteractionModelOpcode::WriteResponse:
-        {
-            // WriteResponse carries an array of AttributeStatusIB per Matter §10.6.4; full parsing is
-            // overkill for our use cases (one-off StartUpOnOff write) — log the raw size at debug
-            logDebug(m_debug) << "WriteResponse received, size:" << payload.size();
-            break;
-        }
-
-        case InteractionModelOpcode::StatusResponse:
-        {
-            quint8 status = InteractionModel::decodeStatusResponse(payload);
-            logDebug(m_debug) << "StatusResponse:" << status;
-
-            // TimedRequest was ACKed with StatusResponse(0) — now send the actual command
-            if (status == 0)
-            {
-                for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
-                {
-                    if (it.value().timedInvokePending)
-                    {
-                        it.value().lastPeerCounter = msgHeader.messageCounter;
-                        continueCommissioning(it.value());
-                        break;
-                    }
-                }
-
-                // check pending shares
-                SessionInfo *session = m_sessions->findByLocalId(msgHeader.sessionId);
-
-                if (session)
-                {
-                    auto shareIt = m_pendingShares.find(session->peerNodeId);
-
-                    if (shareIt != m_pendingShares.end() && shareIt->timedInvokePending)
-                    {
-                        shareIt->lastPeerCounter = msgHeader.messageCounter;
-                        shareIt->timedInvokePending = false;
-
-                        // send OpenCommissioningWindow
-                        QByteArray verifier = m_shareVerifiers.take(session->peerNodeId);
-                        QByteArray salt = m_shareSalts.take(session->peerNodeId);
-                        quint32 iterations = m_shareIterations.take(session->peerNodeId);
-
-                        MatterTLV::Encoder fields;
-                        fields.openStructure();
-                        fields.encodeUnsignedInt(0, shareIt->timeout);       // CommissioningTimeout
-                        fields.encodeByteString(1, verifier);                // PAKEPasscodeVerifier
-                        fields.encodeUnsignedInt(2, shareIt->discriminator); // Discriminator
-                        fields.encodeUnsignedInt(3, iterations);             // Iterations
-                        fields.encodeByteString(4, salt);                    // Salt
-                        fields.closeContainer();
-
-                        QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::AdministratorCommissioning::Id, Clusters::AdministratorCommissioning::Commands::OpenCommissioningWindow), fields, true);
-                        sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, shareIt->exchangeId, true, shareIt->lastPeerCounter);
-
-                        logInfo << shareIt->device << "sent OpenCommissioningWindow";
-                    }
-                }
-            }
-
-            break;
-        }
-
-        case InteractionModelOpcode::SubscribeResponse:
-        {
-            MatterTLV::Decoder decoder(payload);
-            MatterTLV::Element root = decoder.decode();
-            quint32 subscriptionId = 0;
-            quint16 maxInterval = 0;
-
-            for (const MatterTLV::Element &el : root.children)
-            {
-                if (el.tag == 0) subscriptionId = el.value.toUInt();
-                if (el.tag == 2) maxInterval = el.value.toUInt();
-            }
-
-            logInfo << "Subscription established, id:" << subscriptionId << "maxInterval:" << maxInterval;
-
-            SessionInfo *subSession = m_sessions->findByLocalId(msgHeader.sessionId);
-            if (subSession)
-            {
-                Device device = m_devices->byNodeId(subSession->peerNodeId);
-                if (!device.isNull())
-                {
-                    DeviceObject *obj = reinterpret_cast <DeviceObject*> (device.data());
-                    obj->setSubMaxInterval(maxInterval);
-                    // priming Reports (which carry the buffered event history) arrive before SubscribeResponse —
-                    // anything from now on is real-time, safe to process events normally
-                    obj->setSubscriptionPrimed(true);
-                }
-            }
-            break;
-        }
-
-        case InteractionModelOpcode::InvokeResponse:
-        {
-            QList <CommandResponse> responses = InteractionModel::decodeInvokeResponse(payload);
-
-            logDebug(m_debug) << "InvokeResponse received, entries:" << responses.count() << "payload size:" << payload.size();
-
-            for (const CommandResponse &response : responses)
-            {
-                logDebug(m_debug) << "InvokeResponse, cluster:" << QString::number(response.path.clusterId, 16) << "cmd:" << QString::number(response.path.commandId, 16) << "status:" << response.status;
-
-                // check commissioning responses
-                for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
-                {
-                    PendingCommission &commission = it.value();
-
-                    if ((commission.state == CommissioningState::AddWiFiNetwork || commission.state == CommissioningState::AddThreadNetwork) && response.path.clusterId == Clusters::NetworkCommissioning::Id && response.path.commandId == Clusters::NetworkCommissioning::Commands::NetworkConfigResponse)
-                    {
-                        logInfo << "Network credentials added, connecting...";
-                        commission.state = CommissioningState::ConnectNetwork;
-                        continueCommissioning(commission);
-                        break;
-                    }
-
-                    if (commission.state == CommissioningState::ConnectNetwork && response.path.clusterId == Clusters::NetworkCommissioning::Id && response.path.commandId == Clusters::NetworkCommissioning::Commands::ConnectNetworkResponse)
-                    {
-                        quint8 networkingStatus = 0xFF;
-
-                        for (const MatterTLV::Element &field : response.data.children)
-                        {
-                            if (field.tag == 0) networkingStatus = field.value.toUInt();
-                        }
-
-                        if (networkingStatus != 0)
-                        {
-                            logWarning << "ConnectNetwork failed, status:" << networkingStatus;
-                            break;
-                        }
-
-                        logInfo << commission.device << (commission.useThread ? "joined Thread mesh, starting CASE..." : "connected to WiFi, starting CASE...");
-                        m_bleCommissioning = false;
-                        m_ble->disconnectDevice();
-                        m_caseNeedsCommissioningComplete = true;
-
-                        commission.device->setThread(commission.useThread);
-                        commission.device->setNetworkPort(5540);
-                        m_pendingCommissionDevice = commission.device;
-
-                        // clean up PASE session
-                        m_sessions->removeSession(commission.localSessionId);
-                        m_pendingCommissions.remove(it.key());
-
-                        if (commission.pase)
-                            commission.pase->deleteLater();
-
-                        // search for device on WiFi via mDNS (_matter._tcp or _matterc._udp)
-                        m_searching = true;
-                        m_searchTimer->start(60000);
-                        m_mdns->browse();
-                        break;
-                    }
-
-                    if (commission.state == CommissioningState::ArmFailSafe && response.path.clusterId == Clusters::GeneralCommissioning::Id && response.path.commandId == Clusters::GeneralCommissioning::Commands::ArmFailSafeResponse)
-                    {
-                        logDebug(m_debug) << "ArmFailSafe response, setting regulatory config...";
-                        commission.state = CommissioningState::SetRegulatoryConfig;
-                        continueCommissioning(commission);
-                        break;
-                    }
-
-                    if (commission.state == CommissioningState::SetRegulatoryConfig && response.path.clusterId == Clusters::GeneralCommissioning::Id && response.path.commandId == Clusters::GeneralCommissioning::Commands::SetRegulatoryConfigResponse)
-                    {
-                        logDebug(m_debug) << "SetRegulatoryConfig response, reading basic info...";
-                        commission.state = CommissioningState::ReadBasicInfo;
-                        continueCommissioning(commission);
-                        break;
-                    }
-
-                    if (commission.state == CommissioningState::RequestPAI && response.path.clusterId == Clusters::OperationalCredentials::Id && response.path.commandId == Clusters::OperationalCredentials::Commands::CertificateChainResponse)
-                    {
-                        logDebug(m_debug) << "PAI certificate received, requesting DAC...";
-                        commission.state = CommissioningState::RequestDAC;
-                        continueCommissioning(commission);
-                        break;
-                    }
-
-                    if (commission.state == CommissioningState::RequestDAC && response.path.clusterId == Clusters::OperationalCredentials::Id && response.path.commandId == Clusters::OperationalCredentials::Commands::CertificateChainResponse)
-                    {
-                        logDebug(m_debug) << "DAC certificate received, requesting attestation...";
-                        commission.state = CommissioningState::RequestAttestation;
-                        continueCommissioning(commission);
-                        break;
-                    }
-
-                    if (commission.state == CommissioningState::RequestAttestation && response.path.clusterId == Clusters::OperationalCredentials::Id && response.path.commandId == Clusters::OperationalCredentials::Commands::AttestationResponse)
-                    {
-                        logDebug(m_debug) << "Attestation received, sending CSR request...";
-                        commission.state = CommissioningState::CSRRequest;
-                        continueCommissioning(commission);
-                        break;
-                    }
-
-                    if (commission.state == CommissioningState::CSRRequest && response.path.clusterId == Clusters::OperationalCredentials::Id && response.path.commandId == Clusters::OperationalCredentials::Commands::CSRResponse)
-                    {
-                        logDebug(m_debug) << "CSRResponse received";
-
-                        for (const MatterTLV::Element &field : response.data.children)
-                        {
-                            if (field.tag == 0 && field.type == MatterTLV::Type::ByteString)
-                            {
-                                MatterTLV::Decoder nocsrDecoder(field.value.toByteArray());
-                                MatterTLV::Element nocsrRoot = nocsrDecoder.decode();
-
-                                for (const MatterTLV::Element &el : nocsrRoot.children)
-                                {
-                                    if (el.tag == 1 && el.type == MatterTLV::Type::ByteString)
-                                        commission.devicePublicKey = Crypto::parseCSRPublicKey(el.value.toByteArray());
-                                }
-                            }
-                        }
-
-                        if (commission.devicePublicKey.isEmpty())
-                        {
-                            logWarning << "Failed to parse device public key from CSR";
-                            break;
-                        }
-
-                        logDebug(m_debug) << "Device public key extracted," << commission.devicePublicKey.length() << "bytes";
-
-                        commission.rcacTLV = generateFabricCert(m_fabricId, 0, m_fabricPublicKey, true);
-                        commission.nocTLV = generateFabricCert(m_fabricId, commission.device->nodeId(), commission.devicePublicKey, false);
-
-                        logDebug(m_debug) << "Generated RCAC" << commission.rcacTLV.length() << "bytes, NOC" << commission.nocTLV.length() << "bytes";
-        logDebug(m_debug) << "NOC hex:" << commission.nocTLV.toHex();
-        logDebug(m_debug) << "RCAC hex:" << commission.rcacTLV.toHex();
-
-                        commission.state = CommissioningState::AddTrustedRootCert;
-                        continueCommissioning(commission);
-                        break;
-                    }
-
-                    if (commission.state == CommissioningState::AddTrustedRootCert && response.path.clusterId == Clusters::OperationalCredentials::Id && response.path.commandId == Clusters::OperationalCredentials::Commands::AddTrustedRootCertificate)
-                    {
-                        if (response.status != 0)
-                        {
-                            logWarning << "AddTrustedRootCertificate failed, status:" << response.status;
-                            break;
-                        }
-
-                        logDebug(m_debug) << "AddTrustedRootCertificate accepted, sending AddNOC...";
-                        commission.state = CommissioningState::AddNOC;
-                        continueCommissioning(commission);
-                        break;
-                    }
-
-                    if (commission.state == CommissioningState::AddNOC && response.path.clusterId == Clusters::OperationalCredentials::Id && response.path.commandId == Clusters::OperationalCredentials::Commands::NOCResponse)
-                    {
-                        quint8 nocStatus = 0xFF;
-
-                        for (const MatterTLV::Element &field : response.data.children)
-                        {
-                            if (field.tag == 0) nocStatus = field.value.toUInt();
-                            if (field.tag == 1) commission.device->setFabricIndex(field.value.toUInt());
-                        }
-
-                        if (nocStatus != 0)
-                        {
-                            logWarning << "AddNOC failed, status:" << nocStatus;
-                            break;
-                        }
-
-                        logInfo << "AddNOC success";
-
-                        if (m_bleCommissioning)
-                        {
-                            // BLE path: ask the device which network type it supports, then push matching credentials
-                            emit deviceEvent(commission.device, Event::networkSetup);
-                            commission.state = CommissioningState::ReadNetworkType;
-                            continueCommissioning(commission);
-                        }
-                        else
-                        {
-                            // UDP path: start CASE for CommissioningComplete
-                            commission.device->setNetworkAddress(commission.address);
-                            commission.device->setNetworkPort(commission.port);
-                            commission.device->setThread(commission.address.protocol() == QAbstractSocket::IPv6Protocol);
-                            m_caseNeedsCommissioningComplete = true;
-
-                            QTimer::singleShot(5000, this, [this, commission]() mutable { connectDevice(commission.device); });
-
-                            m_sessions->removeSession(commission.localSessionId);
-                            m_pendingCommissions.remove(commission.localSessionId);
-
-                            if (commission.pase)
-                                commission.pase->deleteLater();
-                        }
-
-                        break;
-                    }
-
-                    if (commission.state == CommissioningState::CommissioningComplete && response.path.clusterId == Clusters::GeneralCommissioning::Id && response.path.commandId == Clusters::GeneralCommissioning::Commands::CommissioningCompleteResponse)
-                    {
-                        logInfo << "Commissioning complete!";
-                        commission.state = CommissioningState::Done;
-                        continueCommissioning(commission);
-                        break;
-                    }
-                }
-            }
-
-            // handle RemoveFabric response (NOCResponse cmd 0x08)
-            if (m_pendingRemoveDevice)
-            {
-                for (const CommandResponse &response : responses)
-                {
-                    if (response.path.clusterId == Clusters::OperationalCredentials::Id && response.path.commandId == Clusters::OperationalCredentials::Commands::NOCResponse)
-                    {
-                        quint8 status = 0xFF;
-
-                        for (const MatterTLV::Element &field : response.data.children)
-                        {
-                            if (field.tag == 0) status = field.value.toUInt();
-                        }
-
-                        int index = -1;
-                        m_devices->byName(m_pendingRemoveDevice->name(), &index);
-
-                        emit deviceEvent(m_pendingRemoveDevice, Event::removed, {{"success", status == 0}});
-
-                        // tear down any in-flight CASE for this device — its raw DeviceObject* would dangle once
-                        // the QSharedPointer in m_devices drops to zero on removeAt, and caseFailed/Established
-                        // would crash dereferencing it
-                        for (auto it = m_pendingCASEs.begin(); it != m_pendingCASEs.end(); )
-                        {
-                            if (it.value().device == m_pendingRemoveDevice)
-                            {
-                                it.value().session->deleteLater();
-                                it = m_pendingCASEs.erase(it);
-                                continue;
-                            }
-
-                            it++;
-                        }
-
-                        // also drop any encrypted session (session manager keys by localSessionId/peerNodeId, not pointer)
-                        SessionInfo *deadSession = m_sessions->findByPeerNodeId(m_pendingRemoveDevice->nodeId());
-
-                        if (deadSession)
-                            m_sessions->removeSession(deadSession->localSessionId);
-
-                        // drop cached operational mDNS entry — peer (e.g. Shelly 1PM) often keeps announcing
-                        // itself even after we kicked it from the fabric, so the next browse would re-populate
-                        // m_services and we'd risk routing to a node we no longer have keys for
-                        m_mdns->purgeOperational(m_pendingRemoveDevice->networkAddress());
-
-                        if (index >= 0)
-                        {
-                            m_devices->removeAt(index);
-                            m_devices->store(true);
-                        }
-
-                        m_pendingRemoveDevice = nullptr;
-                    }
-                }
-            }
-
-            // handle OpenCommissioningWindow response (device sharing)
-            {
-                SessionInfo *session = m_sessions->findByLocalId(msgHeader.sessionId);
-
-                if (session)
-                {
-                    auto shareIt = m_pendingShares.find(session->peerNodeId);
-
-                    if (shareIt != m_pendingShares.end())
-                    {
-                        for (const CommandResponse &response : responses)
-                        {
-                            if (response.path.clusterId == Clusters::AdministratorCommissioning::Id)
-                            {
-                                if (response.status == 0)
-                                {
-                                    QString manualCode = generateManualCode(shareIt->passcode, shareIt->discriminator);
-                                    QString qrCode = generateQRCode(shareIt->passcode, shareIt->discriminator);
-                                    logInfo << shareIt->device << "sharing window opened, manual code:" << manualCode;
-                                    emit deviceShared(shareIt->device, manualCode, qrCode, shareIt->timeout);
-                                }
-                                else
-                                    logWarning << shareIt->device << "OpenCommissioningWindow failed, status:" << response.status;
-
-                                m_pendingShares.erase(shareIt);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // handle CommissioningComplete response on CASE session (after AddNOC → CASE)
-            if (m_pendingCommissionDevice)
-            {
-                for (const CommandResponse &response : responses)
-                {
-                    if (response.path.clusterId == Clusters::GeneralCommissioning::Id && response.path.commandId == Clusters::GeneralCommissioning::Commands::CommissioningCompleteResponse)
-                    {
-                        logInfo << m_pendingCommissionDevice << "commissioned successfully";
-                        m_devices->append(Device(m_pendingCommissionDevice));
-                        connectDeviceSignals(m_pendingCommissionDevice);
-                        emit deviceEvent(m_pendingCommissionDevice, Event::added);
-                        discoverDevice(m_pendingCommissionDevice);
-                        m_pendingCommissionDevice = nullptr;
-                    }
-                }
-            }
-
-            break;
-        }
-
-        default:
-            logWarning << "Unknown IM opcode:" << QString::number(protoHeader.opcode, 16);
-            break;
-    }
-}
-
-// --- Commissioning flow ---
-
-void Matter::startCommissioning(const MatterService &service)
+PASESession *Matter::createPase(void)
 {
     PASESession *pase = new PASESession(this);
 
@@ -1929,502 +978,1457 @@ void Matter::startCommissioning(const MatterService &service)
     connect(pase, &PASESession::established, this, &Matter::paseEstablished);
     connect(pase, &PASESession::failed, this, &Matter::paseFailed);
 
-    quint16 sessionId = m_sessionCounter++;
-    quint16 exchangeId = m_exchangeCounter++;
-
-    PendingCommission commission;
-    commission.pase = pase;
-    commission.address = service.address;
-    commission.port = service.port;
-    commission.exchangeId = exchangeId;
-    commission.localSessionId = sessionId;
-    commission.passcode = m_searchPasscode;
-    commission.assignedNodeId = m_searchNodeId;
-    commission.service = service;
-    commission.state = CommissioningState::PASE;
-
-    m_pendingCommissions.insert(sessionId, commission);
-
-    logInfo << "Starting commissioning with" << service.address.toString() << ":" << service.port;
-    emit deviceEvent(nullptr, Event::deviceConnecting, {{"nodeId", QString::number(m_searchNodeId, 16)}});
-    pase->start(commission.passcode, sessionId);
+    return pase;
 }
 
-void Matter::sendCommissioningMessage(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId)
+void Matter::parseSecureChannel(const MessageHeader &messageHeader, const ProtocolHeader &protocolHeader, const QByteArray &payload)
 {
-    if (m_bleCommissioning)
-        sendEncryptedBle(session, opcode, protocolId, payload, exchangeId, true);
-    else
-        sendEncrypted(session, opcode, protocolId, payload, exchangeId, true);
+    SecureChannelOpcode opcode = static_cast <SecureChannelOpcode> (protocolHeader.opcode);
+
+    switch (opcode)
+    {
+        case SecureChannelOpcode::PBKDFParamResponse:
+        case SecureChannelOpcode::PASEPake2:
+        {
+            for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
+            {
+                PASESession *pase = it.value().pase;
+
+                if (it.value().exchangeId != protocolHeader.exchangeId)
+                    continue;
+
+                pase->setPeerMessageCounter(messageHeader.messageCounter);
+
+                if (opcode == SecureChannelOpcode::PBKDFParamResponse)
+                    pase->parsePBKDFParamResponse(payload);
+                else
+                    pase->parsePake2(payload);
+
+                break;
+            }
+
+            break;
+        }
+
+        case SecureChannelOpcode::StatusReport:
+        {
+            for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
+            {
+                if (it.value().exchangeId != protocolHeader.exchangeId || it.value().state != CommissioningState::PASE)
+                    continue;
+
+                it.value().pase->parseStatusReport(payload);
+                return;
+            }
+
+            if (m_pendingCases.contains(protocolHeader.exchangeId))
+            {
+                m_pendingCases.value(protocolHeader.exchangeId).session->parseStatusReport(payload);
+                return;
+            }
+
+            logDebug(m_debug) << "Session" << messageHeader.sessionId << "StatusReport received";
+            break;
+        }
+
+        case SecureChannelOpcode::CASESigma1:
+            logDebug(m_debug) << "CASE Sigma1 received from node" << QString::number(messageHeader.sourceNodeId, 16);
+            break;
+
+        case SecureChannelOpcode::CASESigma2:
+        case SecureChannelOpcode::CASESigma2Resume:
+        {
+            CASESession *session;
+
+            if (!m_pendingCases.contains(protocolHeader.exchangeId))
+            {
+                logDebug(m_debug) << (opcode == SecureChannelOpcode::CASESigma2 ? "Sigma2" : "Sigma2_Resume") << "received for unknown exchange" << protocolHeader.exchangeId;
+                break;
+            }
+
+            session = m_pendingCases.value(protocolHeader.exchangeId).session;
+            session->setPeerMessageCounter(messageHeader.messageCounter);
+
+            if (opcode == SecureChannelOpcode::CASESigma2)
+                session->parseSigma2(payload);
+            else
+                session->parseSigma2Resume(payload);
+
+            break;
+        }
+
+        case SecureChannelOpcode::MRPStandaloneAck:
+            break;
+
+        default:
+            logWarning << "Unrecognized secure channel opcode" << QString::asprintf("0x%02x", protocolHeader.opcode);
+            break;
+    }
+}
+
+void Matter::parseInteractionModel(const MessageHeader &messageHeader, const ProtocolHeader &protocolHeader, const QByteArray &payload)
+{
+    switch (static_cast <InteractionModelOpcode> (protocolHeader.opcode))
+    {
+        case InteractionModelOpcode::ReportData:
+            parseReportData(messageHeader, protocolHeader, payload);
+            break;
+
+        case InteractionModelOpcode::WriteResponse:
+            logDebug(m_debug) << "WriteResponse received, payload length" << payload.length();
+            break;
+
+        case InteractionModelOpcode::StatusResponse:
+            parseStatusResponse(messageHeader, payload);
+            break;
+
+        case InteractionModelOpcode::SubscribeResponse:
+            parseSubscribeResponse(messageHeader, payload);
+            break;
+
+        case InteractionModelOpcode::InvokeResponse:
+            parseInvokeResponse(messageHeader, payload);
+            break;
+
+        default:
+            logWarning << "Unrecognized interaction model opcode" << QString::asprintf("0x%02x", protocolHeader.opcode);
+            break;
+    }
+}
+
+void Matter::parseReportData(const MessageHeader &messageHeader, const ProtocolHeader &protocolHeader, const QByteArray &payload)
+{
+    MatterTLV::Element root = MatterTLV::Decoder(payload).decode();
+    QList <AttributeReport> reports = InteractionModel::attributeReports(payload);
+    SessionInfo *session = m_sessions->byLocalId(messageHeader.sessionId);
+    Device device = session ? m_devices->byNodeId(session->peerNodeId) : Device();
+    bool subscription = false, suppressResponse = false, subscribe = false;
+
+    for (int i = 0; i < root.children.count(); i++)
+    {
+        const MatterTLV::Element &item = root.children.at(i);
+
+        switch (item.tag)
+        {
+            case 0:
+                subscription = true;
+                logDebug(m_debug) << "ReportData subscription id" << item.value.toUInt();
+                break;
+
+            case 3:
+                suppressResponse = item.value.toBool();
+                logDebug(m_debug) << "ReportData suppress response" << suppressResponse;
+                break;
+        }
+    }
+
+    for (int i = 0; i < reports.count(); i++)
+    {
+        const AttributeReport &report = reports.at(i);
+
+        if (report.error)
+        {
+            logWarning << "Cluster" << QString::asprintf("0x%04x", report.path.clusterId) << "attribute" << QString::asprintf("0x%04x", report.path.attributeId) << "report failed with status" << report.status;
+            continue;
+        }
+
+        logDebug(m_debug) << "Endpoint" << report.path.endpointId << "cluster" << QString::asprintf("0x%04x", report.path.clusterId) << "attribute" << QString::asprintf("0x%04x", report.path.attributeId) << "value" << report.value;
+
+        if (!device.isNull())
+        {
+            const Endpoint &endpoint = device->endpoints().value(static_cast <quint8> (report.path.endpointId));
+
+            if (!endpoint.isNull())
+            {
+                for (int j = 0; j < endpoint->properties().count(); j++)
+                {
+                    const Property &property = endpoint->properties().at(j);
+
+                    if (property->clusterId() != report.path.clusterId)
+                        continue;
+
+                    property->parseAttribute(report.path.attributeId, report.data);
+                }
+
+                device->updateEndpoint(static_cast <quint8> (report.path.endpointId));
+            }
+        }
+
+        for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
+        {
+            PendingCommission &commission = it.value();
+
+            if (commission.state == CommissioningState::ReadBasicInfo && commission.device && report.path.clusterId == Clusters::BasicInformation::Id)
+            {
+                switch (report.path.attributeId)
+                {
+                    case Clusters::BasicInformation::Attributes::VendorName:  commission.device->setManufacturerName(report.value.toString()); break;
+                    case Clusters::BasicInformation::Attributes::ProductName: commission.device->setModelName(report.value.toString()); break;
+                    case Clusters::BasicInformation::Attributes::VendorID:    commission.device->setVendorId(static_cast <quint16> (report.value.toUInt())); break;
+                    case Clusters::BasicInformation::Attributes::ProductID:   commission.device->setProductId(static_cast <quint16> (report.value.toUInt())); break;
+                }
+            }
+
+            if (commission.state == CommissioningState::ReadNetworkType && report.path.clusterId == Clusters::NetworkCommissioning::Id && report.path.attributeId == Clusters::NetworkCommissioning::Attributes::FeatureMap)
+                commission.networkFeatures = report.value.toUInt();
+        }
+    }
+
+    if (!device.isNull())
+    {
+        QList <EventReport> events = InteractionModel::eventReports(payload);
+
+        for (int i = 0; i < events.count(); i++)
+        {
+            const EventReport &event = events.at(i);
+            const Endpoint &endpoint = device->endpoints().value(static_cast <quint8> (event.path.endpointId));
+
+            logDebug(m_debug) << "Endpoint" << event.path.endpointId << "cluster" << QString::asprintf("0x%04x", event.path.clusterId) << "event" << QString::asprintf("0x%02x", event.path.eventId) << "number" << event.eventNumber;
+
+            // events from priming report are buffered history, they must not trigger anything
+            if (!device->subscriptionPrimed() || endpoint.isNull())
+                continue;
+
+            for (int j = 0; j < endpoint->properties().count(); j++)
+            {
+                const Property &property = endpoint->properties().at(j);
+
+                if (property->clusterId() != event.path.clusterId)
+                    continue;
+
+                property->parseEvent(event.path.eventId, event.data);
+            }
+
+            device->updateEndpoint(static_cast <quint8> (event.path.endpointId));
+        }
+
+        subscribe = parseDiscovery(device.data(), session, reports);
+    }
+
+    if (session && !suppressResponse && !m_bleCommissioning && (!reports.isEmpty() || subscription))
+    {
+        logDebug(m_debug) << "ReportData exchange" << protocolHeader.exchangeId << "acknowledged with StatusResponse";
+        sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::StatusResponse), static_cast <quint16> (ProtocolId::InteractionModel), InteractionModel::statusResponse(0), protocolHeader.exchangeId, !(protocolHeader.exchangeFlags & static_cast <quint8> (ExchangeFlag::Initiator)), messageHeader.messageCounter);
+    }
+
+    // subscribe request is sent after status response
+    if (subscribe && subscribeDevice(device.data(), session))
+        emit device->deviceUpdated(device.data());
+
+    for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
+    {
+        PendingCommission &commission = it.value();
+
+        if (commission.state == CommissioningState::ReadBasicInfo)
+        {
+            commission.state = CommissioningState::RequestPAI;
+            continueCommissioning(commission);
+            break;
+        }
+
+        if (commission.state == CommissioningState::ReadNetworkType)
+        {
+            bool wifi = commission.networkFeatures & Clusters::NetworkCommissioning::Features::WiFi, thread = commission.networkFeatures & Clusters::NetworkCommissioning::Features::Thread, ethernet = commission.networkFeatures & Clusters::NetworkCommissioning::Features::Ethernet;
+
+            logInfo << "Device network commissioning features:" << QString("WiFi=%1 Thread=%2 Ethernet=%3").arg(wifi).arg(thread).arg(ethernet);
+
+            if (thread && !m_threadDataset.isEmpty())
+            {
+                logInfo << "Sending Thread operational dataset over BLE...";
+                commission.thread = true;
+                commission.state = CommissioningState::AddThreadNetwork;
+            }
+            else if (wifi && !m_wifiSsid.isEmpty())
+            {
+                logInfo << "Sending WiFi credentials over BLE...";
+                commission.thread = false;
+                commission.state = CommissioningState::AddWiFiNetwork;
+            }
+            else
+            {
+                logWarning << "No matching network credentials for device, commissioning will fail";
+                break;
+            }
+
+            continueCommissioning(commission);
+            break;
+        }
+    }
+}
+
+bool Matter::parseDiscovery(DeviceObject *device, SessionInfo *session, const QList <AttributeReport> &reports)
+{
+    QList <quint8> endpoints;
+    QMap <quint8, QList <quint32>> clusters;
+    bool meta = false, finalize = false;
+
+    for (int i = 0; i < reports.count(); i++)
+    {
+        const AttributeReport &report = reports.at(i);
+
+        if (report.error || report.path.clusterId != Clusters::Descriptor::Id || report.path.attributeId != Clusters::Descriptor::Attributes::PartsList || report.path.endpointId)
+            continue;
+
+        // complete array or single list item
+        for (int j = 0; j < report.data.children.count(); j++)
+            endpoints.append(static_cast <quint8> (report.data.children.at(j).value.toUInt()));
+
+        if (report.value.isValid() && report.value.canConvert <uint> ())
+            endpoints.append(static_cast <quint8> (report.value.toUInt()));
+    }
+
+    if (!endpoints.isEmpty() && device->endpoints().isEmpty())
+    {
+        QList <AttributePath> attributes;
+
+        logInfo << device << "has" << endpoints.count() << "endpoints";
+
+        // root endpoint is added because PowerSource cluster may be there
+        endpoints.prepend(0);
+
+        for (int i = 0; i < endpoints.count(); i++)
+            attributes.append(AttributePath(endpoints.at(i), Clusters::Descriptor::Id, Clusters::Descriptor::Attributes::ServerList));
+
+        sendRequest(session, InteractionModelOpcode::ReadRequest, InteractionModel::readRequest(attributes));
+    }
+
+    // discovery is split into several reads to keep path count small for multi-endpoint peers (e.g. Aqara W100), exposes are created after all reads
+    for (int i = 0; i < reports.count(); i++)
+    {
+        const AttributeReport &report = reports.at(i);
+        quint8 endpointId = static_cast <quint8> (report.path.endpointId);
+        Endpoint endpoint;
+        QVariant value;
+        QString key;
+
+        if (report.error)
+            continue;
+
+        if (report.path.clusterId == Clusters::Descriptor::Id && report.path.attributeId == Clusters::Descriptor::Attributes::ServerList)
+        {
+            for (int j = 0; j < report.data.children.count(); j++)
+                clusters[endpointId].append(report.data.children.at(j).value.toUInt());
+
+            if (report.value.isValid() && report.value.canConvert <uint> ())
+                clusters[endpointId].append(report.value.toUInt());
+
+            continue;
+        }
+
+        switch (report.path.clusterId)
+        {
+            case Clusters::Descriptor::Id:
+
+                if (report.path.attributeId == Clusters::Descriptor::Attributes::DeviceTypeList)
+                    key = "deviceType";
+
+                break;
+
+            case Clusters::OnOff::Id:
+
+                if (report.path.attributeId == Clusters::OnOff::Attributes::FeatureMap)
+                    key = "onOffFeatures";
+
+                break;
+
+            case Clusters::ColorControl::Id:
+
+                switch (report.path.attributeId)
+                {
+                    case Clusters::ColorControl::Attributes::ColorCapabilities:          key = "colorCapabilities"; break;
+                    case Clusters::ColorControl::Attributes::ColorTempPhysicalMinMireds: key = "colorTempMin"; break;
+                    case Clusters::ColorControl::Attributes::ColorTempPhysicalMaxMireds: key = "colorTempMax"; break;
+                }
+
+                break;
+
+            case Clusters::Switch::Id:
+
+                switch (report.path.attributeId)
+                {
+                    case Clusters::Switch::Attributes::FeatureMap:    key = "switchFeatures"; break;
+                    case Clusters::Switch::Attributes::MultiPressMax: key = "switchMultiPressMax"; break;
+                }
+
+                break;
+
+            case Clusters::ElectricalPowerMeasurement::Id:
+
+                if (report.path.attributeId == Clusters::ElectricalPowerMeasurement::Attributes::FeatureMap)
+                    key = "powerFeatures";
+
+                break;
+        }
+
+        endpoint = device->endpoints().value(endpointId);
+
+        if (key.isEmpty() || endpoint.isNull())
+            continue;
+
+        if (key == "deviceType")
+        {
+            // device type list contains structures, first entry device type is used
+            for (int j = 0; j < report.data.children.count() && !value.isValid(); j++)
+            {
+                const MatterTLV::Element &item = report.data.children.at(j);
+
+                for (int k = 0; k < item.children.count(); k++)
+                {
+                    if (item.children.at(k).tag)
+                        continue;
+
+                    value = item.children.at(k).value.toUInt();
+                    break;
+                }
+            }
+
+            if (!value.isValid())
+                continue;
+        }
+        else
+            value = report.value.toUInt();
+
+        endpoint->meta().insert(key, value);
+        meta = true;
+    }
+
+    if (!clusters.isEmpty())
+    {
+        QList <AttributePath> attributes;
+
+        for (auto it = clusters.begin(); it != clusters.end(); it++)
+            m_devices->addEndpoint(device, it.key(), it.value());
+
+        for (auto it = clusters.begin(); it != clusters.end(); it++)
+        {
+            if (it.value().contains(Clusters::OnOff::Id))
+                attributes.append(AttributePath(it.key(), Clusters::OnOff::Id, Clusters::OnOff::Attributes::FeatureMap));
+
+            if (it.value().contains(Clusters::ColorControl::Id))
+            {
+                attributes.append(AttributePath(it.key(), Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorCapabilities));
+                attributes.append(AttributePath(it.key(), Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTempPhysicalMinMireds));
+                attributes.append(AttributePath(it.key(), Clusters::ColorControl::Id, Clusters::ColorControl::Attributes::ColorTempPhysicalMaxMireds));
+            }
+
+            if (it.value().contains(Clusters::Switch::Id))
+            {
+                attributes.append(AttributePath(it.key(), Clusters::Switch::Id, Clusters::Switch::Attributes::FeatureMap));
+                attributes.append(AttributePath(it.key(), Clusters::Switch::Id, Clusters::Switch::Attributes::MultiPressMax));
+            }
+
+            if (it.value().contains(Clusters::ElectricalPowerMeasurement::Id))
+                attributes.append(AttributePath(it.key(), Clusters::ElectricalPowerMeasurement::Id, Clusters::ElectricalPowerMeasurement::Attributes::FeatureMap));
+
+            // BooleanState cluster meaning depends on endpoint device type (contact, water leak, etc.)
+            if (it.value().contains(Clusters::BooleanState::Id))
+                attributes.append(AttributePath(it.key(), Clusters::Descriptor::Id, Clusters::Descriptor::Attributes::DeviceTypeList));
+        }
+
+        if (!attributes.isEmpty())
+            sendRequest(session, InteractionModelOpcode::ReadRequest, InteractionModel::readRequest(attributes));
+        else
+            finalize = true;
+    }
+
+    if (!finalize && !meta)
+        return false;
+
+    for (auto it = device->endpoints().begin(); it != device->endpoints().end(); it++)
+        m_devices->setupEndpoint(device, it.key());
+
+    m_devices->updateMultiple(device);
+
+    // battery powered flag is known only after discovery, so session of freshly commissioned device is stored here
+    if (device->batteryPowered() && !device->sessionStored())
+    {
+        SessionInfo *active = m_sessions->byPeerNodeId(device->nodeId());
+
+        if (active)
+            device->storeSession(active);
+    }
+
+    m_devices->storeDatabase(true);
+    return true;
+}
+
+void Matter::parseStatusResponse(const MessageHeader &messageHeader, const QByteArray &payload)
+{
+    SessionInfo *session = m_sessions->byLocalId(messageHeader.sessionId);
+    quint8 status = InteractionModel::status(payload);
+    MatterTLV::Encoder fields;
+    PendingShare *share;
+
+    logDebug(m_debug) << "StatusResponse received with status" << status;
+
+    // successful status response acknowledges timed request, so OpenCommissioningWindow can be sent now
+    if (status || !session || !m_pendingShares.contains(session->peerNodeId))
+        return;
+
+    share = &m_pendingShares[session->peerNodeId];
+
+    if (!share->timedRequest)
+        return;
+
+    share->timedRequest = false;
+
+    fields.openStructure();
+    fields.encodeUnsignedInt(0, share->timeout);
+    fields.encodeByteString(1, share->verifier);
+    fields.encodeUnsignedInt(2, share->discriminator);
+    fields.encodeUnsignedInt(3, SHARE_ITERATIONS);
+    fields.encodeByteString(4, share->salt);
+    fields.closeContainer();
+
+    sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), InteractionModel::invokeRequest(CommandPath(0, Clusters::AdministratorCommissioning::Id, Clusters::AdministratorCommissioning::Commands::OpenCommissioningWindow), fields, true), share->exchangeId, true, messageHeader.messageCounter);
+    logInfo << share->device << "OpenCommissioningWindow request sent";
+}
+
+void Matter::parseSubscribeResponse(const MessageHeader &messageHeader, const QByteArray &payload)
+{
+    MatterTLV::Element root = MatterTLV::Decoder(payload).decode();
+    SessionInfo *session = m_sessions->byLocalId(messageHeader.sessionId);
+    Device device = session ? m_devices->byNodeId(session->peerNodeId) : Device();
+    quint32 subscriptionId = 0;
+    quint16 maxInterval = 0;
+
+    for (int i = 0; i < root.children.count(); i++)
+    {
+        const MatterTLV::Element &item = root.children.at(i);
+
+        switch (item.tag)
+        {
+            case 0: subscriptionId = item.value.toUInt(); break;
+            case 2: maxInterval = static_cast <quint16> (item.value.toUInt()); break;
+        }
+    }
+
+    logInfo << "Subscription" << subscriptionId << "established with max interval" << maxInterval;
+
+    if (device.isNull())
+        return;
+
+    // priming reports are received before subscribe response, so further events are real-time
+    device->setSubscriptionInterval(maxInterval);
+    device->setSubscriptionPrimed(true);
+}
+
+void Matter::parseInvokeResponse(const MessageHeader &messageHeader, const QByteArray &payload)
+{
+    QList <CommandResponse> responses = InteractionModel::commandResponses(payload);
+    SessionInfo *session;
+
+    logDebug(m_debug) << "InvokeResponse received with" << responses.count() << "responses, payload length" << payload.length();
+
+    for (int i = 0; i < responses.count(); i++)
+    {
+        const CommandResponse &response = responses.at(i);
+
+        logDebug(m_debug) << "Cluster" << QString::asprintf("0x%04x", response.path.clusterId) << "command" << QString::asprintf("0x%02x", response.path.commandId) << "response status" << response.status;
+
+        for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
+        {
+            if (!commissioningResponse(it.value(), response))
+                continue;
+
+            break;
+        }
+    }
+
+    for (int i = 0; i < responses.count() && m_removeDevice; i++)
+    {
+        const CommandResponse &response = responses.at(i);
+        quint8 status = 0xFF;
+
+        if (response.path.clusterId != Clusters::OperationalCredentials::Id || response.path.commandId != Clusters::OperationalCredentials::Commands::NOCResponse)
+            continue;
+
+        for (int j = 0; j < response.data.children.count(); j++)
+        {
+            if (response.data.children.at(j).tag)
+                continue;
+
+            status = static_cast <quint8> (response.data.children.at(j).value.toUInt());
+        }
+
+        releaseDevice(m_removeDevice, !status);
+        m_removeDevice = nullptr;
+    }
+
+    session = m_sessions->byLocalId(messageHeader.sessionId);
+
+    if (session && m_pendingShares.contains(session->peerNodeId))
+    {
+        PendingShare share = m_pendingShares.value(session->peerNodeId);
+        quint64 nodeId = session->peerNodeId;
+
+        for (int i = 0; i < responses.count(); i++)
+        {
+            const CommandResponse &response = responses.at(i);
+
+            if (response.path.clusterId != Clusters::AdministratorCommissioning::Id)
+                continue;
+
+            if (!response.status)
+            {
+                QString manualCode = generateManualCode(share.passcode, share.discriminator);
+                logInfo << share.device << "sharing window opened with manual code" << manualCode;
+                emit deviceShared(share.device, manualCode, generateQrCode(share.passcode, share.discriminator), share.timeout);
+            }
+            else
+                logWarning << share.device << "OpenCommissioningWindow request failed with status" << response.status;
+
+            m_pendingShares.remove(nodeId);
+            break;
+        }
+    }
+
+    for (int i = 0; i < responses.count() && m_commissionDevice; i++)
+    {
+        const CommandResponse &response = responses.at(i);
+
+        if (response.path.clusterId != Clusters::GeneralCommissioning::Id || response.path.commandId != Clusters::GeneralCommissioning::Commands::CommissioningCompleteResponse)
+            continue;
+
+        finishCommissioning(m_commissionDevice);
+        discoverDevice(m_commissionDevice);
+        m_commissionDevice = nullptr;
+    }
+}
+
+void Matter::startCommissioning(const MatterService &service)
+{
+    PendingCommission commission;
+
+    commission.pase = createPase();
+    commission.state = CommissioningState::PASE;
+    commission.service = service;
+    commission.address = service.address;
+    commission.port = service.port;
+    commission.exchangeId = m_exchangeCounter++;
+    commission.localSessionId = m_sessionCounter++;
+    commission.passcode = m_passcode;
+    commission.nodeId = m_searchNodeId;
+
+    m_pendingCommissions.insert(commission.localSessionId, commission);
+
+    logInfo << "Commissioning started with" << service.address.toString() << "port" << service.port;
+    emit deviceEvent(nullptr, Event::deviceConnecting, {{"nodeId", QString::number(m_searchNodeId, 16)}});
+
+    commission.pase->start(commission.passcode, commission.localSessionId);
 }
 
 void Matter::continueCommissioning(PendingCommission &commission)
 {
-    SessionInfo *session = m_sessions->findByLocalId(commission.localSessionId);
+    SessionInfo *session = m_sessions->byLocalId(commission.localSessionId);
+    MatterTLV::Encoder fields;
 
     if (!session)
     {
-        logWarning << "No session for commissioning";
+        logWarning << "Commissioning session" << commission.localSessionId << "not found";
         return;
     }
 
     switch (commission.state)
     {
         case CommissioningState::ReadNetworkType:
-        {
-            logInfo << "Reading NetworkCommissioning FeatureMap...";
-
-            QList <AttributePath> paths = {AttributePath(0, Clusters::NetworkCommissioning::Id, Clusters::NetworkCommissioning::Attributes::FeatureMap)};
-            QByteArray payload = InteractionModel::encodeReadRequest(paths);
-            sendEncryptedBle(session, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            logInfo << "Reading network commissioning features...";
+            sendCommissioningRequest(session, InteractionModelOpcode::ReadRequest, InteractionModel::readRequest(QList <AttributePath> {AttributePath(0, Clusters::NetworkCommissioning::Id, Clusters::NetworkCommissioning::Attributes::FeatureMap)}), m_exchangeCounter++, true);
             break;
-        }
 
         case CommissioningState::AddWiFiNetwork:
-        {
-            logInfo << "Sending AddOrUpdateWiFiNetwork...";
-
-            MatterTLV::Encoder fields;
+            logInfo << "Sending AddOrUpdateWiFiNetwork request...";
             fields.openStructure();
-            fields.encodeByteString(0, m_wifiSSID.toUtf8());
+            fields.encodeByteString(0, m_wifiSsid.toUtf8());
             fields.encodeByteString(1, m_wifiPassword.toUtf8());
             fields.encodeUnsignedInt(2, 1); // breadcrumb
             fields.closeContainer();
-
-            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::NetworkCommissioning::Id, Clusters::NetworkCommissioning::Commands::AddOrUpdateWiFiNetwork), fields);
-            sendEncryptedBle(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            sendCommissioningRequest(session, InteractionModelOpcode::InvokeRequest, InteractionModel::invokeRequest(CommandPath(0, Clusters::NetworkCommissioning::Id, Clusters::NetworkCommissioning::Commands::AddOrUpdateWiFiNetwork), fields), m_exchangeCounter++, true);
             break;
-        }
 
         case CommissioningState::AddThreadNetwork:
-        {
-            logInfo << "Sending AddOrUpdateThreadNetwork...";
-
-            MatterTLV::Encoder fields;
+            logInfo << "Sending AddOrUpdateThreadNetwork request...";
             fields.openStructure();
             fields.encodeByteString(0, m_threadDataset);
             fields.encodeUnsignedInt(1, 1); // breadcrumb
             fields.closeContainer();
-
-            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::NetworkCommissioning::Id, Clusters::NetworkCommissioning::Commands::AddOrUpdateThreadNetwork), fields);
-            sendEncryptedBle(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            sendCommissioningRequest(session, InteractionModelOpcode::InvokeRequest, InteractionModel::invokeRequest(CommandPath(0, Clusters::NetworkCommissioning::Id, Clusters::NetworkCommissioning::Commands::AddOrUpdateThreadNetwork), fields), m_exchangeCounter++, true);
             break;
-        }
 
         case CommissioningState::ConnectNetwork:
-        {
-            logInfo << "Sending ConnectNetwork...";
-
-            QByteArray networkId = commission.useThread ? m_threadExtPanId : m_wifiSSID.toUtf8();
-
-            MatterTLV::Encoder fields;
+            logInfo << "Sending ConnectNetwork request...";
             fields.openStructure();
-            fields.encodeByteString(0, networkId);
+            fields.encodeByteString(0, commission.thread ? m_threadExtendedPanId : m_wifiSsid.toUtf8());
             fields.encodeUnsignedInt(1, 1); // breadcrumb
             fields.closeContainer();
-
-            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::NetworkCommissioning::Id, Clusters::NetworkCommissioning::Commands::ConnectNetwork), fields);
-            sendEncryptedBle(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+            sendCommissioningRequest(session, InteractionModelOpcode::InvokeRequest, InteractionModel::invokeRequest(CommandPath(0, Clusters::NetworkCommissioning::Id, Clusters::NetworkCommissioning::Commands::ConnectNetwork), fields), m_exchangeCounter++, true);
             break;
-        }
 
         case CommissioningState::ArmFailSafe:
-        {
-            logDebug(m_debug) << "Sending ArmFailSafe...";
-
-            MatterTLV::Encoder fields;
+            logDebug(m_debug) << "Sending ArmFailSafe request...";
             fields.openStructure();
-            fields.encodeUnsignedInt(0, 900);  // expiryLengthSeconds
-            fields.encodeUnsignedInt(1, 1);    // breadcrumb
+            fields.encodeUnsignedInt(0, FAIL_SAFE_TIMEOUT);
+            fields.encodeUnsignedInt(1, 1); // breadcrumb
             fields.closeContainer();
-
-            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::GeneralCommissioning::Id, Clusters::GeneralCommissioning::Commands::ArmFailSafe), fields);
-            sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++);
+            sendCommissioningRequest(session, InteractionModelOpcode::InvokeRequest, InteractionModel::invokeRequest(CommandPath(0, Clusters::GeneralCommissioning::Id, Clusters::GeneralCommissioning::Commands::ArmFailSafe), fields), m_exchangeCounter++, m_bleCommissioning);
             break;
-        }
 
         case CommissioningState::SetRegulatoryConfig:
-        {
-            logDebug(m_debug) << "Sending SetRegulatoryConfig...";
-
-            MatterTLV::Encoder fields;
+            logDebug(m_debug) << "Sending SetRegulatoryConfig request...";
             fields.openStructure();
-            fields.encodeUnsignedInt(0, 0);                  // newRegulatoryConfig: Indoor (0)
-            fields.encodeUTF8String(1, QString("XX"));       // countryCode
-            fields.encodeUnsignedInt(2, 0);                  // breadcrumb
+            fields.encodeUnsignedInt(0, 0); // indoor
+            fields.encodeUTF8String(1, "XX"); // country code
+            fields.encodeUnsignedInt(2, 0); // breadcrumb
             fields.closeContainer();
-
-            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::GeneralCommissioning::Id, Clusters::GeneralCommissioning::Commands::SetRegulatoryConfig), fields);
-            sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++);
+            sendCommissioningRequest(session, InteractionModelOpcode::InvokeRequest, InteractionModel::invokeRequest(CommandPath(0, Clusters::GeneralCommissioning::Id, Clusters::GeneralCommissioning::Commands::SetRegulatoryConfig), fields), m_exchangeCounter++, m_bleCommissioning);
             break;
-        }
 
         case CommissioningState::ReadBasicInfo:
         {
-            logDebug(m_debug) << "Reading BasicInformation cluster...";
+            QList <quint32> list = {Clusters::BasicInformation::Attributes::VendorName, Clusters::BasicInformation::Attributes::VendorID, Clusters::BasicInformation::Attributes::ProductName, Clusters::BasicInformation::Attributes::ProductID, Clusters::BasicInformation::Attributes::SoftwareVersionString};
+            QList <AttributePath> attributes;
 
-            QList <AttributePath> paths;
-            paths.append(AttributePath(0, Clusters::BasicInformation::Id, Clusters::BasicInformation::Attributes::VendorName));
-            paths.append(AttributePath(0, Clusters::BasicInformation::Id, Clusters::BasicInformation::Attributes::VendorID));
-            paths.append(AttributePath(0, Clusters::BasicInformation::Id, Clusters::BasicInformation::Attributes::ProductName));
-            paths.append(AttributePath(0, Clusters::BasicInformation::Id, Clusters::BasicInformation::Attributes::ProductID));
-            paths.append(AttributePath(0, Clusters::BasicInformation::Id, Clusters::BasicInformation::Attributes::SoftwareVersionString));
+            for (int i = 0; i < list.count(); i++)
+                attributes.append(AttributePath(0, Clusters::BasicInformation::Id, list.at(i)));
 
-            QByteArray payload = InteractionModel::encodeReadRequest(paths);
-            sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++);
+            logDebug(m_debug) << "Reading basic information...";
+            sendCommissioningRequest(session, InteractionModelOpcode::ReadRequest, InteractionModel::readRequest(attributes), m_exchangeCounter++, m_bleCommissioning);
             break;
         }
 
         case CommissioningState::RequestPAI:
-        {
-            logDebug(m_debug) << "Requesting PAI certificate...";
-
-            // Matter spec §11.17.5.1 CertificateChainRequest.CertificateType: 1 = DAC, 2 = PAI
-            MatterTLV::Encoder fields;
-            fields.openStructure();
-            fields.encodeUnsignedInt(0, 2);
-            fields.closeContainer();
-
-            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::CertificateChainRequest), fields);
-            sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++);
-            break;
-        }
-
         case CommissioningState::RequestDAC:
-        {
-            logDebug(m_debug) << "Requesting DAC certificate...";
-
-            MatterTLV::Encoder fields;
+            logDebug(m_debug) << "Requesting" << (commission.state == CommissioningState::RequestPAI ? "PAI" : "DAC") << "certificate...";
             fields.openStructure();
-            fields.encodeUnsignedInt(0, 1);
+            fields.encodeUnsignedInt(0, commission.state == CommissioningState::RequestPAI ? 2 : 1); // certificate type
             fields.closeContainer();
-
-            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::CertificateChainRequest), fields);
-            sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++);
+            sendCommissioningRequest(session, InteractionModelOpcode::InvokeRequest, InteractionModel::invokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::CertificateChainRequest), fields), m_exchangeCounter++, m_bleCommissioning);
             break;
-        }
 
         case CommissioningState::RequestAttestation:
-        {
-            logDebug(m_debug) << "Requesting attestation...";
-
-            MatterTLV::Encoder fields;
+            logDebug(m_debug) << "Sending AttestationRequest...";
             fields.openStructure();
-            fields.encodeByteString(0, Crypto::randomBytes(32));  // AttestationNonce
+            fields.encodeByteString(0, Crypto::randomData(32)); // nonce
             fields.closeContainer();
-
-            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::AttestationRequest), fields);
-            sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++);
+            sendCommissioningRequest(session, InteractionModelOpcode::InvokeRequest, InteractionModel::invokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::AttestationRequest), fields), m_exchangeCounter++, m_bleCommissioning);
             break;
-        }
 
         case CommissioningState::CSRRequest:
-        {
             logDebug(m_debug) << "Sending CSRRequest...";
-
-            MatterTLV::Encoder fields;
             fields.openStructure();
-            fields.encodeByteString(0, Crypto::randomBytes(32)); // CSRNonce
+            fields.encodeByteString(0, Crypto::randomData(32)); // nonce
             fields.closeContainer();
-
-            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::CSRRequest), fields);
-            sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++);
+            sendCommissioningRequest(session, InteractionModelOpcode::InvokeRequest, InteractionModel::invokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::CSRRequest), fields), m_exchangeCounter++, m_bleCommissioning);
             break;
-        }
 
         case CommissioningState::AddTrustedRootCert:
-        {
-            logDebug(m_debug) << "Sending AddTrustedRootCertificate...";
-
-            MatterTLV::Encoder fields;
+            logDebug(m_debug) << "Sending AddTrustedRootCertificate request...";
             fields.openStructure();
-            fields.encodeByteString(0, commission.rcacTLV);
+            fields.encodeByteString(0, commission.rcac);
             fields.closeContainer();
-
-            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::AddTrustedRootCertificate), fields);
-            sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++);
+            sendCommissioningRequest(session, InteractionModelOpcode::InvokeRequest, InteractionModel::invokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::AddTrustedRootCertificate), fields), m_exchangeCounter++, m_bleCommissioning);
             break;
-        }
 
         case CommissioningState::AddNOC:
-        {
-            logDebug(m_debug) << "Sending AddNOC...";
-
-            MatterTLV::Encoder fields;
+            logDebug(m_debug) << "Sending AddNOC request...";
             fields.openStructure();
-            fields.encodeByteString(0, commission.nocTLV);   // NOCValue
-            // tag 1: ICACValue (skip, no intermediate CA)
-            fields.encodeByteString(2, m_ipk);               // IPKValue (16 bytes)
-            fields.encodeUnsignedInt(3, m_nodeId);            // CaseAdminSubject
-            fields.encodeUnsignedInt(4, 0xFFF1);              // AdminVendorId (test)
+            fields.encodeByteString(0, commission.noc);
+            fields.encodeByteString(2, m_ipk); // there is no intermediate certificate
+            fields.encodeUnsignedInt(3, m_nodeId); // CASE admin subject
+            fields.encodeUnsignedInt(4, ADMIN_VENDOR_ID);
             fields.closeContainer();
-
-            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::AddNOC), fields);
-            sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++);
+            sendCommissioningRequest(session, InteractionModelOpcode::InvokeRequest, InteractionModel::invokeRequest(CommandPath(0, Clusters::OperationalCredentials::Id, Clusters::OperationalCredentials::Commands::AddNOC), fields), m_exchangeCounter++, m_bleCommissioning);
             break;
-        }
-
-        case CommissioningState::CommissioningComplete:
-        {
-            if (!commission.timedInvokePending)
-            {
-                logDebug(m_debug) << "Sending TimedRequest for CommissioningComplete...";
-                commission.exchangeId = m_exchangeCounter++;
-                QByteArray payload = InteractionModel::encodeTimedRequest(5000);
-                sendCommissioningMessage(session, static_cast <quint8> (InteractionModelOpcode::TimedRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, commission.exchangeId);
-                commission.timedInvokePending = true;
-                break;
-            }
-
-            commission.timedInvokePending = false;
-            logDebug(m_debug) << "Sending CommissioningComplete...";
-
-            MatterTLV::Encoder fields;
-            fields.openStructure();
-            fields.closeContainer();
-
-            QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::GeneralCommissioning::Id, Clusters::GeneralCommissioning::Commands::CommissioningComplete), fields, true);
-            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, commission.exchangeId, true, commission.lastPeerCounter);
-            break;
-        }
-
-        case CommissioningState::Done:
-        {
-            logInfo << commission.device << "commissioned successfully";
-            logDebug(m_debug) << "CommissioningComplete success, starting CASE...";
-            session->peerNodeId = commission.device->nodeId();
-            session->active = false;
-            m_devices->append(Device(commission.device));
-            connectDeviceSignals(commission.device);
-            emit deviceEvent(commission.device, Event::added);
-
-            connectDevice(commission.device);
-
-            m_pendingCommissions.remove(commission.localSessionId);
-
-            if (commission.pase)
-                commission.pase->deleteLater();
-
-            break;
-        }
 
         default:
             break;
     }
 }
 
-// --- Certificate generation ---
-
-QByteArray Matter::generateFabricCert(quint64 fabricId, quint64 nodeId, const QByteArray &subjectPubKey, bool isRCAC)
+bool Matter::commissioningResponse(PendingCommission &commission, const CommandResponse &response)
 {
-    QByteArray derCert = Crypto::generateX509Cert(m_rootCAId, fabricId, nodeId, subjectPubKey, m_fabricKey, m_fabricPublicKey, isRCAC);
+    PASESession *pase = commission.pase;
+    DeviceObject *device = commission.device;
+    quint16 localSessionId = commission.localSessionId;
 
-    if (derCert.isEmpty())
+    switch (commission.state)
     {
-        logWarning << "Failed to generate X.509 certificate";
-        return QByteArray();
+        case CommissioningState::AddWiFiNetwork:
+        case CommissioningState::AddThreadNetwork:
+
+            if (response.path.clusterId != Clusters::NetworkCommissioning::Id || response.path.commandId != Clusters::NetworkCommissioning::Commands::NetworkConfigResponse)
+                return false;
+
+            logInfo << "Network credentials added, connecting...";
+            commission.state = CommissioningState::ConnectNetwork;
+            continueCommissioning(commission);
+            return true;
+
+        case CommissioningState::ConnectNetwork:
+        {
+            quint8 status = 0xFF;
+
+            if (response.path.clusterId != Clusters::NetworkCommissioning::Id || response.path.commandId != Clusters::NetworkCommissioning::Commands::ConnectNetworkResponse)
+                return false;
+
+            for (int i = 0; i < response.data.children.count(); i++)
+            {
+                if (response.data.children.at(i).tag)
+                    continue;
+
+                status = static_cast <quint8> (response.data.children.at(i).value.toUInt());
+            }
+
+            if (status)
+            {
+                logWarning << "ConnectNetwork request failed with status" << status;
+                return true;
+            }
+
+            logInfo << device << (commission.thread ? "joined Thread network" : "connected to WiFi network") << ", starting CASE...";
+
+            m_bleCommissioning = false;
+            m_ble->disconnectDevice();
+
+            m_commissioning = true;
+            m_commissionDevice = device;
+
+            device->setThread(commission.thread);
+            device->setNetworkPort(MATTER_PORT);
+
+            m_sessions->removeSession(localSessionId);
+            m_pendingCommissions.remove(localSessionId);
+
+            if (pase)
+                pase->deleteLater();
+
+            m_searching = true;
+            m_searchTimer->start(SEARCH_TIMEOUT);
+            m_mdns->browse();
+            return true;
+        }
+
+        case CommissioningState::ArmFailSafe:
+
+            if (response.path.clusterId != Clusters::GeneralCommissioning::Id || response.path.commandId != Clusters::GeneralCommissioning::Commands::ArmFailSafeResponse)
+                return false;
+
+            logDebug(m_debug) << "ArmFailSafe response received";
+            commission.state = CommissioningState::SetRegulatoryConfig;
+            continueCommissioning(commission);
+            return true;
+
+        case CommissioningState::SetRegulatoryConfig:
+
+            if (response.path.clusterId != Clusters::GeneralCommissioning::Id || response.path.commandId != Clusters::GeneralCommissioning::Commands::SetRegulatoryConfigResponse)
+                return false;
+
+            logDebug(m_debug) << "SetRegulatoryConfig response received";
+            commission.state = CommissioningState::ReadBasicInfo;
+            continueCommissioning(commission);
+            return true;
+
+        case CommissioningState::RequestPAI:
+        case CommissioningState::RequestDAC:
+
+            if (response.path.clusterId != Clusters::OperationalCredentials::Id || response.path.commandId != Clusters::OperationalCredentials::Commands::CertificateChainResponse)
+                return false;
+
+            logDebug(m_debug) << (commission.state == CommissioningState::RequestPAI ? "PAI" : "DAC") << "certificate received";
+            commission.state = commission.state == CommissioningState::RequestPAI ? CommissioningState::RequestDAC : CommissioningState::RequestAttestation;
+            continueCommissioning(commission);
+            return true;
+
+        case CommissioningState::RequestAttestation:
+
+            if (response.path.clusterId != Clusters::OperationalCredentials::Id || response.path.commandId != Clusters::OperationalCredentials::Commands::AttestationResponse)
+                return false;
+
+            logDebug(m_debug) << "AttestationResponse received";
+            commission.state = CommissioningState::CSRRequest;
+            continueCommissioning(commission);
+            return true;
+
+        case CommissioningState::CSRRequest:
+
+            if (response.path.clusterId != Clusters::OperationalCredentials::Id || response.path.commandId != Clusters::OperationalCredentials::Commands::CSRResponse)
+                return false;
+
+            for (int i = 0; i < response.data.children.count(); i++)
+            {
+                const MatterTLV::Element &item = response.data.children.at(i);
+                MatterTLV::Element elements;
+
+                if (item.tag || item.type != MatterTLV::Type::ByteString)
+                    continue;
+
+                elements = MatterTLV::Decoder(item.value.toByteArray()).decode();
+
+                for (int j = 0; j < elements.children.count(); j++)
+                {
+                    const MatterTLV::Element &element = elements.children.at(j);
+
+                    if (element.tag != 1 || element.type != MatterTLV::Type::ByteString)
+                        continue;
+
+                    commission.publicKey = Crypto::csrPublicKey(element.value.toByteArray());
+                }
+            }
+
+            if (commission.publicKey.isEmpty())
+            {
+                logWarning << "Device public key not found in CSRResponse";
+                return true;
+            }
+
+            commission.rcac = generateCertificate(0, m_fabricPublicKey, true);
+            commission.noc = generateCertificate(device->nodeId(), commission.publicKey, false);
+            commission.state = CommissioningState::AddTrustedRootCert;
+
+            logDebug(m_debug) << "CSRResponse received, RCAC length" << commission.rcac.length() << "and NOC length" << commission.noc.length();
+            continueCommissioning(commission);
+            return true;
+
+        case CommissioningState::AddTrustedRootCert:
+
+            if (response.path.clusterId != Clusters::OperationalCredentials::Id || response.path.commandId != Clusters::OperationalCredentials::Commands::AddTrustedRootCertificate)
+                return false;
+
+            if (response.status)
+            {
+                logWarning << "AddTrustedRootCertificate request failed with status" << response.status;
+                return true;
+            }
+
+            logDebug(m_debug) << "AddTrustedRootCertificate request accepted";
+            commission.state = CommissioningState::AddNOC;
+            continueCommissioning(commission);
+            return true;
+
+        case CommissioningState::AddNOC:
+        {
+            quint8 status = 0xFF;
+
+            if (response.path.clusterId != Clusters::OperationalCredentials::Id || response.path.commandId != Clusters::OperationalCredentials::Commands::NOCResponse)
+                return false;
+
+            for (int i = 0; i < response.data.children.count(); i++)
+            {
+                const MatterTLV::Element &item = response.data.children.at(i);
+
+                switch (item.tag)
+                {
+                    case 0: status = static_cast <quint8> (item.value.toUInt()); break;
+                    case 1: device->setFabricIndex(static_cast <quint8> (item.value.toUInt())); break;
+                }
+            }
+
+            if (status)
+            {
+                logWarning << "AddNOC request failed with status" << status;
+                return true;
+            }
+
+            logInfo << "AddNOC request accepted";
+
+            // device supported network type is checked before sending credentials over BLE
+            if (m_bleCommissioning)
+            {
+                emit deviceEvent(device, Event::networkSetup);
+                commission.state = CommissioningState::ReadNetworkType;
+                continueCommissioning(commission);
+                return true;
+            }
+
+            device->setNetworkAddress(commission.address);
+            device->setNetworkPort(commission.port);
+            device->setThread(commission.address.protocol() == QAbstractSocket::IPv6Protocol);
+
+            m_commissioning = true;
+            QTimer::singleShot(COMMISSIONING_DELAY, this, [this, device] () { connectDevice(device); });
+
+            m_sessions->removeSession(localSessionId);
+            m_pendingCommissions.remove(localSessionId);
+
+            if (pase)
+                pase->deleteLater();
+
+            return true;
+        }
+
+        default:
+            return false;
     }
-
-    QByteArray tlvCert = Crypto::x509DerToMatterTLV(derCert);
-    logDebug(m_debug) << "Generated" << (isRCAC ? "RCAC" : "NOC") << derCert.length() << "DER bytes," << tlvCert.length() << "TLV bytes";
-
-    if (!isRCAC)
-        logDebug(m_debug) << "NOC DER hex:" << derCert.toHex();
-    return tlvCert;
 }
 
-// --- Standalone ACK ---
-
-void Matter::sendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port, bool initiator)
+void Matter::finishCommissioning(DeviceObject *device)
 {
-    SessionInfo *session = m_sessions->findByLocalId(sessionId);
+    logInfo << device << "commissioned successfully";
+    m_devices->append(Device(device));
 
-    if (session && session->active)
-    {
-        session->localMessageCounter++;
+    connect(device, &DeviceObject::deviceUpdated, this, &Matter::deviceUpdated, Qt::UniqueConnection);
+    connect(device, &DeviceObject::endpointUpdated, this, &Matter::endpointUpdated, Qt::UniqueConnection);
 
-        MessageHeader msgHeader;
-        msgHeader.flags = 0x00;
-        msgHeader.securityFlags = 0x00;
-        msgHeader.sessionId = session->peerSessionId;
-        msgHeader.messageCounter = session->localMessageCounter;
-
-        QByteArray header = MessageCodec::encodeHeader(msgHeader);
-
-        ProtocolHeader protoHeader;
-        protoHeader.exchangeFlags = static_cast <quint8> (ExchangeFlag::Acknowledgement);
-
-        if (initiator)
-            protoHeader.exchangeFlags |= static_cast <quint8> (ExchangeFlag::Initiator);
-        protoHeader.opcode = static_cast <quint8> (SecureChannelOpcode::MRPStandaloneAck);
-        protoHeader.exchangeId = exchangeId;
-        protoHeader.protocolId = static_cast <quint16> (ProtocolId::SecureChannel);
-        protoHeader.ackCounter = ackCounter;
-
-        QByteArray plaintext = MessageCodec::encodeProtocolHeader(protoHeader);
-        QByteArray nonce = SessionManager::buildNonce(msgHeader.securityFlags, msgHeader.messageCounter, session->active ? m_nodeId : 0);
-        QByteArray encrypted = Crypto::aesCcmEncrypt(session->i2rKey, nonce, header, plaintext, SESSION_TAG_LENGTH);
-
-        QByteArray data = header;
-        data.append(encrypted);
-        sendRawDatagram(data, session->peerAddress, session->peerPort);
-    }
-    else
-    {
-        MessageHeader msgHeader;
-        msgHeader.flags = 0x00;
-        msgHeader.securityFlags = 0x00;
-        msgHeader.sessionId = sessionId;
-        msgHeader.messageCounter = ++m_messageCounter;
-
-        ProtocolHeader protoHeader;
-        protoHeader.exchangeFlags = static_cast <quint8> (ExchangeFlag::Acknowledgement);
-
-        if (initiator)
-            protoHeader.exchangeFlags |= static_cast <quint8> (ExchangeFlag::Initiator);
-
-        protoHeader.opcode = static_cast <quint8> (SecureChannelOpcode::MRPStandaloneAck);
-        protoHeader.exchangeId = exchangeId;
-        protoHeader.protocolId = static_cast <quint16> (ProtocolId::SecureChannel);
-        protoHeader.ackCounter = ackCounter;
-
-        QByteArray data = MessageCodec::encodeMessage(msgHeader, protoHeader, QByteArray());
-        sendRawDatagram(data, address, port);
-    }
+    emit deviceEvent(device, Event::added);
 }
 
-// --- UDP read ---
+ProtocolHeader Matter::protocolHeader(quint8 opcode, quint16 protocolId, quint16 exchangeId, bool initiator, bool reliable, quint32 ackCounter)
+{
+    ProtocolHeader header;
+
+    header.exchangeFlags = reliable ? static_cast <quint8> (ExchangeFlag::Reliability) : 0;
+
+    if (initiator)
+        header.exchangeFlags |= static_cast <quint8> (ExchangeFlag::Initiator);
+
+    if (ackCounter)
+    {
+        header.exchangeFlags |= static_cast <quint8> (ExchangeFlag::Acknowledgement);
+        header.ackCounter = ackCounter;
+    }
+
+    header.opcode = opcode;
+    header.exchangeId = exchangeId;
+    header.protocolId = protocolId;
+
+    return header;
+}
+
+QByteArray Matter::encryptMessage(SessionInfo *session, const ProtocolHeader &protocolHeader, const QByteArray &payload, quint64 sourceNodeId)
+{
+    MessageHeader messageHeader;
+    QByteArray header;
+
+    messageHeader.sessionId = session->peerSessionId;
+    messageHeader.messageCounter = ++session->localMessageCounter;
+
+    header = MessageCodec::encodeHeader(messageHeader);
+    return header + Crypto::encrypt(session->i2rKey, SessionManager::nonce(messageHeader.securityFlags, messageHeader.messageCounter, sourceNodeId), header, MessageCodec::encodeProtocolHeader(protocolHeader).append(payload), SESSION_TAG_LENGTH);
+}
+
+QByteArray Matter::unencryptedMessage(const ProtocolHeader &protocolHeader, const QByteArray &payload)
+{
+    MessageHeader messageHeader;
+
+    messageHeader.flags = MESSAGE_FLAG_SOURCE_NODE_ID;
+    messageHeader.messageCounter = ++m_messageCounter;
+    messageHeader.sourceNodeId = m_nodeId;
+
+    return MessageCodec::encodeMessage(messageHeader, protocolHeader, payload);
+}
+
+void Matter::sendUnencrypted(quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, const QHostAddress &address, quint16 port, quint32 ackCounter)
+{
+    QByteArray data;
+
+    if (ackCounter)
+        m_mrp->cancelPendingAck(ackCounter);
+
+    data = unencryptedMessage(protocolHeader(opcode, protocolId, exchangeId, true, true, ackCounter), payload);
+
+    m_socket->writeDatagram(data, address, port);
+    m_mrp->messageSent(data, address, port, m_messageCounter, exchangeId, true);
+}
+
+void Matter::sendEncrypted(SessionInfo *session, quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator, quint32 ackCounter)
+{
+    QByteArray data;
+
+    if (ackCounter)
+        m_mrp->cancelPendingAck(ackCounter);
+
+    data = encryptMessage(session, protocolHeader(opcode, protocolId, exchangeId, initiator, true, ackCounter), payload, session->active ? m_nodeId : 0);
+
+    m_socket->writeDatagram(data, session->peerAddress, session->peerPort);
+    m_mrp->messageSent(data, session->peerAddress, session->peerPort, session->localMessageCounter, exchangeId, true, session->idleInterval);
+}
+
+void Matter::sendRequest(SessionInfo *session, InteractionModelOpcode opcode, const QByteArray &payload)
+{
+    sendEncrypted(session, static_cast <quint8> (opcode), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+}
+
+void Matter::sendCommissioningRequest(SessionInfo *session, InteractionModelOpcode opcode, const QByteArray &payload, quint16 exchangeId, bool ble)
+{
+    if (!ble)
+    {
+        sendEncrypted(session, static_cast <quint8> (opcode), static_cast <quint16> (ProtocolId::InteractionModel), payload, exchangeId, true);
+        return;
+    }
+
+    // BTP handles reliability itself, so MRP is not used over BLE
+    m_btp->sendMessage(encryptMessage(session, protocolHeader(static_cast <quint8> (opcode), static_cast <quint16> (ProtocolId::InteractionModel), exchangeId, true, false), payload, 0));
+}
+
+void Matter::sendSecureChannel(const PendingCommission &commission, SecureChannelOpcode opcode, const QByteArray &payload, quint32 ackCounter)
+{
+    if (!m_bleCommissioning)
+    {
+        sendUnencrypted(static_cast <quint8> (opcode), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, commission.address, commission.port, ackCounter);
+        return;
+    }
+
+    // BTP handles reliability itself, so MRP is not used over BLE
+    m_btp->sendMessage(unencryptedMessage(protocolHeader(static_cast <quint8> (opcode), static_cast <quint16> (ProtocolId::SecureChannel), commission.exchangeId, true, false), payload));
+}
 
 void Matter::readyRead(void)
 {
-    while (m_udp->hasPendingDatagrams())
+    while (m_socket->hasPendingDatagrams())
     {
-        QByteArray datagram;
-        QHostAddress sender;
-        quint16 senderPort;
+        MessageHeader messageHeader;
+        ProtocolHeader protocolHeader;
+        QByteArray data, payload;
+        QHostAddress address;
+        quint32 ipv4, offset;
+        quint16 port;
+        bool check;
 
-        datagram.resize(m_udp->pendingDatagramSize());
-        m_udp->readDatagram(datagram.data(), datagram.size(), &sender, &senderPort);
+        data.resize(static_cast <int> (m_socket->pendingDatagramSize()));
+        m_socket->readDatagram(data.data(), data.size(), &address, &port);
 
-        // normalize IPv4-mapped IPv6 to plain IPv4
-        bool ok;
-        quint32 ipv4 = sender.toIPv4Address(&ok);
+        ipv4 = address.toIPv4Address(&check);
 
-        if (ok)
-            sender = QHostAddress(ipv4);
+        // IPv4-mapped IPv6 address is converted to plain IPv4
+        if (check)
+            address = QHostAddress(ipv4);
 
-        MessageHeader msgHeader;
-        ProtocolHeader protoHeader;
-        quint32 headerOffset, payloadOffset;
-
-        if (!MessageCodec::decodeHeader(datagram, msgHeader, headerOffset))
+        if (!MessageCodec::decodeHeader(data, messageHeader, offset))
         {
-            logDebug(m_debug) << "Invalid message header from" << sender.toString() << "size:" << datagram.size() << "hex:" << datagram.left(16).toHex();
+            logDebug(m_debug) << "Invalid message header received from" << address.toString() << "with data" << data.left(16).toHex(':');
             continue;
         }
 
-        if (m_mrp->isDuplicate(sender, msgHeader.messageCounter))
+        if (m_mrp->duplicate(address, messageHeader.messageCounter))
             continue;
 
-        QByteArray payload;
-
-        if (msgHeader.sessionId != 0)
+        if (messageHeader.sessionId)
         {
-            // encrypted session
-            SessionInfo *session = m_sessions->findByLocalId(msgHeader.sessionId);
+            SessionInfo *session = m_sessions->byLocalId(messageHeader.sessionId);
+            Device device;
 
             if (!session)
                 continue;
 
-            QByteArray header = datagram.left(headerOffset);
-            QByteArray ciphertext = datagram.mid(headerOffset);
-
-            payload = m_sessions->decrypt(session, msgHeader.securityFlags, msgHeader.messageCounter, session->peerNodeId, header, ciphertext);
+            payload = m_sessions->decrypt(session, messageHeader.securityFlags, messageHeader.messageCounter, data.left(offset), data.mid(offset));
 
             if (payload.isEmpty())
             {
-                logDebug(m_debug) << "Decryption failed for session" << msgHeader.sessionId << "counter:" << msgHeader.messageCounter << "from" << sender.toString() << "size:" << ciphertext.size();
+                logDebug(m_debug) << "Session" << messageHeader.sessionId << "message" << messageHeader.messageCounter << "from" << address.toString() << "decryption failed";
                 continue;
             }
 
-            // A successfully decrypted peer message proves that a resumed CASE session is usable.
-            // Keep the fallback armed only until this first round-trip completes.
-            session->resumptionPendingValidation = false;
+            // successfully decrypted message proves that resumed CASE session is usable
+            session->resumptionPending = false;
+            logDebug(m_debug) << "Session" << messageHeader.sessionId << "message" << messageHeader.messageCounter << "decrypted, payload length" << payload.length();
 
-            logDebug(m_debug) << "Decrypted message from session" << msgHeader.sessionId << "counter:" << msgHeader.messageCounter << "size:" << payload.size();
+            device = m_devices->byNodeId(session->peerNodeId);
 
-            // device sent something — refresh lastSeen and bring online if not already (covers both Offline → Online and
-            // Unknown → Online for sessions restored from disk that hadn't seen any traffic yet)
-            Device backDevice = m_devices->byNodeId(session->peerNodeId);
-            if (!backDevice.isNull())
+            if (!device.isNull())
             {
-                DeviceObject *bd = reinterpret_cast <DeviceObject*> (backDevice.data());
-                bd->updateLastSeen();
-                if (bd->availability() != Availability::Online)
+                device->updateLastSeen();
+
+                // covers both offline devices and devices with restored session and unknown availability
+                if (device->availability() != Availability::Online)
                 {
-                    bd->setAvailability(Availability::Online);
-                    resetReconnectBackoff(bd);
-                    emit updateAvailability(bd);
+                    device->setAvailability(Availability::Online);
+                    device->setReconnectTime(0);
+                    emit availabilityUpdated(device.data());
                 }
             }
         }
         else
-        {
-            payload = datagram.mid(headerOffset);
-        }
+            payload = data.mid(offset);
 
-        if (!MessageCodec::decodeProtocolHeader(payload, 0, protoHeader, payloadOffset))
+        if (!MessageCodec::decodeProtocolHeader(payload, protocolHeader, offset))
         {
-            logDebug(m_debug) << "Invalid protocol header from" << sender.toString();
+            logDebug(m_debug) << "Invalid protocol header received from" << address.toString();
             continue;
         }
 
-        m_mrp->messageReceived(msgHeader.messageCounter, protoHeader.exchangeId, protoHeader.hasAck(), protoHeader.ackCounter, sender, senderPort, msgHeader.sessionId, protoHeader.needsAck(), protoHeader.isInitiator());
+        m_mrp->messageReceived(messageHeader.messageCounter, protocolHeader.exchangeId, protocolHeader.exchangeFlags & static_cast <quint8> (ExchangeFlag::Acknowledgement), protocolHeader.ackCounter, address, port, messageHeader.sessionId, protocolHeader.exchangeFlags & static_cast <quint8> (ExchangeFlag::Reliability), protocolHeader.exchangeFlags & static_cast <quint8> (ExchangeFlag::Initiator));
+        payload = payload.mid(offset);
 
-        QByteArray messagePayload = payload.mid(payloadOffset);
-
-        switch (static_cast <ProtocolId> (protoHeader.protocolId))
+        switch (static_cast <ProtocolId> (protocolHeader.protocolId))
         {
             case ProtocolId::SecureChannel:
-                handleSecureChannel(msgHeader, protoHeader, messagePayload, sender, senderPort);
+                parseSecureChannel(messageHeader, protocolHeader, payload);
                 break;
 
             case ProtocolId::InteractionModel:
-                handleInteractionModel(msgHeader, protoHeader, messagePayload, sender, senderPort);
+                parseInteractionModel(messageHeader, protocolHeader, payload);
                 break;
 
             default:
-                logWarning << "Unknown protocol:" << QString::number(protoHeader.protocolId, 16);
+                logWarning << "Unrecognized protocol" << QString::asprintf("0x%04x", protocolHeader.protocolId);
                 break;
         }
     }
 }
-
-// --- Timer callbacks ---
 
 void Matter::searchTimeout(void)
 {
     m_searching = false;
     m_ble->stopScan();
     m_mdns->stop();
+
     logWarning << "Device search timeout, device not found";
     emit deviceEvent(nullptr, Event::deviceNotFound, {{"nodeId", QString::number(m_searchNodeId, 16)}});
 }
 
-// --- BLE signal handlers ---
+void Matter::reconnectTimeout(void)
+{
+    qint64 time = QDateTime::currentMSecsSinceEpoch();
+    bool offline = false;
 
-void Matter::bleDeviceFound(const BLEDevice &device)
+    logDebug(m_debug) << "Reconnect timer fired";
+
+    for (int i = 0; i < m_devices->count(); i++)
+    {
+        const Device &device = m_devices->at(i);
+
+        if (device->availability() == Availability::Online || device->networkAddress().isNull())
+            continue;
+
+        // Thread peers are not reachable until OTBR is ready, resumeThreadDevices will reschedule them
+        if (device->thread() && !m_threadReady)
+            continue;
+
+        // devices with restored session or with CASE in progress are skipped, MRP or CASE failure will schedule reconnect
+        if (m_sessions->byPeerNodeId(device->nodeId()) || caseInProgress(device.data()))
+            continue;
+
+        offline = true;
+
+        if (device->reconnectTime() > time)
+            continue;
+
+        connectDevice(device.data());
+    }
+
+    if (!offline)
+        return;
+
+    scheduleReconnect();
+}
+
+void Matter::pingTimeout(void)
+{
+    qint64 time = QDateTime::currentSecsSinceEpoch();
+
+    for (int i = 0; i < m_devices->count(); i++)
+    {
+        const Device &device = m_devices->at(i);
+        SessionInfo *session;
+
+        if (device->availability() != Availability::Online)
+            continue;
+
+        session = m_sessions->byPeerNodeId(device->nodeId());
+
+        if (!session)
+        {
+            deviceUnreachable(device.data());
+            continue;
+        }
+
+        // actual counter is stored to be restored with margin after restart
+        device->setSessionCounter(session->localMessageCounter);
+
+        if (!device->lastSeen())
+            continue;
+
+        // battery powered devices are not pinged, subscription reports are used as keep alive
+        if (device->batteryPowered())
+        {
+            if (device->subscriptionInterval() && time - device->lastSeen() > device->subscriptionInterval() + SUBSCRIPTION_TIMEOUT_MARGIN)
+            {
+                logWarning << device << "has no subscription reports for" << device->subscriptionInterval() + SUBSCRIPTION_TIMEOUT_MARGIN << "seconds";
+                device->setAvailability(Availability::Offline);
+                emit availabilityUpdated(device.data());
+            }
+
+            continue;
+        }
+
+        if (time - device->lastSeen() <= PING_TIMEOUT)
+            continue;
+
+        sendRequest(session, InteractionModelOpcode::ReadRequest, InteractionModel::readRequest(QList <AttributePath> {AttributePath(0, Clusters::BasicInformation::Id, Clusters::BasicInformation::Attributes::DataModelRevision)}));
+    }
+}
+
+void Matter::threadTimeout(void)
+{
+    if (!fetchThreadDataset())
+        return;
+
+    m_threadTimer->stop();
+    resumeThreadDevices();
+}
+
+void Matter::retransmit(const QByteArray &data, const QHostAddress &address, quint16 port)
+{
+    m_socket->writeDatagram(data, address, port);
+}
+
+void Matter::retransmitFailed(quint32 messageCounter, quint16 exchangeId, const QHostAddress &address, quint16 port)
+{
+    SessionInfo *session;
+    Device device;
+
+    logWarning << "Message" << messageCounter << "delivery failed, exchange" << exchangeId;
+
+    if (m_pendingCases.contains(exchangeId))
+    {
+        PendingCase pending = m_pendingCases.take(exchangeId);
+
+        pending.session->deleteLater();
+
+        logDebug(m_debug) << pending.device << "CASE message delivery failed, retry in 10-15 seconds";
+        retryConnection(pending.device);
+        return;
+    }
+
+    session = m_sessions->byPeerAddress(address, port);
+
+    if (!session)
+        return;
+
+    device = m_devices->byNodeId(session->peerNodeId);
+
+    if (device.isNull())
+        return;
+
+    // some peers accept Sigma2_Resume, but don't process first encrypted message, so stored resumption data must be dropped to avoid endless loop
+    if (session->resumptionPending && !device->resumptionId().isEmpty())
+    {
+        logWarning << device << "resumed CASE session failed before first encrypted response, retrying with full handshake";
+        device->setResumption(QByteArray(), QByteArray());
+        m_devices->storeDatabase(true);
+    }
+
+    deviceUnreachable(device.data());
+}
+
+void Matter::sendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port, bool initiator)
+{
+    SessionInfo *session = m_sessions->byLocalId(sessionId);
+    ProtocolHeader header = protocolHeader(static_cast <quint8> (SecureChannelOpcode::MRPStandaloneAck), static_cast <quint16> (ProtocolId::SecureChannel), exchangeId, initiator, false);
+    MessageHeader messageHeader;
+
+    header.exchangeFlags |= static_cast <quint8> (ExchangeFlag::Acknowledgement);
+    header.ackCounter = ackCounter;
+
+    if (session && session->active)
+    {
+        m_socket->writeDatagram(encryptMessage(session, header, QByteArray(), m_nodeId), session->peerAddress, session->peerPort);
+        return;
+    }
+
+    messageHeader.sessionId = sessionId;
+    messageHeader.messageCounter = ++m_messageCounter;
+
+    m_socket->writeDatagram(MessageCodec::encodeMessage(messageHeader, header, QByteArray()), address, port);
+}
+
+void Matter::serviceFound(const MatterService &service)
 {
     if (!m_searching)
         return;
 
-    bool match = m_searchShortDiscriminator ? (device.discriminator >> 8) == m_searchDiscriminator : device.discriminator == m_searchDiscriminator;
+    if (service.operational)
+    {
+        QString name = service.instanceName.split('.').first();
+        int index = name.indexOf('-');
 
-    if (!match)
+        if (!m_commissioning || !m_commissionDevice)
+            return;
+
+        // instance name is "<compressed fabric id>-<node id>", node id must match commissioned device
+        if (index > 0)
+        {
+            quint64 nodeId;
+            bool check;
+
+            nodeId = name.mid(index + 1).toULongLong(&check, 16);
+
+            if (!check || nodeId != m_commissionDevice->nodeId())
+                return;
+        }
+
+        logInfo << "Operational device" << service.instanceName << "found at" << service.address.toString() << "port" << service.port;
+
+        m_searching = false;
+        m_searchTimer->stop();
+        m_mdns->stop();
+        m_ble->stopScan();
+
+        m_commissionDevice->setNetworkAddress(service.address);
+        m_commissionDevice->setNetworkPort(service.port);
+
+        connectDevice(m_commissionDevice);
+        return;
+    }
+
+    // only operational services are expected after BLE commissioning
+    if (m_commissioning || (m_shortDiscriminator ? service.discriminator >> 8 : service.discriminator) != m_discriminator)
         return;
 
-    logInfo << "BLE device matched, connecting:" << device.address;
+    for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
+    {
+        if (it.value().address != service.address || it.value().port != service.port)
+            continue;
+
+        return;
+    }
+
+    logInfo << "Commissionable device" << service.deviceName << "found at" << service.address.toString() << "port" << service.port << "with discriminator" << service.discriminator;
     emit deviceEvent(nullptr, Event::deviceFound, {{"nodeId", QString::number(m_searchNodeId, 16)}});
+
+    m_searching = false;
+    m_searchTimer->stop();
+    m_mdns->stop();
+    m_ble->stopScan();
+
+    // PASE session may already be established over BLE
+    for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
+    {
+        PendingCommission &commission = it.value();
+        SessionInfo *session = m_sessions->byLocalId(it.key());
+
+        if (commission.state != CommissioningState::ArmFailSafe)
+            continue;
+
+        logInfo << "Continuing commissioning with" << service.address.toString() << "port" << service.port << "over UDP...";
+
+        if (session)
+        {
+            session->peerAddress = service.address;
+            session->peerPort = service.port;
+        }
+
+        commission.address = service.address;
+        commission.port = service.port;
+        commission.service = service;
+        commission.device->setNetworkAddress(service.address);
+        commission.device->setNetworkPort(service.port);
+
+        continueCommissioning(commission);
+        return;
+    }
+
+    startCommissioning(service);
+}
+
+void Matter::bleDeviceFound(const BLEDevice &device)
+{
+    if (!m_searching || (m_shortDiscriminator ? device.discriminator >> 8 : device.discriminator) != m_discriminator)
+        return;
+
+    logInfo << "BLE device" << device.address << "matched, connecting...";
+    emit deviceEvent(nullptr, Event::deviceFound, {{"nodeId", QString::number(m_searchNodeId, 16)}});
+
     m_searching = false;
     m_searchTimer->stop();
     m_mdns->stop();
@@ -2447,94 +2451,86 @@ void Matter::bleDisconnected(void)
 
 void Matter::bleDataReceived(const QByteArray &data)
 {
-    logInfo << "BLE data received:" << data.size() << "bytes:" << data.toHex();
-    m_btp->handleData(data);
+    logInfo << "BLE data received:" << data.toHex(':');
+    m_btp->parseData(data);
 }
 
-void Matter::btpHandshakeComplete(void)
+void Matter::btpHandshakeFinished(void)
 {
-    logInfo << "BTP handshake complete, starting PASE over BLE...";
+    PendingCommission commission;
+
+    logInfo << "BTP handshake finished, starting PASE over BLE...";
     emit deviceEvent(nullptr, Event::deviceConnecting, {{"nodeId", QString::number(m_searchNodeId, 16)}});
+
     m_bleCommissioning = true;
 
-    PASESession *pase = new PASESession(this);
-    quint16 localSessionId = m_sessionCounter++;
-
-    connect(pase, &PASESession::sendPBKDFParamRequest, this, &Matter::paseSendPBKDFParamRequest);
-    connect(pase, &PASESession::sendPake1, this, &Matter::paseSendPake1);
-    connect(pase, &PASESession::sendPake3, this, &Matter::paseSendPake3);
-    connect(pase, &PASESession::established, this, &Matter::paseEstablished);
-    connect(pase, &PASESession::failed, this, &Matter::paseFailed);
-
-    PendingCommission commission;
-    commission.pase = pase;
-    commission.localSessionId = localSessionId;
-    commission.exchangeId = m_exchangeCounter++;
-    commission.passcode = m_searchPasscode;
-    commission.assignedNodeId = m_searchNodeId;
+    commission.pase = createPase();
     commission.state = CommissioningState::PASE;
+    commission.localSessionId = m_sessionCounter++;
+    commission.exchangeId = m_exchangeCounter++;
+    commission.passcode = m_passcode;
+    commission.nodeId = m_searchNodeId;
 
-    m_pendingCommissions.insert(localSessionId, commission);
-    pase->start(m_searchPasscode, localSessionId);
+    m_pendingCommissions.insert(commission.localSessionId, commission);
+    commission.pase->start(m_passcode, commission.localSessionId);
 }
 
 void Matter::btpMessageReceived(const QByteArray &message)
 {
+    MessageHeader messageHeader;
+    ProtocolHeader protocolHeader;
+    QByteArray payload;
+    quint32 headerOffset, payloadOffset;
+
     if (!m_bleCommissioning)
         return;
 
-    MatterProtocol::MessageHeader msgHeader;
-    MatterProtocol::ProtocolHeader protoHeader;
-    quint32 headerOffset, payloadOffset;
-
-    if (!MatterProtocol::MessageCodec::decodeHeader(message, msgHeader, headerOffset))
+    if (!MessageCodec::decodeHeader(message, messageHeader, headerOffset))
     {
-        logWarning << "BLE: failed to decode message header";
+        logWarning << "BLE message header decoding failed";
         return;
     }
 
-    QByteArray payload = message.mid(headerOffset);
+    payload = message.mid(headerOffset);
 
-    if (!MatterProtocol::MessageCodec::decodeProtocolHeader(payload, 0, protoHeader, payloadOffset))
+    if (!MessageCodec::decodeProtocolHeader(payload, protocolHeader, payloadOffset))
     {
-        logWarning << "BLE: failed to decode protocol header";
+        logWarning << "BLE message protocol header decoding failed";
         return;
     }
 
-    // encrypted BLE message — decrypt first
-    if (msgHeader.sessionId != 0)
+    if (messageHeader.sessionId)
     {
-        SessionInfo *session = m_sessions->findByLocalId(msgHeader.sessionId);
+        SessionInfo *session = m_sessions->byLocalId(messageHeader.sessionId);
 
         if (!session)
             return;
 
-        QByteArray header = message.left(headerOffset);
-        QByteArray ciphertext = message.mid(headerOffset);
-        QByteArray decrypted = m_sessions->decrypt(session, msgHeader.securityFlags, msgHeader.messageCounter, session->peerNodeId, header, ciphertext);
+        payload = m_sessions->decrypt(session, messageHeader.securityFlags, messageHeader.messageCounter, message.left(headerOffset), message.mid(headerOffset));
 
-        if (decrypted.isEmpty())
+        if (payload.isEmpty())
         {
-            logWarning << "BLE: decryption failed";
+            logWarning << "BLE message decryption failed";
             return;
         }
 
-        if (!MatterProtocol::MessageCodec::decodeProtocolHeader(decrypted, 0, protoHeader, payloadOffset))
+        if (!MessageCodec::decodeProtocolHeader(payload, protocolHeader, payloadOffset))
             return;
-
-        payload = decrypted.mid(payloadOffset);
     }
-    else
+
+    payload = payload.mid(payloadOffset);
+    logInfo << "BLE message received, protocol" << QString::asprintf("0x%04x", protocolHeader.protocolId) << "opcode" << QString::asprintf("0x%02x", protocolHeader.opcode) << "exchange" << protocolHeader.exchangeId << "payload length" << payload.length();
+
+    switch (static_cast <ProtocolId> (protocolHeader.protocolId))
     {
-        payload = payload.mid(payloadOffset);
+        case ProtocolId::SecureChannel:
+            parseSecureChannel(messageHeader, protocolHeader, payload);
+            break;
+
+        case ProtocolId::InteractionModel:
+            parseInteractionModel(messageHeader, protocolHeader, payload);
+            break;
     }
-
-    logInfo << "BLE message: protocol:" << QString::number(protoHeader.protocolId, 16) << "opcode:" << QString::number(protoHeader.opcode, 16) << "exchange:" << protoHeader.exchangeId << "payload:" << payload.size() << "bytes";
-
-    if (protoHeader.protocolId == static_cast <quint16> (MatterProtocol::ProtocolId::SecureChannel))
-        handleSecureChannel(msgHeader, protoHeader, payload, QHostAddress(), 0);
-    else if (protoHeader.protocolId == static_cast <quint16> (MatterProtocol::ProtocolId::InteractionModel))
-        handleInteractionModel(msgHeader, protoHeader, payload, QHostAddress(), 0);
 }
 
 void Matter::btpWriteData(const QByteArray &data)
@@ -2542,482 +2538,72 @@ void Matter::btpWriteData(const QByteArray &data)
     m_ble->write(data);
 }
 
-void Matter::resetReconnectBackoff(DeviceObject *device)
-{
-    if (!device)
-        return;
-
-    device->setNextReconnectAt(0);
-}
-
-void Matter::scheduleReconnect(void)
-{
-    if (!m_devices)
-        return;
-
-    qint64 now = QDateTime::currentMSecsSinceEpoch();
-    qint64 nearest = -1;
-
-    for (int i = 0; i < m_devices->count(); i++)
-    {
-        DeviceObject *device = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
-
-        if (device->availability() == Availability::Online || device->networkAddress().isNull())
-            continue;
-
-        // already have a session (e.g. restored from disk) — no CASE needed, MRP will signal if it's actually dead
-        if (m_sessions->findByPeerNodeId(device->nodeId()))
-            continue;
-
-        // skip devices with an in-flight CASE — they'll come back via caseEstablished/Failed
-        bool inProgress = false;
-
-        for (auto it = m_pendingCASEs.begin(); it != m_pendingCASEs.end(); it++)
-        {
-            if (it.value().device == device)
-            {
-                inProgress = true;
-                break;
-            }
-        }
-
-        if (inProgress)
-            continue;
-
-        qint64 ts = device->nextReconnectAt();
-
-        if (ts == 0)
-            ts = now;
-
-        if (nearest == -1 || ts < nearest)
-            nearest = ts;
-    }
-
-    if (nearest == -1)
-    {
-        logDebug(m_debug) << "scheduleReconnect: no eligible offline devices";
-        return;
-    }
-
-    qint64 delay = qMax <qint64> (0, nearest - now);
-    logDebug(m_debug) << "scheduleReconnect: timer set for" << delay << "ms";
-    m_reconnectTimer->start(static_cast <int> (delay));
-}
-
-void Matter::reconnectTimeout(void)
-{
-    if (!m_devices)
-        return;
-
-    qint64 now = QDateTime::currentMSecsSinceEpoch();
-    bool hasOffline = false;
-    logDebug(m_debug) << "reconnectTimeout fired";
-
-    for (int i = 0; i < m_devices->count(); i++)
-    {
-        DeviceObject *device = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
-
-        if (device->availability() == Availability::Online || device->networkAddress().isNull())
-            continue;
-
-        // OTBR not up yet — don't try to reach Thread peers; resumeThreadDevices() will reschedule once ready
-        if (device->thread() && !m_threadReady)
-            continue;
-
-        // already have a session (just restored from disk and waiting for first ack) — don't trigger CASE; we'll only
-        // know it's dead once an MRP retransmit fails, and that path explicitly schedules a reconnect
-        if (m_sessions->findByPeerNodeId(device->nodeId()))
-            continue;
-
-        // skip devices that already have a CASE handshake in flight — caseEstablished/caseFailed will trigger the next attempt
-        bool inProgress = false;
-
-        for (auto it = m_pendingCASEs.begin(); it != m_pendingCASEs.end(); it++)
-        {
-            if (it.value().device == device)
-            {
-                inProgress = true;
-                break;
-            }
-        }
-
-        if (inProgress)
-            continue;
-
-        hasOffline = true;
-
-        if (device->nextReconnectAt() <= now)
-            connectDevice(device);
-    }
-
-    if (hasOffline)
-        scheduleReconnect();
-}
-
-void Matter::pingTimeout(void)
-{
-    if (!m_devices)
-        return;
-
-    qint64 now = QDateTime::currentSecsSinceEpoch();
-
-    for (int i = 0; i < m_devices->count(); i++)
-    {
-        DeviceObject *device = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
-
-        if (device->availability() != Availability::Online)
-            continue;
-
-        SessionInfo *session = m_sessions->findByPeerNodeId(device->nodeId());
-
-        if (!session)
-        {
-            handleDeviceUnreachable(device);
-            continue;
-        }
-
-        // mirror current counter to device so the next store() persists a fresh value;
-        // on restart we restore counter+10000 margin to stay strictly monotonic across restarts
-        device->setSessionLocalCounter(session->localMessageCounter);
-
-        if (!device->lastSeen())
-            continue;
-
-        // battery-powered devices: trust subscription as keepalive, don't ping (saves battery),
-        // but mark offline if no reports within maxInterval+30s window
-        if (device->batteryPowered())
-        {
-            quint16 maxInt = device->subMaxInterval();
-
-            if (maxInt && now - device->lastSeen() > maxInt + 30)
-            {
-                logWarning << device << "no subscription reports for" << maxInt << "+30s, marking offline";
-                device->setAvailability(Availability::Offline);
-                emit updateAvailability(device);
-            }
-            continue;
-        }
-
-        // mains-powered: legacy 60s read-as-ping refreshes lastSeen and detects dead sessions
-        if (now - device->lastSeen() > 60)
-        {
-            QList <AttributePath> paths = {AttributePath(0, Clusters::BasicInformation::Id, Clusters::BasicInformation::Attributes::DataModelRevision)};
-            QByteArray payload = InteractionModel::encodeReadRequest(paths);
-            sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::ReadRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
-        }
-    }
-}
-
-void Matter::mrpRetransmit(const QByteArray &data, const QHostAddress &address, quint16 port)
-{
-    sendRawDatagram(data, address, port);
-}
-
-void Matter::handleDeviceUnreachable(DeviceObject *device)
-{
-    SessionInfo *session = m_sessions->findByPeerNodeId(device->nodeId());
-
-    if (session)
-        m_sessions->removeSession(session->localSessionId);
-
-    if (device->availability() == Availability::Online)
-    {
-        logWarning << device << "is unreachable, marking offline";
-        device->setAvailability(Availability::Offline);
-        emit updateAvailability(device);
-    }
-
-    // first failure since last success — nextReconnectAt is 0, go straight to CASE (covers restored-session-dead
-    // case, where we'd otherwise wait 10-15s for nothing). Anything else means we already had a retry scheduled
-    // or in flight; keep the 10-15s spacing so we don't spam a stuck/asleep peer
-    qint64 now = QDateTime::currentMSecsSinceEpoch();
-
-    if (device->nextReconnectAt() == 0)
-        device->setNextReconnectAt(now);
-    else if (device->nextReconnectAt() < now)
-        device->setNextReconnectAt(now + 10000 + QRandomGenerator::global()->bounded(5000));
-
-    scheduleReconnect();
-}
-
-void Matter::mrpRetransmitFailed(quint32 messageCounter, quint16 exchangeId, const QHostAddress &address, quint16 port)
-{
-    logWarning << "Message delivery failed, counter:" << messageCounter << "exchange:" << exchangeId;
-
-    // check if this is a pending CASE handshake failure — match by exchangeId so the right CASESession gets the failure
-    if (m_pendingCASEs.contains(exchangeId))
-    {
-        PendingCASE pending = m_pendingCASEs.take(exchangeId);
-        DeviceObject *failedDevice = pending.device;
-        pending.session->deleteLater();
-
-        qint64 jitterMs = QRandomGenerator::global()->bounded(5000);
-        failedDevice->setNextReconnectAt(QDateTime::currentMSecsSinceEpoch() + 10000 + jitterMs);
-        logDebug(m_debug) << failedDevice << "MRP retransmit failed during CASE, retry in 10-15s";
-        scheduleReconnect();
-        return;
-    }
-
-    SessionInfo *session = m_sessions->findByPeerAddress(address, port);
-
-    if (!session || !m_devices)
-        return;
-
-    quint64 nodeId = session->peerNodeId;
-
-    for (int i = 0; i < m_devices->count(); i++)
-    {
-        DeviceObject *device = reinterpret_cast <DeviceObject*> (m_devices->at(i).data());
-
-        if (device->nodeId() == nodeId)
-        {
-            // Some peers accept Sigma2_Resume but do not process the first encrypted message after the
-            // controller has restarted. Retrying the same saved resumption state loops forever. Drop only
-            // the resumption pair and let handleDeviceUnreachable schedule a full CASE handshake.
-            if (session->resumptionPendingValidation && !device->resumptionID().isEmpty())
-            {
-                logWarning << device << "resumed CASE failed before the first encrypted response, retrying with full handshake";
-                device->setResumptionID(QByteArray());
-                device->setResumptionSharedSecret(QByteArray());
-                m_devices->store(true);
-            }
-
-            handleDeviceUnreachable(device);
-            break;
-        }
-    }
-}
-
-void Matter::mrpSendStandaloneAck(quint32 ackCounter, quint16 exchangeId, quint16 sessionId, const QHostAddress &address, quint16 port, bool initiator)
-{
-    sendStandaloneAck(ackCounter, exchangeId, sessionId, address, port, initiator);
-}
-
-void Matter::mdnsServiceFound(const MatterService &service)
-{
-    if (!m_searching)
-        return;
-
-    // operational service — device found after BLE commissioning + WiFi connect
-    if (service.operational)
-    {
-        if (!m_caseNeedsCommissioningComplete || !m_pendingCommissionDevice)
-            return;
-
-        // instance name format: <compressed-fabric-id>-<node-id>._matter._tcp.local
-        // verify node ID matches the device we just commissioned
-        QString instanceName = service.instanceName.split('.').first();
-        int dash = instanceName.indexOf('-');
-
-        if (dash > 0)
-        {
-            bool ok;
-            quint64 nodeId = instanceName.mid(dash + 1).toULongLong(&ok, 16);
-
-            if (!ok || nodeId != m_pendingCommissionDevice->nodeId())
-                return;
-        }
-
-        logInfo << "Operational device found:" << service.instanceName << "at" << service.address.toString() << ":" << service.port;
-
-        m_searching = false;
-        m_searchTimer->stop();
-        m_mdns->stop();
-        m_ble->stopScan();
-
-        m_pendingCommissionDevice->setNetworkAddress(service.address);
-        m_pendingCommissionDevice->setNetworkPort(service.port);
-        connectDevice(m_pendingCommissionDevice);
-        return;
-    }
-
-    // after BLE commissioning, only accept operational services
-    if (m_caseNeedsCommissioningComplete)
-        return;
-
-    // commissionable service — match discriminator
-    if (m_searchShortDiscriminator)
-    {
-        if ((service.discriminator >> 8) != m_searchDiscriminator)
-            return;
-    }
-    else
-    {
-        if (service.discriminator != m_searchDiscriminator)
-            return;
-    }
-
-    // check if already commissioning this device
-    for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
-    {
-        if (it.value().address == service.address && it.value().port == service.port)
-            return;
-    }
-
-    logInfo << "Commissionable device found:" << service.deviceName << "discriminator:" << service.discriminator << "at" << service.address.toString() << ":" << service.port;
-    emit deviceEvent(nullptr, Event::deviceFound, {{"nodeId", QString::number(m_searchNodeId, 16)}});
-
-    m_searching = false;
-    m_searchTimer->stop();
-    m_mdns->stop();
-    m_ble->stopScan();
-
-    // check if we already have a PASE session from BLE provisioning
-    for (auto it = m_pendingCommissions.begin(); it != m_pendingCommissions.end(); it++)
-    {
-        if (it.value().state == CommissioningState::ArmFailSafe)
-        {
-            logInfo << "Continuing commissioning over UDP at" << service.address.toString() << ":" << service.port;
-
-            SessionInfo *session = m_sessions->findByLocalId(it.key());
-
-            if (session)
-            {
-                session->peerAddress = service.address;
-                session->peerPort = service.port;
-            }
-
-            it.value().address = service.address;
-            it.value().port = service.port;
-            it.value().device->setNetworkAddress(service.address);
-            it.value().device->setNetworkPort(service.port);
-            it.value().service = service;
-
-            continueCommissioning(it.value());
-            return;
-        }
-    }
-
-    startCommissioning(service);
-}
-
-// --- PASE signal handlers ---
-
-void Matter::sendBleMessage(quint8 opcode, quint16 protocolId, const QByteArray &payload, quint16 exchangeId, bool initiator)
-{
-    MatterProtocol::MessageHeader msgHeader;
-    msgHeader.flags = 0x04; // source node ID present (required for BLE)
-    msgHeader.securityFlags = 0x00;
-    msgHeader.sessionId = 0;
-    msgHeader.messageCounter = ++m_messageCounter;
-    msgHeader.sourceNodeId = m_nodeId;
-
-    MatterProtocol::ProtocolHeader protoHeader;
-    protoHeader.exchangeFlags = 0;
-
-    if (initiator)
-        protoHeader.exchangeFlags |= static_cast <quint8> (MatterProtocol::ExchangeFlag::Initiator);
-
-    // no MRP ACK/Reliability flags over BLE — BTP handles reliability
-
-    protoHeader.opcode = opcode;
-    protoHeader.exchangeId = exchangeId;
-    protoHeader.protocolId = protocolId;
-
-    QByteArray message = MatterProtocol::MessageCodec::encodeMessage(msgHeader, protoHeader, payload);
-    m_btp->sendMessage(message);
-}
-
 void Matter::paseSendPBKDFParamRequest(const QByteArray &payload, quint16 localSessionId)
 {
     if (!m_pendingCommissions.contains(localSessionId))
         return;
 
-    const PendingCommission &commission = m_pendingCommissions.value(localSessionId);
-
-    if (m_bleCommissioning)
-        sendBleMessage(static_cast <quint8> (SecureChannelOpcode::PBKDFParamRequest), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, true);
-    else
-        sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::PBKDFParamRequest), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, commission.address, commission.port, true);
+    sendSecureChannel(m_pendingCommissions.value(localSessionId), SecureChannelOpcode::PBKDFParamRequest, payload);
 }
 
 void Matter::paseSendPake1(const QByteArray &payload)
 {
-    PASESession *pase = qobject_cast <PASESession*> (sender());
+    PASESession *pase = reinterpret_cast <PASESession*> (sender());
 
-    if (!pase)
+    if (!m_pendingCommissions.contains(pase->localSessionId()))
         return;
 
-    quint16 sessionId = pase->localSessionId();
-
-    if (!m_pendingCommissions.contains(sessionId))
-        return;
-
-    const PendingCommission &commission = m_pendingCommissions.value(sessionId);
-
-    if (m_bleCommissioning)
-        sendBleMessage(static_cast <quint8> (SecureChannelOpcode::PASEPake1), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, true);
-    else
-        sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::PASEPake1), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, commission.address, commission.port, true, pase->lastPeerMessageCounter());
+    sendSecureChannel(m_pendingCommissions.value(pase->localSessionId()), SecureChannelOpcode::PASEPake1, payload, pase->peerMessageCounter());
 }
 
 void Matter::paseSendPake3(const QByteArray &payload)
 {
-    PASESession *pase = qobject_cast <PASESession*> (sender());
+    PASESession *pase = reinterpret_cast <PASESession*> (sender());
 
-    if (!pase)
+    if (!m_pendingCommissions.contains(pase->localSessionId()))
         return;
 
-    quint16 sessionId = pase->localSessionId();
-
-    if (!m_pendingCommissions.contains(sessionId))
-        return;
-
-    const PendingCommission &commission = m_pendingCommissions.value(sessionId);
-
-    if (m_bleCommissioning)
-        sendBleMessage(static_cast <quint8> (SecureChannelOpcode::PASEPake3), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, true);
-    else
-        sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::PASEPake3), static_cast <quint16> (ProtocolId::SecureChannel), payload, commission.exchangeId, commission.address, commission.port, true, pase->lastPeerMessageCounter());
+    sendSecureChannel(m_pendingCommissions.value(pase->localSessionId()), SecureChannelOpcode::PASEPake3, payload, pase->peerMessageCounter());
 }
 
 void Matter::paseEstablished(quint16 localSessionId, quint16 peerSessionId)
 {
+    PendingCommission *commission;
+    SessionInfo session;
+
     if (!m_pendingCommissions.contains(localSessionId))
         return;
 
-    PendingCommission &commission = m_pendingCommissions[localSessionId];
+    commission = &m_pendingCommissions[localSessionId];
 
-    // register encrypted session
-    SessionInfo session;
+    // PASE session is not operational, peer node id is unknown until commissioning finished
     session.localSessionId = localSessionId;
     session.peerSessionId = peerSessionId;
-    session.i2rKey = commission.pase->encryptKey();
-    session.r2iKey = commission.pase->decryptKey();
-    session.attestationChallenge = commission.pase->attestationChallenge();
-    session.peerAddress = commission.address;
-    session.peerPort = commission.port;
-    session.peerNodeId = 0; // unknown until commissioning
-    session.localMessageCounter = 0;
-    session.active = false; // not yet operational
+    session.i2rKey = commission->pase->encryptKey();
+    session.r2iKey = commission->pase->decryptKey();
+    session.attestationChallenge = commission->pase->attestationChallenge();
+    session.peerAddress = commission->address;
+    session.peerPort = commission->port;
 
     m_sessions->addSession(session);
 
-    // create device object
-    quint64 nodeId = commission.assignedNodeId;
-    commission.device = new DeviceObject(nodeId, QString("matter_%1").arg(nodeId, 0, 16));
-    commission.device->setVendorId(commission.service.vendorId);
-    commission.device->setProductId(commission.service.productId);
-    commission.device->setNetworkAddress(commission.address);
-    commission.device->setNetworkPort(commission.port);
+    commission->device = new DeviceObject(commission->nodeId, QString("matter_%1").arg(commission->nodeId, 0, 16));
+    commission->device->setVendorId(commission->service.vendorId);
+    commission->device->setProductId(commission->service.productId);
+    commission->device->setNetworkAddress(commission->address);
+    commission->device->setNetworkPort(commission->port);
 
-    // both BLE and UDP: start with ArmFailSafe
-    commission.state = CommissioningState::ArmFailSafe;
-    continueCommissioning(commission);
+    commission->state = CommissioningState::ArmFailSafe;
+    continueCommissioning(*commission);
 }
 
 void Matter::paseFailed(const QString &reason)
 {
-    PASESession *pase = qobject_cast <PASESession*> (sender());
+    PASESession *pase = reinterpret_cast <PASESession*> (sender());
+    quint16 localSessionId = pase->localSessionId();
 
-    if (!pase)
-        return;
-
-    quint16 sessionId = pase->localSessionId();
-    quint64 nodeId = m_pendingCommissions.value(sessionId).assignedNodeId;
-
-    logWarning << "PASE failed:" << reason;
-    emit deviceEvent(nullptr, Event::connectFailed, {{"nodeId", QString::number(nodeId, 16)}});
+    logWarning << "PASE session failed:" << reason;
+    emit deviceEvent(nullptr, Event::connectFailed, {{"nodeId", QString::number(m_pendingCommissions.value(localSessionId).nodeId, 16)}});
 
     if (m_bleCommissioning)
     {
@@ -3025,529 +2611,141 @@ void Matter::paseFailed(const QString &reason)
         m_ble->disconnectDevice();
     }
 
-    m_pendingCommissions.remove(sessionId);
+    m_pendingCommissions.remove(localSessionId);
     pase->deleteLater();
 }
 
-// --- CASE signal handlers ---
-
-Matter::PendingCASE *Matter::findPendingCASE(CASESession *session)
+void Matter::caseSendSigma1(const QByteArray &payload)
 {
-    if (!session)
-        return nullptr;
-
-    for (auto it = m_pendingCASEs.begin(); it != m_pendingCASEs.end(); it++)
-    {
-        if (it.value().session == session)
-            return &it.value();
-    }
-
-    return nullptr;
-}
-
-void Matter::caseSendSigma1(const QByteArray &payload, quint16 localSessionId)
-{
-    Q_UNUSED(localSessionId)
-
-    CASESession *session = qobject_cast <CASESession*> (sender());
-    PendingCASE *pending = findPendingCASE(session);
+    PendingCase *pending = pendingCase(reinterpret_cast <CASESession*> (sender()));
 
     if (!pending)
         return;
 
-    sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::CASESigma1), static_cast <quint16> (ProtocolId::SecureChannel), payload, pending->exchangeId, pending->address, pending->port, true);
+    sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::CASESigma1), static_cast <quint16> (ProtocolId::SecureChannel), payload, pending->exchangeId, pending->address, pending->port);
 }
 
 void Matter::caseSendSigma3(const QByteArray &payload)
 {
-    CASESession *session = qobject_cast <CASESession*> (sender());
-    PendingCASE *pending = findPendingCASE(session);
+    CASESession *session = reinterpret_cast <CASESession*> (sender());
+    PendingCase *pending = pendingCase(session);
 
     if (!pending)
         return;
 
-    sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::CASESigma3), static_cast <quint16> (ProtocolId::SecureChannel), payload, pending->exchangeId, pending->address, pending->port, true, session->lastPeerMessageCounter());
+    sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::CASESigma3), static_cast <quint16> (ProtocolId::SecureChannel), payload, pending->exchangeId, pending->address, pending->port, session->peerMessageCounter());
 }
 
 void Matter::caseEstablished(quint16 localSessionId, quint16 peerSessionId)
 {
-    CASESession *caseSes = qobject_cast <CASESession*> (sender());
-    PendingCASE *pending = findPendingCASE(caseSes);
+    CASESession *session = reinterpret_cast <CASESession*> (sender());
+    PendingCase *pending = pendingCase(session);
+    SessionInfo info, *current;
+    DeviceObject *device;
+    quint16 exchangeId;
+    bool commissioning;
 
     if (!pending)
         return;
 
-    DeviceObject *device = pending->device;
-    bool needsCC = pending->needsCommissioningComplete;
-    quint16 exchangeId = pending->exchangeId;
+    device = pending->device;
+    exchangeId = pending->exchangeId;
+    commissioning = pending->commissioning;
 
-    // CASE resumption: ack Sigma2_Resume with SecureChannel StatusReport(success), per CHIP HandleSigma2Resume.
-    // Without this the responder never finalizes the resumed session and our first encrypted message goes unanswered.
-    if (caseSes->resumed())
-    {
-        QByteArray status(8, 0);
-        sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::StatusReport), static_cast <quint16> (ProtocolId::SecureChannel), status, exchangeId, pending->address, pending->port, true, caseSes->lastPeerMessageCounter());
-    }
+    // resumed session must be acknowledged with status report, otherwise responder never finalizes it
+    if (session->resumed())
+        sendUnencrypted(static_cast <quint8> (SecureChannelOpcode::StatusReport), static_cast <quint16> (ProtocolId::SecureChannel), QByteArray(8, 0), exchangeId, pending->address, pending->port, session->peerMessageCounter());
 
-    // register encrypted session
-    SessionInfo session;
-    session.localSessionId = localSessionId;
-    session.peerSessionId = peerSessionId;
-    session.i2rKey = caseSes->encryptKey();
-    session.r2iKey = caseSes->decryptKey();
-    session.attestationChallenge = caseSes->attestationChallenge();
-    session.peerNodeId = device->nodeId();
-    session.localMessageCounter = 0;
-    session.active = true;
-    session.resumptionPendingValidation = caseSes->resumed();
+    info.localSessionId = localSessionId;
+    info.peerSessionId = peerSessionId;
+    info.i2rKey = session->encryptKey();
+    info.r2iKey = session->decryptKey();
+    info.attestationChallenge = session->attestationChallenge();
+    info.peerAddress = device->networkAddress();
+    info.peerPort = device->networkPort();
+    info.peerNodeId = device->nodeId();
+    info.active = true;
+    info.resumptionPending = session->resumed();
+    info.idleInterval = session->idleInterval();
+    info.activeInterval = session->activeInterval();
+    info.activeThreshold = session->activeThreshold();
 
-    session.peerAddress = device->networkAddress();
-    session.peerPort = device->networkPort();
     device->updateLastSeen();
+    current = m_sessions->byPeerNodeId(device->nodeId());
 
-    session.idleInterval = caseSes->idleInterval();
-    session.activeInterval = caseSes->activeInterval();
-    session.activeThreshold = caseSes->activeThreshold();
+    if (current)
+        m_sessions->removeSession(current->localSessionId);
 
-    // remove old (dead) session
-    SessionInfo *existing = m_sessions->findByPeerNodeId(device->nodeId());
-
-    if (existing)
-        m_sessions->removeSession(existing->localSessionId);
-
-    m_sessions->addSession(session);
+    m_sessions->addSession(info);
+    current = m_sessions->byLocalId(localSessionId);
 
     logInfo << device << "CASE session established";
 
-    // discover device endpoints (skip during initial commissioning — discover after CommissioningComplete)
-    if (device->endpoints().isEmpty() && !needsCC)
+    // freshly commissioned device is discovered after CommissioningComplete response
+    if (device->endpoints().isEmpty() && !commissioning)
         discoverDevice(device);
 
-    // send CommissioningComplete on CASE session only during initial commissioning
-    SessionInfo *caseSession = m_sessions->findByLocalId(localSessionId);
-
-    if (caseSession && needsCC)
+    if (current && commissioning)
     {
-        m_pendingCommissionDevice = device;
-        logDebug(m_debug) << "Sending CommissioningComplete on CASE session...";
-
         MatterTLV::Encoder fields;
+
+        logDebug(m_debug) << "Sending CommissioningComplete request...";
+        m_commissionDevice = device;
+
         fields.openStructure();
         fields.closeContainer();
 
-        QByteArray payload = InteractionModel::encodeInvokeRequest(CommandPath(0, Clusters::GeneralCommissioning::Id, Clusters::GeneralCommissioning::Commands::CommissioningComplete), fields);
-        sendEncrypted(caseSession, static_cast <quint8> (InteractionModelOpcode::InvokeRequest), static_cast <quint16> (ProtocolId::InteractionModel), payload, m_exchangeCounter++, true);
+        sendRequest(current, InteractionModelOpcode::InvokeRequest, InteractionModel::invokeRequest(CommandPath(0, Clusters::GeneralCommissioning::Id, Clusters::GeneralCommissioning::Commands::CommissioningComplete), fields));
     }
 
-    // persist new resumption data so the next CASE can skip the full Sigma1/2/3 handshake (Matter §4.13.3)
-    QByteArray newResumptionID = caseSes->newResumptionID();
-
-    if (!newResumptionID.isEmpty())
+    // new resumption data is stored to skip full handshake next time
+    if (!session->resumptionId().isEmpty())
     {
-        device->setResumptionID(newResumptionID);
-        device->setResumptionSharedSecret(caseSes->sharedSecret());
-        logInfo << device << (caseSes->resumed() ? "session resumed" : "full handshake") << ", saving new resumptionID:" << newResumptionID.toHex();
+        device->setResumption(session->resumptionId(), session->sharedSecret());
+        logInfo << device << (session->resumed() ? "session resumed" : "full handshake finished") << ", new resumption id" << session->resumptionId().toHex();
     }
 
-    // persist the secure session for battery-powered devices so a service restart can decrypt with the
-    // existing keys instead of forcing a fresh CASE handshake (which wakes the radio and burns ~tens of
-    // seconds on slow MRP intervals). mains devices skip persistence — CASE-with-resumption is already
-    // sub-second so storing keys to disk has no upside. the battery flag may still be false here on the
-    // very first caseEstablished after commissioning (PowerSource detection happens later in discovery);
-    // discovery's finalize step late-populates session fields once the flag flips to true.
+    // battery powered device session is stored to avoid slow CASE handshake after restart, battery powered flag of freshly commissioned device is unknown until discovery
     if (device->batteryPowered())
-    {
-        device->setSessionLocalId(localSessionId);
-        device->setSessionPeerId(peerSessionId);
-        device->setSessionI2RKey(caseSes->encryptKey());
-        device->setSessionR2IKey(caseSes->decryptKey());
-        device->setSessionAttestation(caseSes->attestationChallenge());
-        device->setSessionLocalCounter(0);
-        device->setSessionIdleInterval(caseSes->idleInterval());
-        device->setSessionActiveInterval(caseSes->activeInterval());
-        device->setSessionActiveThreshold(caseSes->activeThreshold());
-    }
+        device->storeSession(&info);
 
-    m_devices->store(true);
+    m_devices->storeDatabase(true);
 
     device->setAvailability(Availability::Online);
-    resetReconnectBackoff(device);
-    emit updateAvailability(device);
+    device->setReconnectTime(0);
+    emit availabilityUpdated(device);
 
-    // subscribe to attributes for known devices (cold start or CASE reconnect)
     if (!device->endpoints().isEmpty())
-        subscribeDevice(device, m_sessions->findByLocalId(localSessionId));
+        subscribeDevice(device, current);
 
-    caseSes->deleteLater();
-    m_pendingCASEs.remove(exchangeId);
+    session->deleteLater();
+    m_pendingCases.remove(exchangeId);
 }
 
 void Matter::caseFailed(const QString &reason)
 {
-    logWarning << "CASE failed:" << reason;
+    CASESession *session = reinterpret_cast <CASESession*> (sender());
+    PendingCase *pending = pendingCase(session);
+    DeviceObject *device = pending ? pending->device : nullptr;
+    quint16 exchangeId = pending ? pending->exchangeId : 0;
 
-    CASESession *caseSes = qobject_cast <CASESession*> (sender());
-    DeviceObject *failedDevice = nullptr;
-    quint16 exchangeId = 0;
+    logWarning << "CASE session failed:" << reason;
+    session->deleteLater();
 
-    if (caseSes)
-    {
-        PendingCASE *pending = findPendingCASE(caseSes);
+    if (pending)
+        m_pendingCases.remove(exchangeId);
 
-        if (pending)
-        {
-            failedDevice = pending->device;
-            exchangeId = pending->exchangeId;
-        }
-    }
-
-    if (caseSes)
-        caseSes->deleteLater();
-
-    if (exchangeId)
-        m_pendingCASEs.remove(exchangeId);
-
-    // only Sigma2_Resume MIC failure proves our resumption secret is no longer valid; everything else (Busy, timeout,
-    // MRP failure) is transient — peer is still cleaning up the previous session, dropping resumption just forces a
-    // slower full handshake on the next attempt without making the current one succeed
-    if (failedDevice && !failedDevice->resumptionID().isEmpty() && reason.startsWith("Sigma2_Resume MIC"))
-    {
-        logInfo << failedDevice << "clearing resumption data after MIC verification failure - next attempt will be full handshake";
-        failedDevice->setResumptionID(QByteArray());
-        failedDevice->setResumptionSharedSecret(QByteArray());
-        m_devices->store(true);
-    }
-
-    if (failedDevice)
-    {
-        // simple retry policy: 10-15s for every CASE failure regardless of cause — small, predictable, recovers from sleeps fast,
-        // and at home scale (a handful of devices) the network cost of a stuck Sigma1 every ~12s is negligible
-        qint64 jitterMs = QRandomGenerator::global()->bounded(5000);
-        failedDevice->setNextReconnectAt(QDateTime::currentMSecsSinceEpoch() + 10000 + jitterMs);
-        logDebug(m_debug) << failedDevice << "CASE retry in 10-15s";
-        scheduleReconnect();
-    }
-}
-
-// --- Setup code parsing ---
-
-static const char base38Alphabet[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-.";
-
-static QByteArray base38Decode(const QString &encoded)
-{
-    QByteArray result;
-    int i = 0;
-
-    while (i < encoded.length())
-    {
-        int charsInChunk = qMin(encoded.length() - i, 5);
-        int bytesInChunk = charsInChunk == 5 ? 3 : (charsInChunk == 4 ? 2 : 1);
-
-        quint32 value = 0;
-        quint32 base = 1;
-
-        for (int j = 0; j < charsInChunk; j++)
-        {
-            const char *p = strchr(base38Alphabet, encoded.at(i + j).toLatin1());
-
-            if (!p)
-                return QByteArray();
-
-            value += static_cast <quint32> (p - base38Alphabet) * base;
-            base *= 38;
-        }
-
-        for (int j = 0; j < bytesInChunk; j++)
-        {
-            result.append(static_cast <char> (value & 0xFF));
-            value >>= 8;
-        }
-
-        i += charsInChunk;
-    }
-
-    return result;
-}
-
-bool Matter::parseQRCode(const QString &payload, quint32 &passcode, quint16 &discriminator)
-{
-    if (!payload.startsWith("MT:"))
-        return false;
-
-    QByteArray data = base38Decode(payload.mid(3));
-
-    if (data.length() < 11)
-        return false;
-
-    // 88-bit payload, little-endian bitfield:
-    // bits  0-2:  version (3)
-    // bits  3-18: vendorId (16)
-    // bits 19-34: productId (16)
-    // bits 35-36: commissioningFlow (2)
-    // bits 37-44: rendezvousFlags (8)
-    // bits 45-56: discriminator (12)
-    // bits 57-83: passcode (27)
-    // bits 84-87: padding (4)
-
-    quint64 low;
-    memcpy(&low, data.constData(), 8);
-    low = qFromLittleEndian(low);
-
-    quint32 high = 0;
-    memcpy(&high, data.constData() + 8, 3);
-    high = qFromLittleEndian(high);
-
-    discriminator = static_cast <quint16> ((low >> 45) & 0xFFF);
-    passcode = static_cast <quint32> (((low >> 57) | (static_cast <quint64> (high) << 7)) & 0x7FFFFFF);
-
-    if (passcode == 0 || passcode > 99999998)
-        return false;
-
-    return true;
-}
-
-static QString base38Encode(const QByteArray &data)
-{
-    QString result;
-    int i = 0;
-
-    while (i < data.length())
-    {
-        int bytesInChunk = qMin(data.length() - i, 3);
-        int charsInChunk = bytesInChunk == 3 ? 5 : (bytesInChunk == 2 ? 4 : 2);
-
-        quint32 value = 0;
-
-        for (int j = bytesInChunk - 1; j >= 0; j--)
-            value = (value << 8) | static_cast <quint8> (data.at(i + j));
-
-        for (int j = 0; j < charsInChunk; j++)
-        {
-            result.append(QLatin1Char(base38Alphabet[value % 38]));
-            value /= 38;
-        }
-
-        i += bytesInChunk;
-    }
-
-    return result;
-}
-
-// Verhoeff checksum tables
-static const int verhoeffD[10][10] = {
-    {0,1,2,3,4,5,6,7,8,9}, {1,2,3,4,0,6,7,8,9,5}, {2,3,4,0,1,7,8,9,5,6},
-    {3,4,0,1,2,8,9,5,6,7}, {4,0,1,2,3,9,5,6,7,8}, {5,9,8,7,6,0,4,3,2,1},
-    {6,5,9,8,7,1,0,4,3,2}, {7,6,5,9,8,2,1,0,4,3}, {8,7,6,5,9,3,2,1,0,4},
-    {9,8,7,6,5,4,3,2,1,0}
-};
-
-static const int verhoeffInv[] = {0,4,3,2,1,5,6,7,8,9};
-
-static const int verhoeffP[8][10] = {
-    {0,1,2,3,4,5,6,7,8,9}, {1,5,7,6,2,8,3,0,9,4}, {5,8,0,3,7,9,6,1,4,2},
-    {8,9,1,6,0,4,3,5,2,7}, {9,4,5,3,1,2,6,8,7,0}, {4,2,8,6,5,7,3,9,0,1},
-    {2,7,9,3,8,0,6,4,1,5}, {7,0,4,6,9,1,3,2,5,8}
-};
-
-static int verhoeffChecksum(const QString &digits)
-{
-    int c = 0;
-
-    for (int i = digits.length() - 1; i >= 0; i--)
-        c = verhoeffD[c][verhoeffP[(digits.length() - i) % 8][digits.at(i).digitValue()]];
-
-    return verhoeffInv[c];
-}
-
-QString Matter::generateManualCode(quint32 passcode, quint16 discriminator)
-{
-    // short discriminator = top 4 bits of 12-bit discriminator
-    quint8 shortDisc = (discriminator >> 8) & 0x0F;
-
-    // chunk1 (1 digit): bit0 = vidPidPresent (0 for 11-digit), bits 1-2 = shortDisc MSBs
-    quint32 chunk1 = (shortDisc >> 2) & 0x03;
-
-    // chunk2 (5 digits): bits 14-15 = shortDisc LSBs, bits 0-13 = passcode low 14 bits
-    quint32 chunk2 = ((shortDisc & 0x03) << 14) | (passcode & 0x3FFF);
-
-    // chunk3 (4 digits): passcode bits 14-26
-    quint32 chunk3 = (passcode >> 14) & 0x1FFF;
-
-    QString digits = QString("%1%2%3").arg(chunk1, 1, 10, QLatin1Char('0')).arg(chunk2, 5, 10, QLatin1Char('0')).arg(chunk3, 4, 10, QLatin1Char('0'));
-    digits.append(QString::number(verhoeffChecksum(digits)));
-    return digits;
-}
-
-QString Matter::generateQRCode(quint32 passcode, quint16 discriminator)
-{
-    // 88-bit payload, little-endian bitfield
-    quint64 low = 0;
-    quint32 high = 0;
-
-    // version = 0 (bits 0-2)
-    // vendorId = 0 (bits 3-18)
-    // productId = 0 (bits 19-34)
-    // commissioningFlow = 2 (bits 35-36) — Enhanced Commissioning Method
-    low |= (static_cast <quint64> (2) << 35);
-    // rendezvousFlags = 4 (bits 37-44) — BLE
-    low |= (static_cast <quint64> (4) << 37);
-    // discriminator (bits 45-56)
-    low |= (static_cast <quint64> (discriminator & 0xFFF) << 45);
-    // passcode low 7 bits (bits 57-63)
-    low |= (static_cast <quint64> (passcode & 0x7F) << 57);
-    // passcode remaining 20 bits (bits 64-83 → high bits 0-19)
-    high |= (passcode >> 7) & 0xFFFFF;
-
-    QByteArray data(11, 0);
-    quint64 lowLE = qToLittleEndian(low);
-    memcpy(data.data(), &lowLE, 8);
-    quint32 highLE = qToLittleEndian(high);
-    memcpy(data.data() + 8, &highLE, 3);
-
-    return "MT:" + base38Encode(data);
-}
-
-QByteArray Matter::extractThreadExtPanId(const QByteArray &dataset)
-{
-    // Thread MeshCoP TLV: <type:1><length:1, or 0xff + 2-byte length><value>; type 2 = ExtendedPanId
-    int i = 0;
-
-    while (i + 1 < dataset.size())
-    {
-        quint8 type = static_cast <quint8> (dataset[i++]);
-        quint16 length = static_cast <quint8> (dataset[i++]);
-
-        if (length == 0xFF)
-        {
-            if (i + 2 > dataset.size())
-                return QByteArray();
-
-            length = (static_cast <quint8> (dataset[i]) << 8) | static_cast <quint8> (dataset[i + 1]);
-            i += 2;
-        }
-
-        if (i + length > dataset.size())
-            return QByteArray();
-
-        if (type == 2 && length == 8)
-            return dataset.mid(i, 8);
-
-        i += length;
-    }
-
-    return QByteArray();
-}
-
-void Matter::shareDevice(DeviceObject *device, quint16 timeout)
-{
-    SessionInfo *session = m_sessions->findByPeerNodeId(device->nodeId());
-
-    if (!session || !session->active)
-    {
-        logWarning << device << "no active session to share";
+    if (!device)
         return;
-    }
 
-    if (m_pendingShares.contains(device->nodeId()))
+    // only MIC verification failure proves that resumption data is invalid, other failures are transient
+    if (!device->resumptionId().isEmpty() && reason.startsWith("Sigma2_Resume MIC"))
     {
-        logWarning << device << "already sharing";
-        return;
+        logInfo << device << "resumption data cleared, next attempt will be full handshake";
+        device->setResumption(QByteArray(), QByteArray());
+        m_devices->storeDatabase(true);
     }
 
-    // generate random passcode (1-99999998, excluding invalid values)
-    quint32 passcode;
-
-    do
-    {
-        QByteArray bytes = Crypto::randomBytes(4);
-        memcpy(&passcode, bytes.constData(), 4);
-        passcode = (passcode % 99999998) + 1;
-    }
-    while (passcode == 11111111 || passcode == 22222222 || passcode == 33333333 ||
-           passcode == 44444444 || passcode == 55555555 || passcode == 66666666 ||
-           passcode == 77777777 || passcode == 88888888 || passcode == 12345678 ||
-           passcode == 87654321);
-
-    // generate random 12-bit discriminator
-    QByteArray discBytes = Crypto::randomBytes(2);
-    quint16 discriminator = (static_cast <quint16> (static_cast <quint8> (discBytes[0])) | (static_cast <quint16> (static_cast <quint8> (discBytes[1])) << 8)) & 0xFFF;
-
-    // compute PASE verifier: PBKDF2 → w0s || w1s → w0 || L (where L = w1 * G)
-    quint32 iterations = 1000;
-    QByteArray salt = Crypto::randomBytes(32);
-
-    QByteArray passcodeBytes(4, 0);
-    quint32 le = qToLittleEndian(passcode);
-    memcpy(passcodeBytes.data(), &le, 4);
-
-    QByteArray derived = Crypto::pbkdf2(passcodeBytes, salt, iterations, 80);
-    BigNum w0s(derived.left(40));
-    BigNum w1s(derived.mid(40, 40));
-    BigNum order = BigNum::fromOrder();
-    BigNum w0 = BigNum::mod(w0s, order);
-    BigNum w1 = BigNum::mod(w1s, order);
-
-    // w0 as 32-byte big-endian
-    QByteArray w0Bytes(32, 0);
-    BN_bn2bin(w0.bn(), reinterpret_cast <unsigned char*> (w0Bytes.data()) + (32 - BN_num_bytes(w0.bn())));
-
-    // L = w1 * G (65-byte uncompressed point)
-    ECPoint L = ECPoint::fromMultiply(ECPoint::generator(), w1.bn());
-    QByteArray lBytes = L.toUncompressed();
-
-    QByteArray verifier = w0Bytes + lBytes; // 97 bytes
-
-    logInfo << device << "sharing, passcode:" << passcode << "discriminator:" << discriminator << "timeout:" << timeout;
-
-    PendingShare share;
-    share.device = device;
-    share.passcode = passcode;
-    share.discriminator = discriminator;
-    share.timeout = timeout;
-    share.timedInvokePending = false;
-    share.exchangeId = m_exchangeCounter++;
-    m_pendingShares.insert(device->nodeId(), share);
-
-    // send TimedRequest first (required for OpenCommissioningWindow)
-    QByteArray timedPayload = InteractionModel::encodeTimedRequest(5000);
-    sendEncrypted(session, static_cast <quint8> (InteractionModelOpcode::TimedRequest), static_cast <quint16> (ProtocolId::InteractionModel), timedPayload, share.exchangeId, true);
-
-    // store verifier/salt/iterations for sending after StatusResponse
-    // reuse the struct — store in a QMap by nodeId, the invoke will be sent from handleInteractionModel
-    share.timedInvokePending = true;
-    m_pendingShares[device->nodeId()].timedInvokePending = true;
-
-    // save verifier data as dynamic properties on the share (use a separate map)
-    m_shareVerifiers.insert(device->nodeId(), verifier);
-    m_shareSalts.insert(device->nodeId(), salt);
-    m_shareIterations.insert(device->nodeId(), iterations);
-}
-
-bool Matter::parseManualCode(const QString &code, quint32 &passcode, quint16 &discriminator)
-{
-    QString clean;
-
-    for (const QChar &ch : code)
-    {
-        if (ch.isDigit())
-            clean.append(ch);
-    }
-
-    if (clean.length() != 11 && clean.length() != 21)
-        return false;
-
-    quint32 chunk1 = clean.mid(0, 1).toUInt();
-    quint32 chunk2 = clean.mid(1, 5).toUInt();
-    quint32 chunk3 = clean.mid(6, 4).toUInt();
-
-    // short discriminator (4 bits): chunk1 bits[0:1] (MSBs) + chunk2 bits[14:15] (LSBs)
-    discriminator = static_cast <quint16> (((chunk1 & 0x3) << 2) | ((chunk2 >> 14) & 0x3));
-
-    // passcode (27 bits): chunk2 bits[0:13] (LSBs) + chunk3 bits[0:12] (MSBs)
-    passcode = (chunk2 & 0x3FFF) | (chunk3 << 14);
-
-    if (passcode == 0 || passcode > 99999998)
-        return false;
-
-    return true;
+    logDebug(m_debug) << device << "CASE retry in 10-15 seconds";
+    retryConnection(device);
 }

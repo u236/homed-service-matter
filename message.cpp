@@ -5,171 +5,145 @@
 
 using namespace MatterProtocol;
 
-static quint8 readU8(const QByteArray &data, quint32 &offset)
+static bool readData(const QByteArray &data, quint32 &offset, void *value, size_t length)
 {
-    if (offset >= static_cast <quint32> (data.length()))
-        return 0;
+    if (offset + length > static_cast <size_t> (data.length()))
+        return false;
 
-    return static_cast <quint8> (data.at(offset++));
-}
+    memcpy(value, data.constData() + offset, length);
+    offset += length;
 
-static quint16 readU16(const QByteArray &data, quint32 &offset)
-{
-    if (offset + 2 > static_cast <quint32> (data.length()))
-        return 0;
-
-    quint16 value = qFromLittleEndian <quint16> (data.constData() + offset);
-    offset += 2;
-    return value;
-}
-
-static quint32 readU32(const QByteArray &data, quint32 &offset)
-{
-    if (offset + 4 > static_cast <quint32> (data.length()))
-        return 0;
-
-    quint32 value = qFromLittleEndian <quint32> (data.constData() + offset);
-    offset += 4;
-    return value;
-}
-
-static quint64 readU64(const QByteArray &data, quint32 &offset)
-{
-    if (offset + 8 > static_cast <quint32> (data.length()))
-        return 0;
-
-    quint64 value = qFromLittleEndian <quint64> (data.constData() + offset);
-    offset += 8;
-    return value;
-}
-
-static void writeU8(QByteArray &data, quint8 value)
-{
-    data.append(static_cast <char> (value));
-}
-
-static void writeU16(QByteArray &data, quint16 value)
-{
-    quint16 le = qToLittleEndian(value);
-    data.append(reinterpret_cast <const char*> (&le), 2);
-}
-
-static void writeU32(QByteArray &data, quint32 value)
-{
-    quint32 le = qToLittleEndian(value);
-    data.append(reinterpret_cast <const char*> (&le), 4);
-}
-
-static void writeU64(QByteArray &data, quint64 value)
-{
-    quint64 le = qToLittleEndian(value);
-    data.append(reinterpret_cast <const char*> (&le), 8);
+    return true;
 }
 
 bool MessageCodec::decodeHeader(const QByteArray &data, MessageHeader &header, quint32 &offset)
 {
+    messageHeaderStruct message;
+
     offset = 0;
 
-    if (data.length() < 8)
+    if (!readData(data, offset, &message, sizeof(message)))
         return false;
 
-    header.flags = readU8(data, offset);
-    header.sessionId = readU16(data, offset);
-    header.securityFlags = readU8(data, offset);
-    header.messageCounter = readU32(data, offset);
+    header.flags = message.flags;
+    header.sessionId = qFromLittleEndian(message.sessionId);
+    header.securityFlags = message.securityFlags;
+    header.messageCounter = qFromLittleEndian(message.messageCounter);
 
-    if (header.version() != 0x00)
+    if (header.flags >> 4)
         return false;
 
-    if (header.hasSourceNodeId())
+    if (header.flags & MESSAGE_FLAG_SOURCE_NODE_ID)
     {
-        if (offset + 8 > static_cast <quint32> (data.length()))
+        if (!readData(data, offset, &header.sourceNodeId, sizeof(header.sourceNodeId)))
             return false;
 
-        header.sourceNodeId = readU64(data, offset);
+        header.sourceNodeId = qFromLittleEndian(header.sourceNodeId);
     }
 
-    switch (header.destIdType())
+    switch (header.flags & MESSAGE_FLAG_DESTINATION_MASK)
     {
-        case 0x01:
+        case MESSAGE_DESTINATION_NODE_ID:
 
-            if (offset + 8 > static_cast <quint32> (data.length()))
+            if (!readData(data, offset, &header.destinationNodeId, sizeof(header.destinationNodeId)))
                 return false;
 
-            header.destNodeId = readU64(data, offset);
+            header.destinationNodeId = qFromLittleEndian(header.destinationNodeId);
             break;
 
-        case 0x02:
+        case MESSAGE_DESTINATION_GROUP_ID:
 
-            if (offset + 2 > static_cast <quint32> (data.length()))
+            if (!readData(data, offset, &header.destinationGroupId, sizeof(header.destinationGroupId)))
                 return false;
 
-            header.destGroupId = readU16(data, offset);
+            header.destinationGroupId = qFromLittleEndian(header.destinationGroupId);
             break;
     }
 
-    if (header.hasExtensions())
+    if (header.securityFlags & static_cast <quint8> (SecurityFlag::Extensions))
     {
-        if (offset + 2 > static_cast <quint32> (data.length()))
+        quint16 length;
+
+        if (!readData(data, offset, &length, sizeof(length)))
             return false;
 
-        quint16 extLength = readU16(data, offset);
+        length = qFromLittleEndian(length);
 
-        if (offset + extLength > static_cast <quint32> (data.length()))
+        if (offset + length > static_cast <quint32> (data.length()))
             return false;
 
-        offset += extLength;
+        offset += length;
     }
 
     return true;
 }
 
-bool MessageCodec::decodeProtocolHeader(const QByteArray &data, quint32 offset, ProtocolHeader &header, quint32 &payloadOffset)
+bool MessageCodec::decodeProtocolHeader(const QByteArray &data, ProtocolHeader &header, quint32 &offset)
 {
-    if (offset + 6 > static_cast <quint32> (data.length()))
+    protocolHeaderStruct protocol;
+
+    offset = 0;
+
+    if (!readData(data, offset, &protocol, sizeof(protocol)))
         return false;
 
-    header.exchangeFlags = readU8(data, offset);
-    header.opcode = readU8(data, offset);
-    header.exchangeId = readU16(data, offset);
-    header.protocolId = readU16(data, offset);
+    header.exchangeFlags = protocol.exchangeFlags;
+    header.opcode = protocol.opcode;
+    header.exchangeId = qFromLittleEndian(protocol.exchangeId);
+    header.protocolId = qFromLittleEndian(protocol.protocolId);
 
-    if (header.hasVendor())
+    if (header.exchangeFlags & static_cast <quint8> (ExchangeFlag::Vendor))
     {
-        if (offset + 2 > static_cast <quint32> (data.length()))
+        if (!readData(data, offset, &header.vendorId, sizeof(header.vendorId)))
             return false;
 
-        header.protocolVendorId = readU16(data, offset);
+        header.vendorId = qFromLittleEndian(header.vendorId);
     }
 
-    if (header.hasAck())
+    if (header.exchangeFlags & static_cast <quint8> (ExchangeFlag::Acknowledgement))
     {
-        if (offset + 4 > static_cast <quint32> (data.length()))
+        if (!readData(data, offset, &header.ackCounter, sizeof(header.ackCounter)))
             return false;
 
-        header.ackCounter = readU32(data, offset);
+        header.ackCounter = qFromLittleEndian(header.ackCounter);
     }
 
-    payloadOffset = offset;
     return true;
 }
 
 QByteArray MessageCodec::encodeHeader(const MessageHeader &header)
 {
+    messageHeaderStruct message;
     QByteArray data;
 
-    writeU8(data, header.flags);
-    writeU16(data, header.sessionId);
-    writeU8(data, header.securityFlags);
-    writeU32(data, header.messageCounter);
+    message.flags = header.flags;
+    message.sessionId = qToLittleEndian(header.sessionId);
+    message.securityFlags = header.securityFlags;
+    message.messageCounter = qToLittleEndian(header.messageCounter);
 
-    if (header.flags & 0x04)
-        writeU64(data, header.sourceNodeId);
+    data = QByteArray(reinterpret_cast <char*> (&message), sizeof(message));
 
-    switch (header.flags & 0x03)
+    if (header.flags & MESSAGE_FLAG_SOURCE_NODE_ID)
     {
-        case 0x01: writeU64(data, header.destNodeId); break;
-        case 0x02: writeU16(data, header.destGroupId); break;
+        quint64 value = qToLittleEndian(header.sourceNodeId);
+        data.append(reinterpret_cast <char*> (&value), sizeof(value));
+    }
+
+    switch (header.flags & MESSAGE_FLAG_DESTINATION_MASK)
+    {
+        case MESSAGE_DESTINATION_NODE_ID:
+        {
+            quint64 value = qToLittleEndian(header.destinationNodeId);
+            data.append(reinterpret_cast <char*> (&value), sizeof(value));
+            break;
+        }
+
+        case MESSAGE_DESTINATION_GROUP_ID:
+        {
+            quint16 value = qToLittleEndian(header.destinationGroupId);
+            data.append(reinterpret_cast <char*> (&value), sizeof(value));
+            break;
+        }
     }
 
     return data;
@@ -177,26 +151,32 @@ QByteArray MessageCodec::encodeHeader(const MessageHeader &header)
 
 QByteArray MessageCodec::encodeProtocolHeader(const ProtocolHeader &header)
 {
+    protocolHeaderStruct protocol;
     QByteArray data;
 
-    writeU8(data, header.exchangeFlags);
-    writeU8(data, header.opcode);
-    writeU16(data, header.exchangeId);
-    writeU16(data, header.protocolId);
+    protocol.exchangeFlags = header.exchangeFlags;
+    protocol.opcode = header.opcode;
+    protocol.exchangeId = qToLittleEndian(header.exchangeId);
+    protocol.protocolId = qToLittleEndian(header.protocolId);
+
+    data = QByteArray(reinterpret_cast <char*> (&protocol), sizeof(protocol));
 
     if (header.exchangeFlags & static_cast <quint8> (ExchangeFlag::Vendor))
-        writeU16(data, header.protocolVendorId);
+    {
+        quint16 value = qToLittleEndian(header.vendorId);
+        data.append(reinterpret_cast <char*> (&value), sizeof(value));
+    }
 
     if (header.exchangeFlags & static_cast <quint8> (ExchangeFlag::Acknowledgement))
-        writeU32(data, header.ackCounter);
+    {
+        quint32 value = qToLittleEndian(header.ackCounter);
+        data.append(reinterpret_cast <char*> (&value), sizeof(value));
+    }
 
     return data;
 }
 
-QByteArray MessageCodec::encodeMessage(const MessageHeader &msgHeader, const ProtocolHeader &protoHeader, const QByteArray &payload)
+QByteArray MessageCodec::encodeMessage(const MessageHeader &messageHeader, const ProtocolHeader &protocolHeader, const QByteArray &payload)
 {
-    QByteArray data = encodeHeader(msgHeader);
-    data.append(encodeProtocolHeader(protoHeader));
-    data.append(payload);
-    return data;
+    return encodeHeader(messageHeader).append(encodeProtocolHeader(protocolHeader)).append(payload);
 }

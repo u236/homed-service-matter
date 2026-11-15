@@ -1,10 +1,23 @@
 #include "color.h"
 #include "property.h"
 
-namespace Properties
+static quint8 switchPressCount(const MatterTLV::Element &data)
 {
+    quint8 count = 0;
 
-void Status::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+    // MultiPressComplete event data tag 1 is total number of presses counted
+    for (int i = 0; i < data.children.count(); i++)
+    {
+        if (data.children.at(i).tag != 1)
+            continue;
+
+        count = static_cast <quint8> (data.children.at(i).value.toUInt());
+    }
+
+    return count;
+}
+
+void Properties::Status::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
     if (attributeId != Clusters::OnOff::Attributes::OnOff)
         return;
@@ -12,42 +25,42 @@ void Status::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
     m_value = data.value.toBool() ? "on" : "off";
 }
 
-void Level::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+void Properties::Level::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
     if (attributeId != Clusters::LevelControl::Attributes::CurrentLevel)
         return;
 
-    // peer reports CurrentLevel on the 0..0xFE Matter scale; we expose 0..0xFF to consumers — same scaling
-    // sendCommand uses in the opposite direction
-    m_value = qMin(data.value.toUInt() * 0xFF / 0xFE, 0xFFu);
+    m_value = qMin(data.value.toUInt() * 0xFF / 0xFE, 0xFFu); // 0xFE is maximum level
 }
 
-void ColorHS::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+void Properties::ColorHS::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
+    Color color(0, 0, 0);
+
     switch (attributeId)
     {
         case Clusters::ColorControl::Attributes::CurrentHue:
             m_hue = static_cast <quint8> (data.value.toUInt());
-            m_haveHue = true;
+            m_hueReceived = true;
             break;
 
         case Clusters::ColorControl::Attributes::CurrentSaturation:
-            m_sat = static_cast <quint8> (data.value.toUInt());
-            m_haveSat = true;
+            m_saturation = static_cast <quint8> (data.value.toUInt());
+            m_saturationReceived = true;
             break;
 
         default:
             return;
     }
 
-    if (!m_haveHue || !m_haveSat)
+    if (!m_hueReceived || !m_saturationReceived)
         return;
 
-    Color color = Color::fromHS(m_hue / static_cast <double> (0xFE), m_sat / static_cast <double> (0xFE));
-    m_value = QVariant(QList <QVariant> {static_cast <int> (color.r() * 0xFF), static_cast <int> (color.g() * 0xFF), static_cast <int> (color.b() * 0xFF)});
+    color = Color::fromHS(m_hue / static_cast <double> (0xFE), m_saturation / static_cast <double> (0xFE));
+    m_value = QList <QVariant> {static_cast <int> (color.r() * 0xFF), static_cast <int> (color.g() * 0xFF), static_cast <int> (color.b() * 0xFF)};
 }
 
-void ColorTemperature::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+void Properties::ColorTemperature::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
     if (attributeId != Clusters::ColorControl::Attributes::ColorTemperatureMireds)
         return;
@@ -55,80 +68,55 @@ void ColorTemperature::parseAttribute(quint32 attributeId, const MatterTLV::Elem
     m_value = data.value.toUInt();
 }
 
-void Lock::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
-{
-    if (attributeId != Clusters::DoorLock::Attributes::LockState)
-        return;
-
-    // UNTESTED: LockState enum (Matter §5.2.5.5): 0=NotFullyLocked, 1=Locked, 2=Unlocked, 3=Unlatched.
-    // we report "locked" only on value=1 — partial/unlatched states fall to false until proven otherwise
-    m_value = data.value.toUInt() == 1;
-}
-
-void CoverPosition::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
-{
-    if (attributeId != Clusters::WindowCovering::Attributes::CurrentPositionLiftPercent100ths)
-        return;
-
-    // UNTESTED: peer reports 0..10000 in 0.01% units, scale to 0..100 to match what Actions::CoverPosition
-    // accepts on the way down (consumer-facing percent)
-    m_value = data.value.toUInt() / 100;
-}
-
-void ColorMode::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+void Properties::ColorMode::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
     if (attributeId != Clusters::ColorControl::Attributes::ColorMode)
         return;
 
-    // ColorMode 0=HS, 1=XY, 2=ColorTemperature; we report a bool: "is this a chromatic color (vs CT)?"
-    m_value = data.value.toUInt() != 2;
+    m_value = data.value.toUInt() != 2; // true for HS or XY, false for color temperature
 }
 
-void Battery::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+void Properties::Battery::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
     if (attributeId != Clusters::PowerSource::Attributes::BatPercentRemaining)
         return;
 
-    // BatPercentRemaining reports half-percentage units, divide by 2 to get 0..100%
-    m_value = data.value.toDouble() / 2.0;
+    m_value = data.value.toDouble() / 2;
 }
 
-void Temperature::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+void Properties::Temperature::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
     if (attributeId != Clusters::TemperatureMeasurement::Attributes::MeasuredValue)
         return;
 
-    m_value = data.value.toDouble() / 100.0;
+    m_value = data.value.toDouble() / 100;
 }
 
-void Humidity::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+void Properties::Humidity::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
     if (attributeId != Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue)
         return;
 
-    m_value = data.value.toDouble() / 100.0;
+    m_value = data.value.toDouble() / 100;
 }
 
-void Voltage::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+void Properties::Voltage::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
-    // peer reports either generic Voltage (DC) or AC RMSVoltage; same units (mV), same scale
-    if (attributeId != Clusters::ElectricalPowerMeasurement::Attributes::Voltage &&
-        attributeId != Clusters::ElectricalPowerMeasurement::Attributes::RMSVoltage)
+    if (attributeId != Clusters::ElectricalPowerMeasurement::Attributes::Voltage && attributeId != Clusters::ElectricalPowerMeasurement::Attributes::RMSVoltage)
         return;
 
     m_value = data.value.toLongLong() / 1000.0;
 }
 
-void Current::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+void Properties::Current::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
-    if (attributeId != Clusters::ElectricalPowerMeasurement::Attributes::ActiveCurrent &&
-        attributeId != Clusters::ElectricalPowerMeasurement::Attributes::RMSCurrent)
+    if (attributeId != Clusters::ElectricalPowerMeasurement::Attributes::ActiveCurrent && attributeId != Clusters::ElectricalPowerMeasurement::Attributes::RMSCurrent)
         return;
 
     m_value = data.value.toLongLong() / 1000.0;
 }
 
-void Power::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+void Properties::Power::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
     if (attributeId != Clusters::ElectricalPowerMeasurement::Attributes::ActivePower)
         return;
@@ -136,32 +124,47 @@ void Power::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
     m_value = data.value.toLongLong() / 1000.0;
 }
 
-void Frequency::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+void Properties::Frequency::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
     if (attributeId != Clusters::ElectricalPowerMeasurement::Attributes::Frequency)
         return;
 
-    // Matter spec §2.13.5: Frequency in mHz, scale to Hz
     m_value = data.value.toLongLong() / 1000.0;
 }
 
-void Energy::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+void Properties::Energy::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
     if (attributeId != Clusters::ElectricalEnergyMeasurement::Attributes::CumulativeEnergyImported)
         return;
 
-    // CumulativeEnergyImported is an EnergyMeasurementStruct; tag 0 is the energy field in mWh
-    for (const MatterTLV::Element &child : data.children)
+    // energy measurement structure tag 0 is energy value
+    for (int i = 0; i < data.children.count(); i++)
     {
-        if (child.tag != 0)
+        if (data.children.at(i).tag)
             continue;
 
-        m_value = child.value.toLongLong() / 1000.0;
-        return;
+        m_value = data.children.at(i).value.toLongLong() / 1000.0;
+        break;
     }
 }
 
-void WaterLeak::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+void Properties::Lock::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+{
+    if (attributeId != Clusters::DoorLock::Attributes::LockState)
+        return;
+
+    m_value = data.value.toUInt() == 1; // TODO: check not fully locked and unlatched states
+}
+
+void Properties::CoverPosition::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+{
+    if (attributeId != Clusters::WindowCovering::Attributes::CurrentPositionLiftPercent100ths)
+        return;
+
+    m_value = data.value.toUInt() / 100; // TODO: check with real device
+}
+
+void Properties::WaterLeak::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
     if (attributeId != Clusters::BooleanState::Attributes::StateValue)
         return;
@@ -169,32 +172,26 @@ void WaterLeak::parseAttribute(quint32 attributeId, const MatterTLV::Element &da
     m_value = data.value.toBool();
 }
 
-void Contact::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+void Properties::Contact::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
     if (attributeId != Clusters::BooleanState::Attributes::StateValue)
         return;
 
-    // Matter §1.7.5.1: StateValue true = contact closed; HOMEd "contact" follows HA door semantics where
-    // true = open → invert
-    m_value = !data.value.toBool();
+    m_value = !data.value.toBool(); // state value is true when contact is closed
 }
 
-void Occupancy::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+void Properties::Occupancy::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
     if (attributeId != Clusters::OccupancySensing::Attributes::Occupancy)
         return;
 
-    // Matter §2.7.5.1: Occupancy is a bitmap8; bit 0 = occupied
     m_value = (data.value.toUInt() & 0x01) != 0;
 }
 
-void SwitchAction::parseEvent(quint32 eventId, const MatterTLV::Element &data)
+void Properties::SwitchAction::parseEvent(quint32 eventId, const MatterTLV::Element &data)
 {
     quint32 features = meta("switchFeatures").toUInt();
-    quint8 multiPressMax = static_cast <quint8> (meta("switchMultiPressMax").toUInt());
-    // encoder heuristic: high MultiPressMax + no MSL means MultiPressComplete count is detents, not clicks —
-    // emit start/stop semantics instead of singleClick/doubleClick/etc
-    bool encoder = (features & Clusters::Switch::Features::MSM) && !(features & Clusters::Switch::Features::MSL) && multiPressMax > 5;
+    bool encoder = (features & Clusters::Switch::Features::MSM) && !(features & Clusters::Switch::Features::MSL) && static_cast <quint8> (meta("switchMultiPressMax").toUInt()) > 5;
 
     switch (eventId)
     {
@@ -203,17 +200,19 @@ void SwitchAction::parseEvent(quint32 eventId, const MatterTLV::Element &data)
             break;
 
         case Clusters::Switch::Events::InitialPress:
-            // only encoder endpoints subscribe to InitialPress; for buttons the ShortRelease/MultiPressComplete
-            // path is what matters and InitialPress is just noise
+
+            // only encoders subscribe to initial press, for buttons it's just noise
             if (encoder)
                 m_value = "start";
+
             break;
 
         case Clusters::Switch::Events::ShortRelease:
-            // ShortRelease only fires on MSR endpoints without MSM (Matter §1.13.6.4); for MSM the count comes
-            // through MultiPressComplete and emitting singleClick here would duplicate the doubleClick path
+
+            // with MSM feature press count comes with multi press complete event
             if (!(features & Clusters::Switch::Features::MSM))
                 m_value = "singleClick";
+
             break;
 
         case Clusters::Switch::Events::LongPress:
@@ -226,29 +225,21 @@ void SwitchAction::parseEvent(quint32 eventId, const MatterTLV::Element &data)
 
         case Clusters::Switch::Events::MultiPressComplete:
         {
+            quint8 count = switchPressCount(data);
+
             if (encoder)
             {
                 m_value = "stop";
                 break;
             }
 
-            quint8 count = 0;
-
-            for (const MatterTLV::Element &child : data.children)
-            {
-                if (child.tag == 1)
-                    count = static_cast <quint8> (child.value.toUInt());
-            }
-
             switch (count)
             {
-                case 1: m_value = "singleClick"; break;
-                case 2: m_value = "doubleClick"; break;
-                case 3: m_value = "tripleClick"; break;
-                default:
-                    if (count > 0)
-                        m_value = "multipleClick";
-                    break;
+                case 0:  break;
+                case 1:  m_value = "singleClick"; break;
+                case 2:  m_value = "doubleClick"; break;
+                case 3:  m_value = "tripleClick"; break;
+                default: m_value = "multipleClick"; break;
             }
 
             break;
@@ -256,45 +247,31 @@ void SwitchAction::parseEvent(quint32 eventId, const MatterTLV::Element &data)
     }
 }
 
-void SwitchCount::parseEvent(quint32 eventId, const MatterTLV::Element &data)
+void Properties::SwitchCount::parseEvent(quint32 eventId, const MatterTLV::Element &data)
 {
-    if (eventId != Clusters::Switch::Events::MultiPressComplete)
+    quint8 count = switchPressCount(data);
+
+    if (eventId != Clusters::Switch::Events::MultiPressComplete || !count)
         return;
 
-    // MultiPressComplete data (Matter §1.13.6.6): tag 0=PreviousPosition, tag 1=TotalNumberOfPressesCounted
-    for (const MatterTLV::Element &child : data.children)
-    {
-        if (child.tag != 1)
-            continue;
-
-        quint8 count = static_cast <quint8> (child.value.toUInt());
-
-        if (count > 0)
-            m_value = count;
-
-        return;
-    }
+    m_value = count;
 }
 
-void PowerOnStatus::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
+void Properties::PowerOnStatus::parseAttribute(quint32 attributeId, const MatterTLV::Element &data)
 {
     if (attributeId != Clusters::OnOff::Attributes::StartUpOnOff)
         return;
 
-    // Matter §1.5.6.3 StartUpOnOff: nullable enum8. null carries "preserve previous state" semantics —
-    // expose.json labels it "previous"; the numeric values map 1:1 to off/on/toggle
     if (data.type == MatterTLV::Type::Null)
     {
-        m_value = "previous";
+        m_value = "previous"; // null means previous state
         return;
     }
 
     switch (data.value.toUInt())
     {
-        case 0: m_value = "off";    break;
-        case 1: m_value = "on";     break;
+        case 0: m_value = "off"; break;
+        case 1: m_value = "on"; break;
         case 2: m_value = "toggle"; break;
     }
-}
-
 }

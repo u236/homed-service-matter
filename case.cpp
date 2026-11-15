@@ -2,14 +2,14 @@
 
 #include <QtEndian>
 #include "case.h"
-#include "logger.h"
 #include "crypto.h"
-#include "tlv.h"
+#include "logger.h"
+#include "message.h"
 
 void SessionManager::addSession(const SessionInfo &session)
 {
     m_sessions.insert(session.localSessionId, session);
-    logInfo << "Session added, local:" << session.localSessionId << "peer:" << session.peerSessionId << "address:" << session.peerAddress.toString() << ":" << session.peerPort;
+    logInfo << "Session" << session.localSessionId << "added, peer session" << session.peerSessionId << "address" << session.peerAddress.toString() << "port" << session.peerPort;
 }
 
 void SessionManager::removeSession(quint16 localSessionId)
@@ -17,463 +17,326 @@ void SessionManager::removeSession(quint16 localSessionId)
     m_sessions.remove(localSessionId);
 }
 
-SessionInfo *SessionManager::findByLocalId(quint16 localSessionId)
+SessionInfo *SessionManager::byLocalId(quint16 localSessionId)
 {
-    if (!m_sessions.contains(localSessionId))
-        return nullptr;
-
-    return &m_sessions[localSessionId];
+    auto it = m_sessions.find(localSessionId);
+    return it != m_sessions.end() ? &it.value() : nullptr;
 }
 
-SessionInfo *SessionManager::findByPeerAddress(const QHostAddress &address, quint16 port)
+SessionInfo *SessionManager::byPeerAddress(const QHostAddress &address, quint16 port)
 {
     for (auto it = m_sessions.begin(); it != m_sessions.end(); it++)
     {
-        if (it.value().peerAddress == address && it.value().peerPort == port && it.value().active)
-            return &it.value();
+        if (!it.value().active || it.value().peerAddress != address || it.value().peerPort != port)
+            continue;
+
+        return &it.value();
     }
 
     return nullptr;
 }
 
-SessionInfo *SessionManager::findByPeerNodeId(quint64 nodeId)
+SessionInfo *SessionManager::byPeerNodeId(quint64 nodeId)
 {
     for (auto it = m_sessions.begin(); it != m_sessions.end(); it++)
     {
-        if (it.value().peerNodeId == nodeId && it.value().active)
-            return &it.value();
+        if (!it.value().active || it.value().peerNodeId != nodeId)
+            continue;
+
+        return &it.value();
     }
 
     return nullptr;
 }
 
-QByteArray SessionManager::buildNonce(quint8 securityFlags, quint32 messageCounter, quint64 sourceNodeId)
+QByteArray SessionManager::nonce(quint8 securityFlags, quint32 messageCounter, quint64 sourceNodeId)
 {
-    QByteArray nonce(SESSION_NONCE_LENGTH, 0);
-    quint32 counterLE = qToLittleEndian(messageCounter);
-    quint64 nodeLE = qToLittleEndian(sourceNodeId);
-
-    nonce[0] = static_cast <char> (securityFlags);
-    memcpy(nonce.data() + 1, &counterLE, 4);
-    memcpy(nonce.data() + 5, &nodeLE, 8);
-
-    return nonce;
+    messageCounter = qToLittleEndian(messageCounter);
+    sourceNodeId = qToLittleEndian(sourceNodeId);
+    return QByteArray(1, static_cast <char> (securityFlags)).append(reinterpret_cast <char*> (&messageCounter), sizeof(messageCounter)).append(reinterpret_cast <char*> (&sourceNodeId), sizeof(sourceNodeId));
 }
 
-QByteArray SessionManager::encrypt(SessionInfo *session, const QByteArray &header, const QByteArray &payload)
+QByteArray SessionManager::decrypt(SessionInfo *session, quint8 securityFlags, quint32 messageCounter, const QByteArray &header, const QByteArray &data)
 {
-    QByteArray nonce = buildNonce(0x00, session->localMessageCounter, m_sessions.begin().value().peerNodeId);
-    return Crypto::aesCcmEncrypt(session->i2rKey, nonce, header, payload, SESSION_TAG_LENGTH);
+    return Crypto::decrypt(session->r2iKey, nonce(securityFlags, messageCounter, session->peerNodeId), header, data, SESSION_TAG_LENGTH);
 }
 
-QByteArray SessionManager::decrypt(SessionInfo *session, quint8 securityFlags, quint32 messageCounter, quint64 sourceNodeId, const QByteArray &header, const QByteArray &ciphertext)
-{
-    QByteArray nonce = buildNonce(securityFlags, messageCounter, sourceNodeId);
-    return Crypto::aesCcmDecrypt(session->r2iKey, nonce, header, ciphertext, SESSION_TAG_LENGTH);
-}
-
-// --- CASE ---
-
-CASESession::CASESession(QObject *parent) : QObject(parent), m_state(State::Idle), m_timer(new QTimer(this)), m_localSessionId(0), m_peerSessionId(0), m_peerNodeId(0), m_fabricId(0), m_nodeId(0), m_rootCAId(0), m_lastPeerMessageCounter(0), m_resumed(false), m_idleInterval(500), m_activeInterval(300), m_activeThreshold(4000)
+CASESession::CASESession(QObject *parent) : QObject(parent), m_timer(new QTimer(this)), m_state(State::Idle), m_localSessionId(0), m_peerSessionId(0), m_peerNodeId(0), m_fabricId(0), m_peerMessageCounter(0), m_resumed(false), m_idleInterval(SESSION_IDLE_INTERVAL), m_activeInterval(SESSION_ACTIVE_INTERVAL), m_activeThreshold(SESSION_ACTIVE_THRESHOLD)
 {
     connect(m_timer, &QTimer::timeout, this, &CASESession::timeout);
     m_timer->setSingleShot(true);
 }
 
-QByteArray CASESession::computeDestinationId(void)
+void CASESession::start(quint16 localSessionId, quint64 peerNodeId, quint64 fabricId, const QByteArray &fabricPublicKey, const QByteArray &operationalKey, const QByteArray &ipk, const QByteArray &noc, const QByteArray &resumptionId, const QByteArray &resumptionSecret)
 {
-    // destinationId = HMAC-SHA256(IPK, initiatorRandom || rootPubKey || fabricId_LE || nodeId_LE)
-    QByteArray message;
-    message.append(m_initiatorRandom);
-    message.append(m_fabricPublicKey);  // root CA public key (65 bytes)
+    MatterTLV::Encoder encoder;
+    QByteArray compressedFabricId, mic;
+    quint64 value = qToBigEndian(fabricId);
+    bool resume = resumptionId.length() == 16 && resumptionSecret.length() == 32;
 
-    quint64 fabricLE = qToLittleEndian(m_fabricId);
-    quint64 nodeLE = qToLittleEndian(m_peerNodeId);
-    message.append(reinterpret_cast <const char*> (&fabricLE), 8);
-    message.append(reinterpret_cast <const char*> (&nodeLE), 8);
-
-    return Crypto::hmacSha256(m_ipk, message);
-}
-
-QByteArray CASESession::transcriptHash(const QByteArray &data)
-{
-    QByteArray input = m_sigma1Bytes;
-
-    if (!data.isEmpty())
-        input.append(data);
-
-    return Crypto::sha256(input);
-}
-
-void CASESession::start(quint16 localSessionId, quint64 peerNodeId,
-                         const QByteArray &fabricKey, const QByteArray &fabricPublicKey,
-                         const QByteArray &operationalKey, const QByteArray &operationalPubKey,
-                         quint64 fabricId, quint64 nodeId, quint64 rootCAId,
-                         const QByteArray &ipk,
-                         const QByteArray &nocTLV, const QByteArray &rcacTLV,
-                         const QByteArray &resumptionID, const QByteArray &resumptionSharedSecret)
-{
     m_localSessionId = localSessionId;
     m_peerNodeId = peerNodeId;
-    m_fabricKey = fabricKey;
+    m_fabricId = fabricId;
     m_fabricPublicKey = fabricPublicKey;
     m_operationalKey = operationalKey;
-    m_operationalPubKey = operationalPubKey;
-    m_fabricId = fabricId;
-    m_nodeId = nodeId;
-    m_rootCAId = rootCAId;
-    m_ipk = ipk;
-    m_nocTLV = nocTLV;
-    m_rcacTLV = rcacTLV;
-    m_resumptionID = resumptionID;
-    m_resumptionSharedSecret = resumptionSharedSecret;
+    m_noc = noc;
+    m_resumptionId = resumptionId;
+    m_resumptionSecret = resumptionSecret;
+    m_newResumptionId.clear();
     m_resumed = false;
-    m_newResumptionID.clear();
 
-    // derive compressed fabric ID: HKDF(rootPubKey[1:64], fabricId_BE, "CompressedFabric", 8)
-    quint64 fabricIdBE = qToBigEndian(m_fabricId);
-    QByteArray compressedFabricId = Crypto::hkdfSha256(
-        m_fabricPublicKey.mid(1),                                               // skip 0x04 uncompressed marker
-        QByteArray(reinterpret_cast <const char*> (&fabricIdBE), 8),            // salt = fabricId BE
-        QByteArray("CompressedFabric"),                                         // info
-        8);                                                                     // 8 bytes output
+    compressedFabricId = Crypto::hkdf(m_fabricPublicKey.mid(1), QByteArray(reinterpret_cast <char*> (&value), sizeof(value)), "CompressedFabric", 8);
+    m_ipk = Crypto::hkdf(ipk, compressedFabricId, "GroupKey v1.0", 16);
 
-    // derive operational IPK: HKDF(rawIPK, compressedFabricId, "GroupKey v1.0", 16)
-    m_ipk = Crypto::hkdfSha256(m_ipk, compressedFabricId, QByteArray("GroupKey v1.0"), 16);
-
-    logInfo << "CASE: compressedFabricId:" << compressedFabricId.toHex() << "operationalIPK:" << m_ipk.toHex();
-
-    m_initiatorRandom = Crypto::randomBytes(32);
+    m_initiatorRandom = Crypto::randomData(32);
+    m_privateKey = Crypto::randomData(32);
+    m_publicKey = ECPoint::multiply(ECPoint::generator(), BigNum(m_privateKey).bn()).toData();
     m_timer->start(CASE_TIMEOUT);
 
-    // generate ephemeral P-256 keypair
-    m_ephPrivKey = Crypto::randomBytes(32);
-    ECPoint ephPub = ECPoint::fromMultiply(ECPoint::generator(), BigNum(m_ephPrivKey).bn());
-    m_ephPubKey = ephPub.toUncompressed();
+    if (resume)
+        mic = Crypto::encrypt(Crypto::hkdf(m_resumptionSecret, QByteArray(m_initiatorRandom).append(m_resumptionId), "Sigma1_Resume", 16), QByteArray("NCASE_SigmaS1", 13), QByteArray(), QByteArray());
 
-    bool tryResume = (m_resumptionID.size() == 16 && m_resumptionSharedSecret.size() == 32);
-    QByteArray resume1MIC;
-
-    if (tryResume)
-    {
-        // Resume1Key = HKDF(sharedSecret, salt=initiatorRandom||resumptionID, info="Sigma1_Resume", 16)
-        QByteArray salt = m_initiatorRandom;
-        salt.append(m_resumptionID);
-        QByteArray s1rk = Crypto::hkdfSha256(m_resumptionSharedSecret, salt, QByteArray("Sigma1_Resume"), 16);
-
-        // Resume1MIC = AES-CCM tag over empty plaintext+AAD with nonce "NCASE_SigmaS1"
-        QByteArray nonce("NCASE_SigmaS1", 13);
-        resume1MIC = Crypto::aesCcmEncrypt(s1rk, nonce, QByteArray(), QByteArray(), 16);
-    }
-
-    // build Sigma1 TLV
-    MatterTLV::Encoder encoder;
     encoder.openStructure();
-    encoder.encodeByteString(1, m_initiatorRandom);         // initiatorRandom
-    encoder.encodeUnsignedInt(2, m_localSessionId);         // initiatorSessionId
-    encoder.encodeByteString(3, computeDestinationId());    // destinationId
-    encoder.encodeByteString(4, m_ephPubKey);               // initiatorEphPubKey
+    encoder.encodeByteString(1, m_initiatorRandom);
+    encoder.encodeUnsignedInt(2, m_localSessionId);
+    encoder.encodeByteString(3, destinationId());
+    encoder.encodeByteString(4, m_publicKey);
 
-    if (tryResume)
+    if (resume)
     {
-        encoder.encodeByteString(6, m_resumptionID);        // resumptionID
-        encoder.encodeByteString(7, resume1MIC);            // initiatorResume1MIC
+        encoder.encodeByteString(6, m_resumptionId);
+        encoder.encodeByteString(7, mic);
     }
 
     encoder.closeContainer();
 
-    m_sigma1Bytes = encoder.data();
+    m_transcript = encoder.data();
     m_state = State::WaitingSigma2;
 
-    logInfo << "CASE: sending Sigma1, sessionId:" << m_localSessionId
-            << "peerNodeId:" << m_peerNodeId
-            << "fabricId:" << m_fabricId
-            << "destinationId:" << computeDestinationId().toHex()
-            << (tryResume ? "[with resumption]" : "[full handshake]");
-    emit sendSigma1(m_sigma1Bytes, m_localSessionId);
+    logInfo << "CASE session" << m_localSessionId << "Sigma1 sent to node" << QString::number(m_peerNodeId, 16) << "with compressed fabric id" << compressedFabricId.toHex() << (resume ? "(resumption)" : "(full handshake)");
+    emit sendSigma1(m_transcript);
 }
 
-void CASESession::handleSigma2(const QByteArray &payload)
+void CASESession::parseSigma2(const QByteArray &payload)
 {
+    MatterTLV::Element root = MatterTLV::Decoder(payload).decode();
+    MatterTLV::Encoder tbs, tbe, sigma3;
+    QByteArray random, publicKey, data, key, nonce("NCASE_Sigma3N", 13);
+    ECPoint point;
+
     if (m_state != State::WaitingSigma2)
     {
         emit failed("Unexpected Sigma2");
         return;
     }
 
-    MatterTLV::Decoder decoder(payload);
-    MatterTLV::Element root = decoder.decode();
-
-    QByteArray responderRandom, encrypted2;
-
-    for (const MatterTLV::Element &el : root.children)
+    for (int i = 0; i < root.children.count(); i++)
     {
-        switch (el.tag)
+        const MatterTLV::Element &item = root.children.at(i);
+
+        switch (item.tag)
         {
-            case 1: responderRandom = el.value.toByteArray(); break;
-            case 2: m_peerSessionId = el.value.toUInt(); break;
-            case 3: m_responderEphPubKey = el.value.toByteArray(); break;
-            case 4: encrypted2 = el.value.toByteArray(); break;
-            case 5:
-                // SessionParameters: peer-announced MRP intervals (Matter §4.11.2.2.1)
-                for (const MatterTLV::Element &p : el.children)
-                {
-                    switch (p.tag)
-                    {
-                        case 1: m_idleInterval = p.value.toUInt(); break;
-                        case 2: m_activeInterval = p.value.toUInt(); break;
-                        case 3: m_activeThreshold = static_cast <quint16> (p.value.toUInt()); break;
-                    }
-                }
-                break;
+            case 1: random = item.value.toByteArray(); break;
+            case 2: m_peerSessionId = static_cast <quint16> (item.value.toUInt()); break;
+            case 3: publicKey = item.value.toByteArray(); break;
+            case 4: data = item.value.toByteArray(); break;
+            case 5: parseSessionParameters(item); break;
         }
     }
 
-    logInfo << "CASE: Sigma2 received, peer session:" << m_peerSessionId
-            << "MRP idle/active/threshold:" << m_idleInterval << "/" << m_activeInterval << "/" << m_activeThreshold << "ms";
+    logInfo << "CASE session" << m_localSessionId << "Sigma2 received, peer session" << m_peerSessionId << "idle interval" << m_idleInterval << "active interval" << m_activeInterval << "active threshold" << m_activeThreshold;
 
-    if (m_responderEphPubKey.length() != 65 || encrypted2.isEmpty())
+    if (publicKey.length() != 65 || data.isEmpty())
     {
-        m_state = State::Failed;
-        emit failed("Invalid Sigma2 data");
+        fail("Invalid Sigma2 data");
         return;
     }
 
-    // ECDH: shared secret = X-coordinate of (ephPrivKey * responderEphPubKey)
-    ECPoint responderPoint;
-
-    if (!responderPoint.setFromUncompressed(m_responderEphPubKey))
+    if (!point.fromData(publicKey))
     {
-        m_state = State::Failed;
-        emit failed("Invalid responder ephemeral public key");
+        fail("Invalid responder ephemeral public key");
         return;
     }
 
-    ECPoint sharedPoint = ECPoint::fromMultiply(responderPoint, BigNum(m_ephPrivKey).bn());
-    QByteArray sharedUncompressed = sharedPoint.toUncompressed();
-    m_sharedSecret = sharedUncompressed.mid(1, 32); // X-coordinate only
+    // shared secret is X coordinate of ECDH result
+    m_sharedSecret = ECPoint::multiply(point, BigNum(m_privateKey).bn()).toData().mid(1, 32);
 
-    // S2K: HKDF(sharedSecret, salt=IPK||responderRandom||responderEphPubKey||transcriptHash(Sigma1), info="Sigma2", 16)
-    QByteArray s2kSalt;
-    s2kSalt.append(m_ipk);
-    s2kSalt.append(responderRandom);
-    s2kSalt.append(m_responderEphPubKey);
-    s2kSalt.append(transcriptHash()); // hash of Sigma1 only
-    QByteArray s2k = Crypto::hkdfSha256(m_sharedSecret, s2kSalt, QByteArray("Sigma2"), 16);
+    key = Crypto::hkdf(m_sharedSecret, QByteArray(m_ipk).append(random).append(publicKey).append(Crypto::sha256(m_transcript)), "Sigma2", 16);
+    data = Crypto::decrypt(key, QByteArray("NCASE_Sigma2N", 13), QByteArray(), data);
 
-    // decrypt TBE2
-    QByteArray sigma2Nonce("NCASE_Sigma2N", 13);
-    QByteArray tbe2 = Crypto::aesCcmDecrypt(s2k, sigma2Nonce, QByteArray(), encrypted2, 16);
-
-    if (tbe2.isEmpty())
+    if (data.isEmpty())
     {
-        m_state = State::Failed;
-        emit failed("Sigma2 decryption failed");
+        fail("Sigma2 decryption failed");
         return;
     }
 
-    logInfo << "CASE: Sigma2 decrypted, TBE2 size:" << tbe2.size();
+    // responder NOC and signature are not verified, only resumption id is taken from TBE2
+    root = MatterTLV::Decoder(data).decode();
 
-    // parse TBE2: tag 1 = responder NOC, tag 2 = responder ICAC (opt), tag 3 = signature, tag 4 = resumptionID
-    // (we skip NOC/signature verification for now; just extract the resumption ID for next CASE attempt)
+    for (int i = 0; i < root.children.count(); i++)
     {
-        MatterTLV::Decoder tbe2Decoder(tbe2);
-        MatterTLV::Element tbe2Root = tbe2Decoder.decode();
+        const MatterTLV::Element &item = root.children.at(i);
 
-        for (const MatterTLV::Element &el : tbe2Root.children)
-        {
-            if (el.tag == 4 && el.type == MatterTLV::Type::ByteString)
-            {
-                m_newResumptionID = el.value.toByteArray();
-                logInfo << "CASE: extracted new resumptionID from TBE2:" << m_newResumptionID.toHex();
-            }
-        }
+        if (item.tag != 4 || item.type != MatterTLV::Type::ByteString)
+            continue;
+
+        m_newResumptionId = item.value.toByteArray();
     }
 
-    // update transcript with Sigma2 bytes (the full payload we received)
-    m_sigma1Bytes.append(payload);
+    m_transcript.append(payload);
+    key = Crypto::hkdf(m_sharedSecret, QByteArray(m_ipk).append(Crypto::sha256(m_transcript)), "Sigma3", 16);
 
-    // S3K: HKDF(sharedSecret, salt=IPK||transcriptHash(Sigma1+Sigma2), info="Sigma3", 16)
-    QByteArray s3kSalt;
-    s3kSalt.append(m_ipk);
-    s3kSalt.append(transcriptHash()); // hash of Sigma1 + Sigma2
-    QByteArray s3k = Crypto::hkdfSha256(m_sharedSecret, s3kSalt, QByteArray("Sigma3"), 16);
+    tbs.openStructure();
+    tbs.encodeByteString(1, m_noc);
+    tbs.encodeByteString(3, m_publicKey);
+    tbs.encodeByteString(4, publicKey);
+    tbs.closeContainer();
 
-    // build TBS3 for signature: { NOC, ephPubKey, responderEphPubKey }
-    MatterTLV::Encoder tbsEncoder;
-    tbsEncoder.openStructure();
-    tbsEncoder.encodeByteString(1, m_nocTLV);               // our NOC
-    tbsEncoder.encodeByteString(3, m_ephPubKey);             // our ephemeral public key
-    tbsEncoder.encodeByteString(4, m_responderEphPubKey);    // responder ephemeral public key
-    tbsEncoder.closeContainer();
+    tbe.openStructure();
+    tbe.encodeByteString(1, m_noc);
+    tbe.encodeByteString(3, Crypto::sign(m_operationalKey, tbs.data()));
+    tbe.closeContainer();
 
-    QByteArray tbsData = tbsEncoder.data();
-    QByteArray signature = Crypto::ecdsaSign(m_operationalKey, tbsData);
-    logInfo << "CASE: TBS3 signature verified:" << Crypto::ecdsaVerify(m_operationalPubKey, tbsData, signature);
-
-    // build TBE3: { NOC, signature }
-    MatterTLV::Encoder tbe3Encoder;
-    tbe3Encoder.openStructure();
-    tbe3Encoder.encodeByteString(1, m_nocTLV);    // our NOC
-    tbe3Encoder.encodeByteString(3, signature);    // signature
-    tbe3Encoder.closeContainer();
-
-    // encrypt TBE3
-    QByteArray sigma3Nonce("NCASE_Sigma3N", 13);
-    QByteArray encrypted3 = Crypto::aesCcmEncrypt(s3k, sigma3Nonce, QByteArray(), tbe3Encoder.data(), 16);
-
-    // build Sigma3 TLV
-    MatterTLV::Encoder sigma3;
     sigma3.openStructure();
-    sigma3.encodeByteString(1, encrypted3);
+    sigma3.encodeByteString(1, Crypto::encrypt(key, nonce, QByteArray(), tbe.data()));
     sigma3.closeContainer();
 
-    QByteArray sigma3Bytes = sigma3.data();
-
-    // update transcript with Sigma3
-    m_sigma1Bytes.append(sigma3Bytes);
-
-    // derive session keys: HKDF(sharedSecret, salt=IPK||transcriptHash(all), info="SessionKeys", 48)
-    QByteArray seKeysSalt;
-    seKeysSalt.append(m_ipk);
-    seKeysSalt.append(transcriptHash()); // hash of Sigma1 + Sigma2 + Sigma3
-    QByteArray sessionKeys = Crypto::hkdfSha256(m_sharedSecret, seKeysSalt, QByteArray("SessionKeys"), 48);
-
-    m_encryptKey = sessionKeys.left(16);
-    m_decryptKey = sessionKeys.mid(16, 16);
-    m_attestationChallenge = sessionKeys.mid(32, 16);
-
-    // self-test: decrypt our own TBE3 to verify
-    QByteArray selfTest = Crypto::aesCcmDecrypt(s3k, sigma3Nonce, QByteArray(), encrypted3, 16);
-    logInfo << "CASE: S3K:" << s3k.toHex() << "TBE3 self-test:" << (selfTest.isEmpty() ? "FAIL" : "OK") << "TBE3 size:" << tbe3Encoder.data().length();
-
+    m_transcript.append(sigma3.data());
+    setSessionKeys(Crypto::hkdf(m_sharedSecret, QByteArray(m_ipk).append(Crypto::sha256(m_transcript)), "SessionKeys", 48));
     m_state = State::WaitingStatusReport;
 
-    logInfo << "CASE: sending Sigma3";
-    emit sendSigma3(sigma3Bytes);
+    logInfo << "CASE session" << m_localSessionId << "Sigma3 sent";
+    emit sendSigma3(sigma3.data());
 }
 
-void CASESession::handleSigma2Resume(const QByteArray &payload)
+void CASESession::parseSigma2Resume(const QByteArray &payload)
 {
+    MatterTLV::Element root = MatterTLV::Decoder(payload).decode();
+    QByteArray resumptionId, mic;
+
     if (m_state != State::WaitingSigma2)
     {
         emit failed("Unexpected Sigma2_Resume");
         return;
     }
 
-    if (m_resumptionSharedSecret.size() != 32)
+    if (m_resumptionSecret.length() != 32)
     {
         emit failed("Sigma2_Resume received without prior resumption secret");
         return;
     }
 
-    MatterTLV::Decoder decoder(payload);
-    MatterTLV::Element root = decoder.decode();
-
-    QByteArray newResumptionID, sigma2ResumeMIC;
-
-    for (const MatterTLV::Element &el : root.children)
+    for (int i = 0; i < root.children.count(); i++)
     {
-        switch (el.tag)
+        const MatterTLV::Element &item = root.children.at(i);
+
+        switch (item.tag)
         {
-            case 1: newResumptionID = el.value.toByteArray(); break;
-            case 2: sigma2ResumeMIC = el.value.toByteArray(); break;
-            case 3: m_peerSessionId = el.value.toUInt(); break;
-            case 4:
-                // SessionParameters (Matter §4.11.2.2.1)
-                for (const MatterTLV::Element &p : el.children)
-                {
-                    switch (p.tag)
-                    {
-                        case 1: m_idleInterval = p.value.toUInt(); break;
-                        case 2: m_activeInterval = p.value.toUInt(); break;
-                        case 3: m_activeThreshold = static_cast <quint16> (p.value.toUInt()); break;
-                    }
-                }
-                break;
+            case 1: resumptionId = item.value.toByteArray(); break;
+            case 2: mic = item.value.toByteArray(); break;
+            case 3: m_peerSessionId = static_cast <quint16> (item.value.toUInt()); break;
+            case 4: parseSessionParameters(item); break;
         }
     }
 
-    if (newResumptionID.size() != 16 || sigma2ResumeMIC.size() != 16)
+    if (resumptionId.length() != 16 || mic.length() != 16)
     {
-        m_state = State::Failed;
-        emit failed("Invalid Sigma2_Resume data");
+        fail("Invalid Sigma2_Resume data");
         return;
     }
 
-    logInfo << "CASE: Sigma2_Resume received, peer session:" << m_peerSessionId
-            << "MRP idle/active/threshold:" << m_idleInterval << "/" << m_activeInterval << "/" << m_activeThreshold << "ms";
+    logInfo << "CASE session" << m_localSessionId << "Sigma2_Resume received, peer session" << m_peerSessionId << "idle interval" << m_idleInterval << "active interval" << m_activeInterval << "active threshold" << m_activeThreshold;
 
-    // verify Sigma2ResumeMIC: per CHIP CASESession.cpp ValidateSigmaResumeMIC, salt uses the NEW resumptionID from Sigma2_Resume
-    QByteArray micSalt = m_initiatorRandom;
-    micSalt.append(newResumptionID);
-    QByteArray s2rk = Crypto::hkdfSha256(m_resumptionSharedSecret, micSalt, QByteArray("Sigma2_Resume"), 16);
-    QByteArray nonce("NCASE_SigmaS2", 13);
-    QByteArray expectedMIC = Crypto::aesCcmEncrypt(s2rk, nonce, QByteArray(), QByteArray(), 16);
-
-    if (expectedMIC != sigma2ResumeMIC)
+    // MIC salt uses new resumption id, session keys salt uses previous one (same as connectedhomeip)
+    if (Crypto::encrypt(Crypto::hkdf(m_resumptionSecret, QByteArray(m_initiatorRandom).append(resumptionId), "Sigma2_Resume", 16), QByteArray("NCASE_SigmaS2", 13), QByteArray(), QByteArray()) != mic)
     {
-        m_state = State::Failed;
-        emit failed("Sigma2_Resume MIC verification failed");
+        fail("Sigma2_Resume MIC verification failed");
         return;
     }
 
-    // derive resumed session keys: per CHIP DeriveSecureSession (kFinishedViaResume), salt = initiatorRandom||OLD resumptionID, info = "SessionResumptionKeys"
-    QByteArray keysSalt = m_initiatorRandom;
-    keysSalt.append(m_resumptionID);
-    QByteArray sessionKeys = Crypto::hkdfSha256(m_resumptionSharedSecret, keysSalt, QByteArray("SessionResumptionKeys"), 48);
+    setSessionKeys(Crypto::hkdf(m_resumptionSecret, QByteArray(m_initiatorRandom).append(m_resumptionId), "SessionResumptionKeys", 48));
 
-    m_encryptKey = sessionKeys.left(16);
-    m_decryptKey = sessionKeys.mid(16, 16);
-    m_attestationChallenge = sessionKeys.mid(32, 16);
-
-    // record new resumptionID for next reconnect; reuse the same sharedSecret
-    m_newResumptionID = newResumptionID;
-    m_sharedSecret = m_resumptionSharedSecret;
+    m_newResumptionId = resumptionId;
+    m_sharedSecret = m_resumptionSecret;
     m_resumed = true;
-
     m_state = State::Established;
     m_timer->stop();
-    logInfo << "CASE: session resumed, local:" << m_localSessionId << "peer:" << m_peerSessionId;
+
+    logInfo << "CASE session" << m_localSessionId << "resumed with peer session" << m_peerSessionId;
     emit established(m_localSessionId, m_peerSessionId);
 }
 
-void CASESession::handleStatusReport(const QByteArray &payload)
+void CASESession::parseStatusReport(const QByteArray &payload)
 {
-    if (payload.length() < 8)
+    statusReportStruct report;
+
+    if (static_cast <size_t> (payload.length()) < sizeof(report))
     {
-        m_state = State::Failed;
-        emit failed("Invalid StatusReport");
+        fail("Invalid StatusReport");
         return;
     }
 
-    quint16 generalCode = qFromLittleEndian <quint16> (payload.constData());
-    quint32 protocolId = qFromLittleEndian <quint32> (payload.constData() + 2);
-    quint16 protocolCode = qFromLittleEndian <quint16> (payload.constData() + 6);
+    memcpy(&report, payload.constData(), sizeof(report));
 
-    logInfo << "CASE: StatusReport general:" << generalCode << "protocolId:" << protocolId << "protocolCode:" << protocolCode;
+    report.generalCode = qFromLittleEndian(report.generalCode);
+    report.protocolId = qFromLittleEndian(report.protocolId);
+    report.protocolCode = qFromLittleEndian(report.protocolCode);
 
-    if (generalCode == 0 && protocolCode == 0 && m_state == State::WaitingStatusReport)
+    logInfo << "CASE session" << m_localSessionId << "StatusReport received, general code" << report.generalCode << "protocol" << report.protocolId << "code" << report.protocolCode;
+
+    if (report.generalCode || report.protocolCode || m_state != State::WaitingStatusReport)
     {
-        m_state = State::Established;
-        m_timer->stop();
-        logInfo << "CASE: session established, local:" << m_localSessionId << "peer:" << m_peerSessionId;
-        emit established(m_localSessionId, m_peerSessionId);
+        logWarning << "CASE session" << m_localSessionId << "failed with general code" << report.generalCode << "and protocol code" << report.protocolCode;
+        fail(QString("CASE StatusReport error: general=%1 protocol=%2").arg(report.generalCode).arg(report.protocolCode));
+        return;
     }
-    else
+
+    m_state = State::Established;
+    m_timer->stop();
+
+    logInfo << "CASE session" << m_localSessionId << "established with peer session" << m_peerSessionId;
+    emit established(m_localSessionId, m_peerSessionId);
+}
+
+QByteArray CASESession::destinationId(void)
+{
+    quint64 fabricId = qToLittleEndian(m_fabricId), nodeId = qToLittleEndian(m_peerNodeId);
+    return Crypto::hmac(m_ipk, QByteArray(m_initiatorRandom).append(m_fabricPublicKey).append(reinterpret_cast <char*> (&fabricId), sizeof(fabricId)).append(reinterpret_cast <char*> (&nodeId), sizeof(nodeId)));
+}
+
+void CASESession::parseSessionParameters(const MatterTLV::Element &element)
+{
+    for (int i = 0; i < element.children.count(); i++)
     {
-        m_state = State::Failed;
-        logWarning << "CASE: failed with general code:" << generalCode << "protocol code:" << protocolCode;
-        emit failed(QString("CASE StatusReport error: general=%1 protocol=%2").arg(generalCode).arg(protocolCode));
+        const MatterTLV::Element &item = element.children.at(i);
+
+        switch (item.tag)
+        {
+            case 1: m_idleInterval = item.value.toUInt(); break;
+            case 2: m_activeInterval = item.value.toUInt(); break;
+            case 3: m_activeThreshold = static_cast <quint16> (item.value.toUInt()); break;
+        }
     }
+}
+
+void CASESession::setSessionKeys(const QByteArray &data)
+{
+    m_encryptKey = data.left(16);
+    m_decryptKey = data.mid(16, 16);
+    m_attestationChallenge = data.mid(32, 16);
+}
+
+void CASESession::fail(const QString &reason)
+{
+    m_state = State::Failed;
+    emit failed(reason);
 }
 
 void CASESession::timeout(void)
 {
-    if (m_state != State::Established)
-    {
-        m_state = State::Failed;
-        logWarning << "CASE: session timeout";
-        emit failed("CASE timeout");
-    }
+    if (m_state == State::Established)
+        return;
+
+    logWarning << "CASE session" << m_localSessionId << "timed out";
+    fail("CASE timeout");
 }

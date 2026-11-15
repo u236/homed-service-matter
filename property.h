@@ -1,8 +1,6 @@
 #ifndef PROPERTY_H
 #define PROPERTY_H
 
-#include <QSharedPointer>
-#include <QVariant>
 #include "clusters.h"
 #include "endpoint.h"
 #include "tlv.h"
@@ -15,18 +13,20 @@ class PropertyObject : public AbstractMetaObject
 
 public:
 
-    PropertyObject(const QString &name, quint32 clusterId) : AbstractMetaObject(name), m_clusterId(clusterId), m_multiple(false) {}
+    PropertyObject(const QString &name, quint32 clusterId) :
+        AbstractMetaObject(name), m_clusterId(clusterId), m_multiple(false) {}
 
     virtual ~PropertyObject(void) {}
-    virtual void parseAttribute(quint32 attributeId, const MatterTLV::Element &data) { Q_UNUSED(attributeId); Q_UNUSED(data); }
-    virtual void parseEvent(quint32 eventId, const MatterTLV::Element &data) { Q_UNUSED(eventId); Q_UNUSED(data); }
+    virtual void parseAttribute(quint32, const MatterTLV::Element &) {}
+    virtual void parseEvent(quint32, const MatterTLV::Element &) {}
+
+    inline quint32 clusterId(void) { return m_clusterId; }
+
+    inline bool multiple(void) { return m_multiple; }
+    inline void setMultiple(bool value) { m_multiple = value; }
 
     inline QVariant value(void) { return m_value; }
     inline void clearValue(void) { m_value.clear(); }
-
-    inline quint32 clusterId(void) { return m_clusterId; }
-    inline bool multiple(void) { return m_multiple; }
-    inline void setMultiple(bool value) { m_multiple = value; }
 
 protected:
 
@@ -63,15 +63,13 @@ namespace Properties
 
     public:
 
-        ColorHS(void) : PropertyObject("color", Clusters::ColorControl::Id), m_haveHue(false), m_haveSat(false), m_hue(0), m_sat(0) {}
+        ColorHS(void) : PropertyObject("color", Clusters::ColorControl::Id), m_hue(0), m_saturation(0), m_hueReceived(false), m_saturationReceived(false) {}
         void parseAttribute(quint32 attributeId, const MatterTLV::Element &data) override;
 
     private:
 
-        // partial HS state stays inside the property so the endpoint status map doesn't carry colorH/colorS scratch
-        // keys; both halves arrive in the same ReportData but as separate AttributeReports
-        bool m_haveHue, m_haveSat;
-        quint8 m_hue, m_sat;
+        quint8 m_hue, m_saturation;
+        bool m_hueReceived, m_saturationReceived;
 
     };
 
@@ -175,8 +173,6 @@ namespace Properties
 
     };
 
-    // UNTESTED: written from Matter spec §5.2 (DoorLock cluster), no real lock to verify the LockState enum
-    // mapping. spec values: 0=NotFullyLocked, 1=Locked, 2=Unlocked, 3=Unlatched
     class Lock : public PropertyObject
     {
 
@@ -187,8 +183,6 @@ namespace Properties
 
     };
 
-    // UNTESTED: Matter spec §5.3 WindowCovering reports CurrentPositionLiftPercent100ths (uint16, 0..10000
-    // representing 0.00..100.00%); we expose 0..100 to consumers. no real cover on hand to verify
     class CoverPosition : public PropertyObject
     {
 
@@ -199,9 +193,6 @@ namespace Properties
 
     };
 
-    // BooleanState (Matter §1.7) is the generic binary-state cluster reused by multiple device types. semantics
-    // come from the endpoint's DeviceTypeList: water leak detector reports true=leak, contact sensor reports
-    // true=closed. Contact inverts so that "true" externally consistently means "abnormal/active/open"
     class WaterLeak : public PropertyObject
     {
 

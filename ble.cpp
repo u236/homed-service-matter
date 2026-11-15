@@ -5,87 +5,65 @@
 #include "ble.h"
 #include "logger.h"
 
-BLE::BLE(QObject *parent) : QObject(parent), m_bus(QDBusConnection::systemBus()), m_available(false), m_scanning(false), m_connected(false), m_scanTimer(new QTimer(this))
+static QMap <QString, QVariant> dbusProperties(const QDBusArgument &argument)
 {
+    QMap <QString, QVariant> map;
 
-    m_scanTimer->setSingleShot(true);
-    connect(m_scanTimer, &QTimer::timeout, this, &BLE::scanTimeout);
+    argument.beginMap();
+
+    while (!argument.atEnd())
+    {
+        QString key;
+        QVariant value;
+
+        argument.beginMapEntry();
+        argument >> key >> value;
+        argument.endMapEntry();
+
+        map.insert(key, value);
+    }
+
+    argument.endMap();
+    return map;
+}
+
+static QMap <QString, QMap <QString, QVariant>> dbusInterfaces(const QDBusArgument &argument)
+{
+    QMap <QString, QMap <QString, QVariant>> map;
+
+    argument.beginMap();
+
+    while (!argument.atEnd())
+    {
+        QString name;
+
+        argument.beginMapEntry();
+        argument >> name;
+        map.insert(name, dbusProperties(argument.asVariant().value <QDBusArgument> ()));
+        argument.endMapEntry();
+    }
+
+    argument.endMap();
+    return map;
+}
+
+BLE::BLE(QObject *parent) : QObject(parent), m_timer(new QTimer(this)), m_bus(QDBusConnection::systemBus()), m_available(false), m_scanning(false), m_connected(false)
+{
+    connect(m_timer, &QTimer::timeout, this, &BLE::scanTimeout);
+    m_timer->setSingleShot(true);
 
     findAdapter();
 
     if (!m_available)
     {
-        logInfo << "BLE not available (no BlueZ adapter found)";
+        logInfo << "BLE not available, no BlueZ adapter found";
         return;
     }
 
-    // listen for new devices and property changes
     m_bus.connect("org.bluez", "/", "org.freedesktop.DBus.ObjectManager", "InterfacesAdded", this, SLOT(interfacesAdded(QDBusMessage)));
     m_bus.connect("org.bluez", QString(), "org.freedesktop.DBus.Properties", "PropertiesChanged", this, SLOT(propertiesChanged(QString,QMap<QString,QVariant>,QStringList)));
 
-    logInfo << "BLE available, adapter:" << m_adapterPath;
-}
-
-void BLE::findAdapter(void)
-{
-    QDBusMessage reply = m_bus.call(QDBusMessage::createMethodCall("org.bluez", "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects"));
-
-    if (reply.type() != QDBusMessage::ReplyMessage || reply.arguments().isEmpty())
-        return;
-
-    const QDBusArgument &arg = reply.arguments().at(0).value <QDBusArgument> ();
-    arg.beginMap();
-
-    while (!arg.atEnd())
-    {
-        QDBusObjectPath path;
-        arg.beginMapEntry();
-        arg >> path;
-
-        arg.beginMap(); // a{sa{sv}} — interfaces
-
-        while (!arg.atEnd())
-        {
-            QString interface;
-            arg.beginMapEntry();
-            arg >> interface;
-
-            arg.beginMap(); // a{sv} — properties
-            while (!arg.atEnd()) { arg.beginMapEntry(); QString k; QVariant v; arg >> k >> v; arg.endMapEntry(); }
-            arg.endMap();
-
-            arg.endMapEntry();
-
-            if (interface == "org.bluez.Adapter1")
-            {
-                m_adapterPath = path.path();
-                m_available = true;
-            }
-        }
-
-        arg.endMap();
-        arg.endMapEntry();
-    }
-
-    arg.endMap();
-}
-
-void BLE::parseServiceData(const QByteArray &data, BLEDevice &device)
-{
-    if (data.size() < 8)
-        return;
-
-    // Matter BLE advertisement service data format:
-    // byte 0: version/flags
-    // byte 1-2: discriminator (little-endian)
-    // byte 3-4: vendor ID (little-endian)
-    // byte 5-6: product ID (little-endian)
-    quint8 flags = static_cast <quint8> (data.at(0));
-    Q_UNUSED(flags)
-
-    device.discriminator = qFromLittleEndian <quint16> (reinterpret_cast <const uchar*> (data.constData() + 1));
-    device.vendorId = qFromLittleEndian <quint16> (reinterpret_cast <const uchar*> (data.constData() + 3));
-    device.productId = qFromLittleEndian <quint16> (reinterpret_cast <const uchar*> (data.constData() + 5));
+    logInfo << "BLE adapter" << m_adapterPath << "available";
 }
 
 void BLE::scan(void)
@@ -93,14 +71,13 @@ void BLE::scan(void)
     if (!m_available || m_scanning)
         return;
 
-    m_discovered.clear();
-
     QDBusInterface adapter("org.bluez", m_adapterPath, "org.bluez.Adapter1", m_bus);
-    adapter.call("SetDiscoveryFilter", QVariantMap {{"Transport", QString("le")}});
+
+    adapter.call("SetDiscoveryFilter", QMap <QString, QVariant> {{"Transport", QString("le")}});
     adapter.call("StartDiscovery");
 
     m_scanning = true;
-    m_scanTimer->start(30000);
+    m_timer->start(BLE_SCAN_TIMEOUT);
 
     logInfo << "BLE scanning for Matter devices...";
 }
@@ -111,10 +88,11 @@ void BLE::stopScan(void)
         return;
 
     QDBusInterface adapter("org.bluez", m_adapterPath, "org.bluez.Adapter1", m_bus);
+
     adapter.call("StopDiscovery");
 
     m_scanning = false;
-    m_scanTimer->stop();
+    m_timer->stop();
 }
 
 void BLE::connectDevice(const QString &path)
@@ -123,11 +101,9 @@ void BLE::connectDevice(const QString &path)
     m_devicePath = path;
 
     QDBusInterface device("org.bluez", path, "org.bluez.Device1", m_bus);
+
     device.call("Connect");
-
-    logInfo << "BLE connecting to" << path;
-
-    // characteristics will be discovered after connection via PropertiesChanged
+    logInfo << "BLE connecting to" << path << "...";
 }
 
 void BLE::disconnectDevice(void)
@@ -135,16 +111,13 @@ void BLE::disconnectDevice(void)
     if (m_devicePath.isEmpty())
         return;
 
-    QDBusInterface device("org.bluez", m_devicePath, "org.bluez.Device1", m_bus);
+    QDBusInterface device("org.bluez", m_devicePath, "org.bluez.Device1", m_bus), adapter("org.bluez", m_adapterPath, "org.bluez.Adapter1", m_bus);
+
     device.call("Disconnect");
 
     // remove device from BlueZ cache to prevent stale GATT state
-    QDBusInterface adapter("org.bluez", m_adapterPath, "org.bluez.Adapter1", m_bus);
     adapter.call("RemoveDevice", QVariant::fromValue(QDBusObjectPath(m_devicePath)));
-
-    m_devicePath.clear();
-    m_c1Path.clear();
-    m_c2Path.clear();
+    clearDevice();
 }
 
 void BLE::write(const QByteArray &data)
@@ -152,16 +125,17 @@ void BLE::write(const QByteArray &data)
     if (m_c1Path.isEmpty())
         return;
 
-    logInfo << "BLE write" << data.size() << "bytes to C1:" << data.toHex();
+    QDBusInterface characteristic("org.bluez", m_c1Path, "org.bluez.GattCharacteristic1", m_bus);
+    QDBusMessage reply;
 
-    QDBusInterface c1("org.bluez", m_c1Path, "org.bluez.GattCharacteristic1", m_bus);
-    QDBusMessage reply = c1.call("WriteValue", QVariant::fromValue(data), QVariantMap {{"type", "request"}});
+    logInfo << "BLE C1 write:" << data.toHex(':');
+    reply = characteristic.call("WriteValue", QVariant::fromValue(data), QMap <QString, QVariant> {{"type", "request"}});
 
-    if (reply.type() == QDBusMessage::ErrorMessage)
-    {
-        logWarning << "BLE write error:" << reply.errorMessage();
-        disconnectDevice();
-    }
+    if (reply.type() != QDBusMessage::ErrorMessage)
+        return;
+
+    logWarning << "BLE C1 write failed:" << reply.errorMessage();
+    disconnectDevice();
 }
 
 void BLE::subscribe(void)
@@ -169,192 +143,178 @@ void BLE::subscribe(void)
     if (m_c2Path.isEmpty())
         return;
 
-    QDBusInterface c2("org.bluez", m_c2Path, "org.bluez.GattCharacteristic1", m_bus);
-    QDBusMessage reply = c2.call("StartNotify");
+    QDBusInterface characteristic("org.bluez", m_c2Path, "org.bluez.GattCharacteristic1", m_bus);
+    QDBusMessage reply = characteristic.call("StartNotify");
 
     if (reply.type() == QDBusMessage::ErrorMessage)
-        logWarning << "BLE StartNotify error:" << reply.errorMessage();
-    else
-        logInfo << "BLE C2 notifications started";
+    {
+        logWarning << "BLE C2 notifications start failed:" << reply.errorMessage();
+        return;
+    }
+
+    logInfo << "BLE C2 notifications started";
 }
 
-void BLE::discoverCharacteristics(void)
+void BLE::findAdapter(void)
 {
-    if (m_connected || m_devicePath.isEmpty())
-        return;
-
     QDBusMessage reply = m_bus.call(QDBusMessage::createMethodCall("org.bluez", "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects"));
 
     if (reply.type() != QDBusMessage::ReplyMessage || reply.arguments().isEmpty())
         return;
 
-    const QDBusArgument &arg = reply.arguments().at(0).value <QDBusArgument> ();
-    arg.beginMap();
+    const QDBusArgument &argument = reply.arguments().at(0).value <QDBusArgument> ();
 
-    while (!arg.atEnd())
+    argument.beginMap();
+
+    while (!argument.atEnd())
     {
         QDBusObjectPath path;
-        arg.beginMapEntry();
-        arg >> path;
 
-        const QDBusArgument &ifaces = arg.asVariant().value <QDBusArgument> ();
-        ifaces.beginMap();
+        argument.beginMapEntry();
+        argument >> path;
 
-        while (!ifaces.atEnd())
+        if (dbusInterfaces(argument.asVariant().value <QDBusArgument> ()).contains("org.bluez.Adapter1"))
         {
-            QString interface;
-            QMap <QString, QVariant> props;
-
-            ifaces.beginMapEntry();
-            ifaces >> interface;
-
-            const QDBusArgument &propsArg = ifaces.asVariant().value <QDBusArgument> ();
-            propsArg.beginMap();
-
-            while (!propsArg.atEnd())
-            {
-                QString key;
-                QVariant value;
-                propsArg.beginMapEntry();
-                propsArg >> key >> value;
-                props.insert(key, value);
-                propsArg.endMapEntry();
-            }
-
-            propsArg.endMap();
-            ifaces.endMapEntry();
-
-            if (interface == "org.bluez.GattCharacteristic1" && path.path().startsWith(m_devicePath))
-            {
-                QString uuid = props.value("UUID").toString();
-
-                if (uuid == MATTER_BLE_C1_UUID)
-                {
-                    m_c1Path = path.path();
-                    logInfo << "BLE C1 characteristic found:" << m_c1Path;
-                }
-                else if (uuid == MATTER_BLE_C2_UUID)
-                {
-                    m_c2Path = path.path();
-                    logInfo << "BLE C2 characteristic found:" << m_c2Path;
-                }
-            }
+            m_adapterPath = path.path();
+            m_available = true;
         }
 
-        ifaces.endMap();
-        arg.endMapEntry();
+        argument.endMapEntry();
     }
 
-    arg.endMap();
+    argument.endMap();
+}
 
-    if (!m_c1Path.isEmpty() && !m_c2Path.isEmpty() && !m_connected)
+void BLE::findCharacteristics(void)
+{
+    QDBusMessage reply;
+
+    if (m_connected || m_devicePath.isEmpty())
+        return;
+
+    reply = m_bus.call(QDBusMessage::createMethodCall("org.bluez", "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects"));
+
+    if (reply.type() != QDBusMessage::ReplyMessage || reply.arguments().isEmpty())
+        return;
+
+    const QDBusArgument &argument = reply.arguments().at(0).value <QDBusArgument> ();
+
+    argument.beginMap();
+
+    while (!argument.atEnd())
     {
-        m_connected = true;
-        emit connected();
+        QDBusObjectPath path;
+        QMap <QString, QMap <QString, QVariant>> interfaces;
+        QString uuid;
+
+        argument.beginMapEntry();
+        argument >> path;
+        interfaces = dbusInterfaces(argument.asVariant().value <QDBusArgument> ());
+        argument.endMapEntry();
+
+        if (!interfaces.contains("org.bluez.GattCharacteristic1") || !path.path().startsWith(m_devicePath))
+            continue;
+
+        uuid = interfaces.value("org.bluez.GattCharacteristic1").value("UUID").toString();
+
+        if (uuid == BLE_C1_UUID)
+        {
+            m_c1Path = path.path();
+            logInfo << "BLE C1 characteristic" << m_c1Path << "found";
+        }
+        else if (uuid == BLE_C2_UUID)
+        {
+            m_c2Path = path.path();
+            logInfo << "BLE C2 characteristic" << m_c2Path << "found";
+        }
     }
+
+    argument.endMap();
+
+    if (m_c1Path.isEmpty() || m_c2Path.isEmpty())
+        return;
+
+    m_connected = true;
+    emit connected();
+}
+
+void BLE::clearDevice(void)
+{
+    m_devicePath.clear();
+    m_c1Path.clear();
+    m_c2Path.clear();
 }
 
 void BLE::interfacesAdded(const QDBusMessage &message)
 {
-    if (message.arguments().size() < 2)
+    QMap <QString, QMap <QString, QVariant>> interfaces;
+
+    if (message.arguments().count() < 2)
         return;
 
-    QString path = message.arguments().at(0).value <QDBusObjectPath> ().path();
-    const QDBusArgument &arg = message.arguments().at(1).value <QDBusArgument> ();
+    interfaces = dbusInterfaces(message.arguments().at(1).value <QDBusArgument> ());
 
-    QMap <QString, QMap <QString, QVariant>> interfaces;
-    arg.beginMap();
-
-    while (!arg.atEnd())
+    if (m_scanning && interfaces.contains("org.bluez.Device1"))
     {
-        QString interface;
-        QMap <QString, QVariant> props;
+        QMap <QString, QVariant> properties = interfaces.value("org.bluez.Device1"), serviceData = qdbus_cast <QMap <QString, QVariant>> (properties.value("ServiceData"));
+        QByteArray data = serviceData.value(BLE_SERVICE_UUID).toByteArray();
+        bleServiceDataStruct service;
+        BLEDevice device;
 
-        arg.beginMapEntry();
-        arg >> interface;
-
-        const QDBusArgument &propsArg = arg.asVariant().value <QDBusArgument> ();
-        propsArg.beginMap();
-
-        while (!propsArg.atEnd())
-        {
-            QString key;
-            QVariant value;
-            propsArg.beginMapEntry();
-            propsArg >> key >> value;
-            props.insert(key, value);
-            propsArg.endMapEntry();
-        }
-
-        propsArg.endMap();
-        arg.endMapEntry();
-
-        interfaces.insert(interface, props);
-    }
-
-    arg.endMap();
-
-    if (interfaces.contains("org.bluez.Device1") && m_scanning)
-    {
-        QMap <QString, QVariant> props = interfaces.value("org.bluez.Device1");
-        QString address = props.value("Address").toString();
-        QString name = props.value("Name").toString();
-
-        QMap <QString, QVariant> serviceData = qdbus_cast <QMap <QString, QVariant>> (props.value("ServiceData"));
-
-        if (!serviceData.contains(MATTER_BLE_SERVICE_UUID))
+        if (!serviceData.contains(BLE_SERVICE_UUID))
             return;
 
-        BLEDevice device;
-        device.path = path;
-        device.address = props.value("Address").toString();
-        device.name = props.value("Name").toString();
+        device.path = message.arguments().at(0).value <QDBusObjectPath> ().path();
+        device.address = properties.value("Address").toString();
+        device.name = properties.value("Name").toString();
 
-        parseServiceData(serviceData.value(MATTER_BLE_SERVICE_UUID).toByteArray(), device);
+        if (static_cast <size_t> (data.length()) >= sizeof(service))
+        {
+            memcpy(&service, data.constData(), sizeof(service));
+            device.discriminator = qFromLittleEndian(service.discriminator);
+            device.vendorId = qFromLittleEndian(service.vendorId);
+            device.productId = qFromLittleEndian(service.productId);
+        }
 
-        m_discovered.insert(device.address, device);
-
-        logInfo << "BLE Matter device found:" << device.address << "discriminator:" << device.discriminator << "VID:" << QString::asprintf("0x%04X", device.vendorId) << "PID:" << QString::asprintf("0x%04X", device.productId) << "Name:" << (device.name.isEmpty() ? "[empty]" : device.name);
+        logInfo << "BLE Matter device" << device.address << "found, discriminator" << device.discriminator << "vendor id" << QString::asprintf("0x%04x", device.vendorId) << "product id" << QString::asprintf("0x%04x", device.productId) << "name" << (device.name.isEmpty() ? "(empty)" : device.name);
         emit deviceFound(device);
     }
 
-    if (interfaces.contains("org.bluez.GattCharacteristic1") && !m_devicePath.isEmpty())
-        discoverCharacteristics();
+    if (m_devicePath.isEmpty() || !interfaces.contains("org.bluez.GattCharacteristic1"))
+        return;
+
+    findCharacteristics();
 }
 
-void BLE::propertiesChanged(const QString &interface, const QMap <QString, QVariant> &changed, const QStringList &invalidated)
+void BLE::propertiesChanged(const QString &interface, const QMap <QString, QVariant> &changed, const QStringList &)
 {
-    Q_UNUSED(invalidated)
-
-    if (interface == "org.bluez.Device1" && changed.contains("ServicesResolved") && changed.value("ServicesResolved").toBool())
-        discoverCharacteristics();
-
-    if (interface == "org.bluez.Device1" && changed.contains("Connected") && !changed.value("Connected").toBool())
+    if (interface == "org.bluez.Device1")
     {
-        m_devicePath.clear();
-        m_c1Path.clear();
-        m_c2Path.clear();
-        m_connected = false;
-        emit disconnected();
+        if (changed.value("ServicesResolved").toBool())
+            findCharacteristics();
+
+        if (changed.contains("Connected") && !changed.value("Connected").toBool())
+        {
+            clearDevice();
+            m_connected = false;
+            emit disconnected();
+        }
     }
 
     if (interface == "org.bluez.GattCharacteristic1" && changed.contains("Value"))
     {
-        QByteArray value;
-        QVariant variant = changed.value("Value");
+        QVariant value = changed.value("Value");
+        QByteArray data;
 
-        if (variant.canConvert <QDBusArgument> ())
-        {
-            const QDBusArgument arg = variant.value <QDBusArgument> ();
-            arg >> value;
-        }
+        if (value.canConvert <QDBusArgument> ())
+            value.value <QDBusArgument> () >> data;
         else
-        {
-            value = variant.toByteArray();
-        }
+            data = value.toByteArray();
 
-        if (!value.isEmpty())
-            emit dataReceived(value);
+        if (data.isEmpty())
+            return;
+
+        emit dataReceived(data);
     }
 }
 
@@ -364,168 +324,110 @@ void BLE::scanTimeout(void)
     logInfo << "BLE scan timeout";
 }
 
-// --- BTP ---
-
 void BTP::startHandshake(void)
 {
-    QByteArray packet;
+    btpHandshakeRequestStruct request;
 
-    // flags: handshake + management + beginning + end
-    packet.append(static_cast <char> (BTP_FLAG_HANDSHAKE | BTP_FLAG_MANAGEMENT | BTP_FLAG_BEGINNING | BTP_FLAG_END));
+    request.flags = BTP_FLAG_HANDSHAKE | BTP_FLAG_MANAGEMENT | BTP_FLAG_BEGINNING | BTP_FLAG_END;
+    request.opcode = BTP_HANDSHAKE_REQUEST;
+    request.versions = qToLittleEndian <quint32> (1 << (BTP_VERSION - 2));
+    request.mtu = 0; // use negotiated ATT MTU
+    request.window = BTP_DEFAULT_WINDOW;
 
-    // management opcode
-    packet.append(static_cast <char> (BTP_HANDSHAKE_REQUEST));
-
-    // supported versions bitmap (4 bytes LE, bit 2 = version 4)
-    quint32 versions = qToLittleEndian <quint32> (1 << (BTP_VERSION - 2));
-    packet.append(reinterpret_cast <const char*> (&versions), 4);
-
-    // client MTU (little-endian) — 0 = use negotiated ATT_MTU
-    quint16 mtu = 0;
-    packet.append(reinterpret_cast <const char*> (&mtu), 2);
-
-    // client window size
-    packet.append(static_cast <char> (BTP_DEFAULT_WINDOW));
-
-    logInfo << "BTP handshake request, MTU:" << BTP_DEFAULT_MTU << "window:" << BTP_DEFAULT_WINDOW;
-    emit writeData(packet);
+    logInfo << "BTP handshake request sent, MTU" << BTP_DEFAULT_MTU << "window" << BTP_DEFAULT_WINDOW;
+    emit writeData(QByteArray(reinterpret_cast <char*> (&request), sizeof(request)));
 }
 
-void BTP::handleData(const QByteArray &data)
+void BTP::parseData(const QByteArray &data)
 {
+    quint8 flags, sequence;
+    int offset = 1;
+
     if (data.isEmpty())
         return;
 
-    quint8 flags = static_cast <quint8> (data.at(0));
-    int offset = 1;
+    flags = static_cast <quint8> (data.at(0));
 
-    // handshake response: flags(1) + opcode(1) + version(1) + MTU(2) + windowSize(1) = 6 bytes
     if (flags & BTP_FLAG_HANDSHAKE)
     {
-        if (data.size() < 6)
+        btpHandshakeResponseStruct response;
+
+        if (static_cast <size_t> (data.length()) < sizeof(response))
             return;
 
-        quint8 version = static_cast <quint8> (data.at(2));
-        m_mtu = qFromLittleEndian <quint16> (reinterpret_cast <const uchar*> (data.constData() + 3));
-        m_windowSize = static_cast <quint8> (data.at(5));
-
-        logInfo << "BTP handshake response, version:" << version << "MTU:" << m_mtu << "window:" << m_windowSize;
+        memcpy(&response, data.constData(), sizeof(response));
 
         m_ready = true;
+        m_mtu = qFromLittleEndian(response.mtu);
+        m_window = response.window;
         m_txSequence = 0;
         m_rxSequence = 0;
-        m_lastAck = 0;
 
-        emit handshakeComplete();
+        logInfo << "BTP handshake response received, version" << response.version << "MTU" << m_mtu << "window" << m_window;
+        emit handshakeFinished();
         return;
     }
 
-    // ACK field
     if (flags & BTP_FLAG_ACK)
-    {
-        m_lastAck = static_cast <quint8> (data.at(offset));
         offset++;
-    }
 
-    // management-only packet (ACK only, no data)
-    if (flags & BTP_FLAG_MANAGEMENT)
+    if (flags & BTP_FLAG_MANAGEMENT || offset >= data.length())
         return;
 
-    // sequence number
-    if (offset >= data.size())
-        return;
+    sequence = static_cast <quint8> (data.at(offset++));
 
-    quint8 seq = static_cast <quint8> (data.at(offset));
-    offset++;
-
-    // beginning of new message
     if (flags & BTP_FLAG_BEGINNING)
     {
-        if (offset + 2 > data.size())
+        if (offset + 2 > data.length())
             return;
 
-        m_rxExpectedLength = qFromLittleEndian <quint16> (reinterpret_cast <const uchar*> (data.constData() + offset));
         offset += 2;
-
-        m_rxBuffer.clear();
+        m_buffer.clear();
     }
 
-    // append payload
-    m_rxBuffer.append(data.mid(offset));
-    m_rxSequence = seq;
+    m_buffer.append(data.mid(offset));
+    m_rxSequence = sequence;
 
-    // end of message — deliver (ACK piggybacked in next outgoing message)
-    if (flags & BTP_FLAG_END)
-    {
-        emit messageReceived(m_rxBuffer);
-        m_rxBuffer.clear();
-        m_rxExpectedLength = 0;
-    }
+    // acknowledgement is sent with next outgoing message
+    if (!(flags & BTP_FLAG_END))
+        return;
+
+    emit messageReceived(m_buffer);
+    m_buffer.clear();
 }
 
 void BTP::sendMessage(const QByteArray &message)
 {
+    int offset = 0;
+
     if (!m_ready)
         return;
 
-    sendSegments(message);
-}
-
-void BTP::sendSegments(const QByteArray &message)
-{
-    int offset = 0;
-    bool first = true;
-
-    while (offset < message.size())
+    while (offset < message.length())
     {
         QByteArray packet;
-        quint8 flags = 0;
-        int available = first ? (m_mtu - 3) : (m_mtu - 2); // first: flags+ack+seq, continuation: flags+seq
+        quint8 flags = offset ? 0 : BTP_FLAG_BEGINNING | BTP_FLAG_ACK;
+        int length = qMin(message.length() - offset, offset ? m_mtu - 2 : m_mtu - 5);
 
-        if (first)
-        {
-            flags |= BTP_FLAG_BEGINNING;
-            available -= 2; // message length field
-        }
-
-        int remaining = message.size() - offset;
-        int chunkSize = qMin(remaining, available);
-
-        if (offset + chunkSize >= message.size())
+        if (offset + length >= message.length())
             flags |= BTP_FLAG_END;
-
-        // add ACK only on first segment
-        if (first)
-            flags |= BTP_FLAG_ACK;
 
         packet.append(static_cast <char> (flags));
 
         if (flags & BTP_FLAG_ACK)
             packet.append(static_cast <char> (m_rxSequence));
 
-        // sequence number
         packet.append(static_cast <char> (m_txSequence++));
 
-        // message length (only for first segment)
-        if (first)
+        if (flags & BTP_FLAG_BEGINNING)
         {
-            quint16 len = qToLittleEndian <quint16> (message.size());
-            packet.append(reinterpret_cast <const char*> (&len), 2);
-            first = false;
+            quint16 value = qToLittleEndian <quint16> (message.length());
+            packet.append(reinterpret_cast <char*> (&value), sizeof(value));
         }
 
-        // payload
-        packet.append(message.mid(offset, chunkSize));
-        offset += chunkSize;
+        packet.append(message.mid(offset, length));
+        offset += length;
 
         emit writeData(packet);
     }
-}
-
-void BTP::sendAck(void)
-{
-    QByteArray packet;
-    packet.append(static_cast <char> (BTP_FLAG_ACK));
-    packet.append(static_cast <char> (m_rxSequence));
-    emit writeData(packet);
 }

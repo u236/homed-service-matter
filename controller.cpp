@@ -11,7 +11,7 @@ Controller::Controller(const QString &configFile) : HOMEd(SERVICE_VERSION, confi
     connect(m_deviceDataTimer, &QTimer::timeout, this, &Controller::updateDeviceData);
     connect(m_propertiesTimer, &QTimer::timeout, this, &Controller::updateProperties);
 
-    connect(m_matter, &Matter::updateAvailability, this, &Controller::updateAvailability);
+    connect(m_matter, &Matter::availabilityUpdated, this, &Controller::updateAvailability);
     connect(m_matter, &Matter::deviceEvent, this, &Controller::deviceEvent);
     connect(m_matter, &Matter::deviceShared, this, &Controller::deviceShared); // TODO: do we need this?
     connect(m_matter, &Matter::deviceUpdated, this, &Controller::deviceUpdated);
@@ -57,7 +57,7 @@ void Controller::mqttConnected(void)
     for (int i = 0; i < m_matter->devices()->count(); i++)
         updateAvailability(m_matter->devices()->at(i).data());
 
-    m_matter->devices()->store();
+    m_matter->devices()->storeDatabase();
     mqttPublishService();
 }
 
@@ -129,7 +129,6 @@ void Controller::updateAvailability(DeviceObject *device)
     logInfo << device << "is" << status;
 }
 
-
 void Controller::updateDeviceData(void)
 {
     for (int i = 0; i < m_matter->devices()->count(); i++)
@@ -167,7 +166,7 @@ void Controller::deviceUpdated(DeviceObject *device)
 {
     logInfo << device << "successfully updated";
     publishExposes(device);
-    m_matter->devices()->store(true);
+    m_matter->devices()->storeDatabase(true);
 }
 
 void Controller::endpointUpdated(DeviceObject *device, quint8 endpointId)

@@ -3,31 +3,55 @@
 #ifndef MDNS_H
 #define MDNS_H
 
-#include <QUdpSocket>
+#define MDNS_ADDRESS_IPV4               "224.0.0.251"
+#define MDNS_ADDRESS_IPV6               "ff02::fb"
+#define MDNS_PORT                       5353
+#define MDNS_BROWSE_INTERVAL            5000
+
+#define MDNS_FLAG_RESPONSE              0x8000
+#define MDNS_CLASS_MASK                 0x7FFF
+
+#define MATTER_COMMISSIONABLE_SERVICE   "_matterc._udp.local"
+#define MATTER_OPERATIONAL_SERVICE      "_matter._tcp.local"
+
+#include <QHostAddress>
 #include <QTimer>
+#include <QUdpSocket>
 
-/*
-    mDNS/DNS-SD for Matter device discovery — spec section 4.3
+#pragma pack(push, 1)
 
-    Matter devices advertise via mDNS:
-    - Commissionable: _matterc._udp.local (with discriminator, vendor/product)
-    - Commissioned:   _matter._tcp.local (operational discovery)
+struct dnsHeaderStruct
+{
+    quint16 id;
+    quint16 flags;
+    quint16 questions;
+    quint16 answers;
+    quint16 authority;
+    quint16 additional;
+};
 
-    DNS-SD TXT records for commissionable devices:
-    - D=<discriminator>     (12-bit long discriminator)
-    - VP=<vendor>+<product> (vendor and product ID)
-    - CM=<mode>             (commissioning mode: 0=not, 1=basic, 2=enhanced)
-    - DT=<device type>      (optional)
-    - DN=<device name>      (optional)
+struct dnsQuestionStruct
+{
+    quint16 type;
+    quint16 recordClass;
+};
 
-    mDNS uses multicast:
-    - IPv4: 224.0.0.251:5353
-    - IPv6: ff02::fb:5353
-*/
+struct dnsRecordStruct
+{
+    quint16 type;
+    quint16 recordClass;
+    quint32 ttl;
+    quint16 length;
+};
 
-#define MDNS_MULTICAST_ADDR4    "224.0.0.251"
-#define MDNS_MULTICAST_ADDR6    "ff02::fb"
-#define MDNS_PORT               5353
+struct dnsServiceStruct
+{
+    quint16 priority;
+    quint16 weight;
+    quint16 port;
+};
+
+#pragma pack(pop)
 
 namespace DNS
 {
@@ -48,33 +72,31 @@ namespace DNS
 
     struct Record
     {
-        QString name;
-        Type type;
-        quint16 rrclass;
-        quint32 ttl;
-        QByteArray rdata;
+        QString                 name;
+        Type                    type;
+        quint16                 recordClass;
+        quint32                 ttl;
+        QByteArray              data;
 
-        QString ptrName;
-        QString srvTarget;
-        quint16 srvPort;
-        quint16 srvPriority;
-        quint16 srvWeight;
-        QHostAddress address;
-        QMap <QString, QString> txt;
+        QString                 pointer;
+        QString                 target;
+        quint16                 port;
+        quint16                 priority;
+        quint16                 weight;
+        QHostAddress            address;
+        QMap <QString, QString> text;
 
-        Record(void) : type(Type::A), rrclass(0), ttl(0), srvPort(0), srvPriority(0), srvWeight(0) {}
+        Record(void) : type(Type::A), recordClass(0), ttl(0), port(0), priority(0), weight(0) {}
     };
 
     struct Message
     {
-        quint16 id;
-        quint16 flags;
-        QList <Record> questions;
-        QList <Record> answers;
-        QList <Record> authority;
-        QList <Record> additional;
-
-        bool isResponse(void) { return flags & 0x8000; }
+        quint16                 id;
+        quint16                 flags;
+        QList <Record>          questions;
+        QList <Record>          answers;
+        QList <Record>          authority;
+        QList <Record>          additional;
 
         Message(void) : id(0), flags(0) {}
     };
@@ -82,17 +104,16 @@ namespace DNS
 
 struct MatterService
 {
-    QString instanceName;
-    QString hostName;
+    QString      instanceName;
+    QString      hostName;
     QHostAddress address;
-    quint16 port;
-    quint16 discriminator;
-    quint16 vendorId;
-    quint16 productId;
-    quint8 commissioningMode;
-    QString deviceName;
-
-    bool operational;
+    quint16      port;
+    quint16      discriminator;
+    quint16      vendorId;
+    quint16      productId;
+    quint8       commissioningMode;
+    QString      deviceName;
+    bool         operational;
 
     MatterService(void) : port(0), discriminator(0), vendorId(0), productId(0), commissioningMode(0), operational(false) {}
 };
@@ -107,14 +128,12 @@ public:
 
     void browse(void);
     void stop(void);
-    void resolve(const QString &instanceName);
     void purgeOperational(const QHostAddress &address);
 
 private:
 
-    QUdpSocket *m_socket;
-    QUdpSocket *m_socket6;
-    QTimer *m_browseTimer;
+    QUdpSocket *m_socket4, *m_socket6;
+    QTimer *m_timer;
 
     QMap <QString, MatterService> m_services;
 
@@ -123,15 +142,14 @@ private:
 
     QByteArray encodeQuery(const QString &name, DNS::Type type);
     DNS::Message decodeMessage(const QByteArray &data);
-    void parseRecord(const QByteArray &data, quint32 &offset, DNS::Record &record, bool question = false);
 
-    void parseTxtRecord(const DNS::Record &record, MatterService &service);
-    void processMdnsResponse(const DNS::Message &message);
+    void parseRecord(const QByteArray &data, quint32 &offset, DNS::Record &record, bool question = false);
+    void parseText(const DNS::Record &record, MatterService &service);
+    void parseResponse(const DNS::Message &message);
 
 private slots:
 
     void readyRead(void);
-    void browseTimeout(void);
 
 signals:
 
